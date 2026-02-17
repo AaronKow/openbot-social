@@ -2,11 +2,11 @@
 OpenBot CrawHub Skill Plugin
 
 A professional CrawHub skill plugin that enables OpenClaw agents to connect
-to OpenBot Social World virtual environment. This plugin provides WebSocket
+to OpenBot Social World virtual environment. This plugin provides HTTP-based
 connection management, agent control, real-time communication, and event handling.
 
 Usage:
-    hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+    hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
     hub.register_callback("on_chat", lambda data: print(f"Chat: {data}"))
     hub.connect()
     hub.register("MyLobster")
@@ -15,7 +15,7 @@ Usage:
     hub.disconnect()
 
 Author: OpenBot Social Team
-Version: 1.0.0
+Version: 2.0.0
 License: MIT
 """
 
@@ -26,11 +26,13 @@ import logging
 import queue
 from typing import Callable, Dict, Any, Optional, List, Tuple
 from enum import Enum
-import websocket
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class ConnectionState(Enum):
-    """WebSocket connection states."""
+    """HTTP connection states."""
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     CONNECTED = "connected"
@@ -64,7 +66,7 @@ class OpenBotClawHub:
     
     This class provides a robust interface for OpenClaw agents to connect to
     OpenBot Social World, enabling real-time communication, movement control,
-    and event-driven interactions in a 3D virtual environment.
+    and event-driven interactions in a 3D virtual environment using HTTP requests.
     
     Features:
         - Automatic reconnection with exponential backoff
@@ -73,9 +75,11 @@ class OpenBotClawHub:
         - Comprehensive event system
         - Connection health monitoring
         - Configurable behavior
+        - HTTP connection pooling
+        - Efficient polling for updates
     
     Attributes:
-        url (str): WebSocket server URL
+        url (str): HTTP server URL
         agent_name (str): Agent's display name
         agent_id (Optional[str]): Unique agent identifier (set after registration)
         state (ConnectionState): Current connection state
@@ -84,7 +88,7 @@ class OpenBotClawHub:
         world_size (Dict[str, float]): World dimensions
     
     Example:
-        >>> hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+        >>> hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
         >>> hub.register_callback("on_connected", lambda: print("Connected!"))
         >>> hub.connect()
         >>> hub.register("MyLobster")
@@ -95,36 +99,39 @@ class OpenBotClawHub:
     
     def __init__(
         self,
-        url: str = "ws://localhost:3000",
+        url: str = "http://localhost:3000",
         agent_name: Optional[str] = None,
         auto_reconnect: bool = True,
         reconnect_max_delay: int = 60,
-        connection_timeout: int = 30,
+        connection_timeout: int = 10,
         enable_message_queue: bool = True,
-        log_level: str = "INFO"
+        log_level: str = "INFO",
+        polling_interval: float = 1.0
     ):
         """
         Initialize OpenBotClawHub skill plugin.
         
         Args:
-            url: WebSocket URL of OpenBot Social World server
+            url: HTTP URL of OpenBot Social World server
             agent_name: Name for the agent avatar (can be set later)
             auto_reconnect: Enable automatic reconnection on connection loss
             reconnect_max_delay: Maximum delay between reconnection attempts (seconds)
-            connection_timeout: Connection timeout in seconds
+            connection_timeout: HTTP request timeout in seconds
             enable_message_queue: Queue messages when disconnected
             log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+            polling_interval: Interval between polling requests in seconds (default: 1.0)
         
         Raises:
             ValueError: If URL is invalid
         """
         # Configuration
-        self.url = url
+        self.url = url.rstrip('/')  # Remove trailing slash
         self.agent_name = agent_name
         self.auto_reconnect = auto_reconnect
         self.reconnect_max_delay = reconnect_max_delay
         self.connection_timeout = connection_timeout
         self.enable_message_queue = enable_message_queue
+        self.polling_interval = polling_interval
         
         # Setup logging
         self.logger = logging.getLogger(f"OpenBotClawHub[{agent_name or 'Unnamed'}]")
@@ -144,9 +151,9 @@ class OpenBotClawHub:
         self.world_size = {"x": 100.0, "y": 100.0}
         self.registered_agents: Dict[str, Dict[str, Any]] = {}
         
-        # WebSocket
-        self.ws: Optional[websocket.WebSocketApp] = None
-        self._ws_thread: Optional[threading.Thread] = None
+        # HTTP Session with connection pooling
+        self.session: Optional[requests.Session] = None
+        self._polling_thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.RLock()
         
@@ -157,6 +164,11 @@ class OpenBotClawHub:
         self._reconnect_attempts = 0
         self._reconnect_delay = 1
         self._last_reconnect_time = 0
+        
+        # Polling state
+        self._last_poll_time = 0
+        self._poll_backoff = 1.0
+        self._last_world_state: Dict[str, Any] = {}
         
         # Callbacks
         self._callbacks: Dict[str, List[Callable]] = {
@@ -173,11 +185,42 @@ class OpenBotClawHub:
         
         self.logger.info(f"OpenBotClawHub initialized: {url}")
     
+    def _create_session(self) -> requests.Session:
+        """Create HTTP session with connection pooling and retry logic."""
+        session = requests.Session()
+        
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[408, 429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST", "PUT", "DELETE"]
+        )
+        
+        # Configure connection pooling
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,
+            pool_maxsize=20,
+            pool_block=False
+        )
+        
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        # Set default headers
+        session.headers.update({
+            'Content-Type': 'application/json',
+            'User-Agent': f'OpenBotClawHub/{agent_name or "Anonymous"}'
+        })
+        
+        return session
+    
     def connect(self) -> bool:
         """
         Connect to OpenBot Social World server.
         
-        Establishes WebSocket connection to the server. This method is non-blocking
+        Establishes HTTP connection to the server. This method is non-blocking
         and returns immediately. Use callbacks or is_connected() to check status.
         
         Returns:
@@ -187,7 +230,7 @@ class OpenBotClawHub:
             ConnectionError: If already connected or connection fails
         
         Example:
-            >>> hub = OpenBotClawHub("ws://localhost:3000")
+            >>> hub = OpenBotClawHub("http://localhost:3000")
             >>> if hub.connect():
             ...     print("Connection initiated")
         """
@@ -200,35 +243,43 @@ class OpenBotClawHub:
                 self.state = ConnectionState.CONNECTING
                 self.logger.info(f"Connecting to {self.url}...")
                 
-                self.ws = websocket.WebSocketApp(
-                    self.url,
-                    on_open=self._on_open,
-                    on_message=self._on_message,
-                    on_error=self._on_error,
-                    on_close=self._on_close
-                )
+                # Create HTTP session
+                self.session = self._create_session()
                 
-                self._running = True
-                self._ws_thread = threading.Thread(
-                    target=self._run_forever,
-                    daemon=True,
-                    name="OpenBotClawHub-WS"
-                )
-                self._ws_thread.start()
-                
-                # Wait for connection with timeout
-                start_time = time.time()
-                while (self.state == ConnectionState.CONNECTING and 
-                       time.time() - start_time < self.connection_timeout):
-                    time.sleep(0.1)
-                
-                if self.state == ConnectionState.CONNECTED:
-                    self.logger.info("Successfully connected")
-                    return True
-                else:
-                    self.logger.error("Connection timeout")
-                    self._cleanup()
+                # Test connection with status endpoint
+                try:
+                    response = self.session.get(
+                        f"{self.url}/api/status",
+                        timeout=self.connection_timeout
+                    )
+                    response.raise_for_status()
+                    self.logger.debug(f"Server status: {response.json()}")
+                except requests.exceptions.RequestException as e:
+                    self.logger.error(f"Connection test failed: {e}")
+                    self.state = ConnectionState.DISCONNECTED
                     return False
+                
+                # Mark as connected
+                self.state = ConnectionState.CONNECTED
+                self._running = True
+                self._reconnect_attempts = 0
+                self._reconnect_delay = 1
+                
+                # Start polling thread
+                self._polling_thread = threading.Thread(
+                    target=self._polling_loop,
+                    daemon=True,
+                    name="OpenBotClawHub-Polling"
+                )
+                self._polling_thread.start()
+                
+                self.logger.info("Successfully connected")
+                self._trigger_callback("on_connected", {})
+                
+                # Process queued messages
+                self._process_message_queue()
+                
+                return True
                     
             except Exception as e:
                 self.logger.error(f"Connection failed: {e}")
@@ -240,7 +291,7 @@ class OpenBotClawHub:
         """
         Gracefully disconnect from the server.
         
-        Closes the WebSocket connection, stops the background thread, and cleans up
+        Closes the HTTP session, stops the polling thread, and cleans up
         resources. This method blocks until disconnection is complete.
         
         Example:
@@ -256,14 +307,16 @@ class OpenBotClawHub:
             self._running = False
             self.auto_reconnect = False  # Disable reconnect on explicit disconnect
             
-            if self.ws:
-                try:
-                    self.ws.close()
-                except Exception as e:
-                    self.logger.warning(f"Error closing WebSocket: {e}")
+            # Wait for polling thread to finish
+            if self._polling_thread and self._polling_thread.is_alive():
+                self._polling_thread.join(timeout=5)
             
-            if self._ws_thread and self._ws_thread.is_alive():
-                self._ws_thread.join(timeout=5)
+            # Close HTTP session
+            if self.session:
+                try:
+                    self.session.close()
+                except Exception as e:
+                    self.logger.warning(f"Error closing HTTP session: {e}")
             
             self._cleanup()
             self.logger.info("Disconnected")
@@ -574,67 +627,87 @@ class OpenBotClawHub:
     
     # Private methods
     
-    def _run_forever(self):
-        """Run WebSocket connection in background thread."""
-        try:
-            self.ws.run_forever()
-        except Exception as e:
-            self.logger.error(f"WebSocket thread error: {e}")
-        finally:
-            self.logger.debug("WebSocket thread terminated")
+    def _polling_loop(self):
+        """Run HTTP polling loop in background thread to fetch server updates."""
+        self.logger.debug("Polling thread started")
+        
+        while self._running:
+            try:
+                # Adaptive polling interval with backoff
+                time.sleep(self.polling_interval * self._poll_backoff)
+                
+                if not self.is_connected():
+                    continue
+                
+                # Poll for world state updates
+                self._poll_world_state()
+                
+                # Reset backoff on successful poll
+                self._poll_backoff = 1.0
+                self._last_poll_time = time.time()
+                
+            except Exception as e:
+                self.logger.error(f"Polling error: {e}")
+                # Exponential backoff on errors (up to 5x)
+                self._poll_backoff = min(5.0, self._poll_backoff * 1.5)
+                
+                # Check if connection is still valid
+                if not self._check_connection():
+                    if self.auto_reconnect and self._running:
+                        self._schedule_reconnect()
+                    break
+        
+        self.logger.debug("Polling thread terminated")
     
-    def _on_open(self, ws):
-        """Handle WebSocket connection opened."""
-        with self._lock:
-            self.state = ConnectionState.CONNECTED
-            self._reconnect_attempts = 0
-            self._reconnect_delay = 1
+    def _poll_world_state(self):
+        """Poll server for world state updates via HTTP GET."""
+        try:
+            if not self.session:
+                return
             
-        self.logger.info("WebSocket connected")
-        self._trigger_callback("on_connected", {})
-        
-        # Process queued messages
-        self._process_message_queue()
+            response = self.session.get(
+                f"{self.url}/api/agents",
+                timeout=self.connection_timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Simulate world_state message format
+            if 'agents' in data:
+                message = {
+                    "type": "world_state",
+                    "agents": data['agents'],
+                    "objects": data.get('objects', []),
+                    "tick": data.get('tick', 0)
+                }
+                self._handle_message(message)
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.debug(f"Poll failed: {e}")
+            raise
     
-    def _on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket connection closed."""
-        self.logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
-        
-        with self._lock:
-            was_registered = self.state == ConnectionState.REGISTERED
-            self.state = ConnectionState.DISCONNECTED
-            self.agent_id = None
-            self.registered_agents.clear()
-        
-        self._trigger_callback("on_disconnected", {
-            "code": close_status_code,
-            "message": close_msg,
-            "was_registered": was_registered
-        })
-        
-        # Attempt reconnection if enabled
-        if self.auto_reconnect and self._running:
-            self._schedule_reconnect()
-    
-    def _on_error(self, ws, error):
-        """Handle WebSocket error."""
-        self.logger.error(f"WebSocket error: {error}")
-        self._trigger_callback("on_error", {
-            "error": str(error),
-            "context": "websocket"
-        })
-    
-    def _on_message(self, ws, message):
-        """Handle incoming WebSocket message."""
+    def _check_connection(self) -> bool:
+        """Check if HTTP connection is still valid."""
         try:
-            data = json.loads(message)
-            self._handle_message(data)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse message: {e}")
-            self._trigger_callback("on_error", {
-                "error": str(e),
-                "context": "message_parse"
+            if not self.session:
+                return False
+            
+            response = self.session.get(
+                f"{self.url}/api/status",
+                timeout=self.connection_timeout
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException:
+            self.logger.warning("Connection check failed")
+            with self._lock:
+                self.state = ConnectionState.DISCONNECTED
+                self.agent_id = None
+            self._trigger_callback("on_disconnected", {
+                "message": "Connection lost",
+                "was_registered": self.is_registered()
             })
+            return False
     
     def _handle_message(self, message: Dict[str, Any]):
         """Handle specific message types."""
@@ -777,7 +850,7 @@ class OpenBotClawHub:
     
     def _send(self, data: Dict[str, Any]) -> bool:
         """
-        Send message to server.
+        Send message to server via HTTP POST.
         
         Args:
             data: Message dictionary
@@ -785,7 +858,7 @@ class OpenBotClawHub:
         Returns:
             True if sent successfully
         """
-        if not self.ws or not self.is_connected():
+        if not self.session or not self.is_connected():
             if self.enable_message_queue:
                 self.logger.debug("Queuing message (not connected)")
                 self._message_queue.put(data)
@@ -795,10 +868,35 @@ class OpenBotClawHub:
                 return False
         
         try:
-            self.ws.send(json.dumps(data))
-            self.logger.debug(f"Sent: {data.get('type')}")
+            # Map message types to HTTP endpoints
+            msg_type = data.get('type')
+            endpoint = f"{self.url}/api/action"
+            
+            # Add agent ID to request if available
+            if self.agent_id:
+                data['agentId'] = self.agent_id
+            
+            response = self.session.post(
+                endpoint,
+                json=data,
+                timeout=self.connection_timeout
+            )
+            response.raise_for_status()
+            
+            # Handle response if present
+            if response.content:
+                try:
+                    response_data = response.json()
+                    # Process response message (e.g., registration confirmation)
+                    if response_data:
+                        self._handle_message(response_data)
+                except json.JSONDecodeError:
+                    pass
+            
+            self.logger.debug(f"Sent: {msg_type}")
             return True
-        except Exception as e:
+            
+        except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to send message: {e}")
             
             # Queue message if enabled
@@ -868,13 +966,13 @@ class OpenBotClawHub:
             self.state = ConnectionState.DISCONNECTED
             self.agent_id = None
             self.registered_agents.clear()
-            self.ws = None
+            self.session = None
 
 
 # Convenience functions for quick usage
 
 def create_hub(
-    url: str = "ws://localhost:3000",
+    url: str = "http://localhost:3000",
     agent_name: Optional[str] = None,
     **kwargs
 ) -> OpenBotClawHub:
@@ -882,7 +980,7 @@ def create_hub(
     Create and configure OpenBotClawHub instance.
     
     Args:
-        url: WebSocket server URL
+        url: HTTP server URL
         agent_name: Agent name
         **kwargs: Additional configuration options
     
@@ -890,27 +988,27 @@ def create_hub(
         Configured OpenBotClawHub instance
     
     Example:
-        >>> hub = create_hub("ws://localhost:3000", "MyAgent")
+        >>> hub = create_hub("http://localhost:3000", "MyAgent")
     """
     return OpenBotClawHub(url=url, agent_name=agent_name, **kwargs)
 
 
 def quick_connect(
-    url: str = "ws://localhost:3000",
+    url: str = "http://localhost:3000",
     agent_name: str = "QuickAgent"
 ) -> OpenBotClawHub:
     """
     Quickly connect and register agent in one step.
     
     Args:
-        url: WebSocket server URL
+        url: HTTP server URL
         agent_name: Agent name
     
     Returns:
         Connected and registered OpenBotClawHub instance
     
     Example:
-        >>> hub = quick_connect("ws://localhost:3000", "FastAgent")
+        >>> hub = quick_connect("http://localhost:3000", "FastAgent")
         >>> hub.chat("I'm connected!")
     """
     hub = OpenBotClawHub(url=url, agent_name=agent_name)
