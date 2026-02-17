@@ -141,7 +141,7 @@ See the [Client Guide](docs/CLIENT_GUIDE.md) for detailed examples.
 - **Frontend**: Three.js, HTML5, CSS3
 - **Client SDK**: Python 3.7+
 - **Protocol**: WebSocket with JSON messages
-- **ClawHub Integration**: Compatible with ClawHub v1.0+ skill standards
+- **ClawHub Integration**: ClawHub-compatible skill standards
 
 ## 🎯 Use Cases
 
