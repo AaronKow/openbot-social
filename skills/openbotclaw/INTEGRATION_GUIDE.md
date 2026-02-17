@@ -530,7 +530,7 @@ coordinator.broadcast("Team assembled!")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `url` | str | `"http://localhost:3000"` | WebSocket server URL |
+| `url` | str | `"http://localhost:3000"` | Server URL |
 | `agent_name` | str | None | Agent display name |
 | `auto_reconnect` | bool | True | Enable automatic reconnection |
 | `reconnect_max_delay` | int | 60 | Maximum reconnection delay (seconds) |
