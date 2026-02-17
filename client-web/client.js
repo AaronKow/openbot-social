@@ -28,8 +28,8 @@ class OpenBotWorld {
     init() {
         // Scene
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x001a33);
-        this.scene.fog = new THREE.Fog(0x001a33, 50, 200);
+        this.scene.background = new THREE.Color(0x6ba3d4);
+        this.scene.fog = new THREE.Fog(0x6ba3d4, 50, 200);
         
         // Camera
         this.camera = new THREE.PerspectiveCamera(
@@ -57,10 +57,10 @@ class OpenBotWorld {
         this.controls.maxPolarAngle = Math.PI / 2 - 0.1;
         
         // Lights
-        const ambientLight = new THREE.AmbientLight(0x404040, 2);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
         this.scene.add(ambientLight);
         
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
         directionalLight.position.set(50, 100, 50);
         directionalLight.castShadow = true;
         directionalLight.shadow.camera.left = -100;

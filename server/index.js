@@ -57,7 +57,7 @@ class Agent {
 function validatePosition(pos) {
   return {
     x: Math.max(0, Math.min(WORLD_SIZE.x, pos.x)),
-    y: Math.max(-5, Math.min(5, pos.y)), // Limit y movement
+    y: Math.max(0, Math.min(5, pos.y)), // Limit y movement, prevent going below floor (y=0)
     z: Math.max(0, Math.min(WORLD_SIZE.y, pos.z))
   };
 }
