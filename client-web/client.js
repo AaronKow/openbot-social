@@ -12,6 +12,7 @@ class OpenBotWorld {
         this.connected = false;
         this.pollInterval = 500; // Poll every 500ms
         this.lastChatTimestamp = 0;
+        this.agentNameMap = new Map(); // agentName -> agentId
         // Use ?server= query parameter to point to a remote backend, or fallback to same-origin /api
         const params = new URLSearchParams(window.location.search);
         const serverUrl = params.get('server') || '';
@@ -22,6 +23,7 @@ class OpenBotWorld {
         }
         
         this.init();
+        this.setupUIControls();
         this.startPolling();
         this.animate();
     }
@@ -49,12 +51,12 @@ class OpenBotWorld {
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.getElementById('canvas-container').appendChild(this.renderer.domElement);
         
-        // Controls
+        // Controls - completely free zoom
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
-        this.controls.minDistance = 0.1;
-        this.controls.maxDistance = 500;
+        this.controls.minDistance = 0;  // No minimum distance
+        this.controls.maxDistance = Infinity;  // No maximum distance
         
         // Lights
         const ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
@@ -213,6 +215,73 @@ class OpenBotWorld {
         return group;
     }
     
+    setupUIControls() {
+        // Status panel minimize/close
+        const statusToggle = document.getElementById('status-toggle');
+        const statusContent = document.getElementById('status-content');
+        statusToggle.addEventListener('click', () => {
+            statusContent.classList.toggle('hidden');
+            statusToggle.textContent = statusContent.classList.contains('hidden') ? '+' : '−';
+        });
+        
+        // Chat panel minimize/close
+        const chatToggle = document.getElementById('chat-toggle');
+        const chatMessages = document.getElementById('chat-messages');
+        chatToggle.addEventListener('click', () => {
+            chatMessages.classList.toggle('hidden');
+            chatToggle.textContent = chatMessages.classList.contains('hidden') ? '+' : '−';
+        });
+        
+        // Controls panel close
+        const controlsClose = document.getElementById('controls-close');
+        const controlsPanel = document.getElementById('controls-panel');
+        controlsClose.addEventListener('click', () => {
+            controlsPanel.style.display = 'none';
+        });
+    }
+    
+    zoomToAgent(agentId) {
+        const agent = this.agents.get(agentId);
+        if (!agent) return;
+        
+        const targetPos = agent.mesh.position.clone();
+        const targetDistance = 15;
+        
+        // Animate camera to lobster
+        const startPos = this.camera.position.clone();
+        const startTime = Date.now();
+        const duration = 1000; // 1 second animation
+        
+        const animateMove = () => {
+            const elapsed = Date.now() - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            
+            // Smooth easing
+            const easeProgress = progress < 0.5 
+                ? 2 * progress * progress 
+                : -1 + (4 - 2 * progress) * progress;
+            
+            // Interpolate camera position
+            const cameraTargetX = targetPos.x + 10;
+            const cameraTargetY = targetPos.y + 8;
+            const cameraTargetZ = targetPos.z + 10;
+            
+            this.camera.position.x = startPos.x + (cameraTargetX - startPos.x) * easeProgress;
+            this.camera.position.y = startPos.y + (cameraTargetY - startPos.y) * easeProgress;
+            this.camera.position.z = startPos.z + (cameraTargetZ - startPos.z) * easeProgress;
+            
+            // Look at the lobster
+            this.controls.target.copy(targetPos);
+            this.controls.target.y = targetPos.y;
+            
+            if (progress < 1) {
+                requestAnimationFrame(animateMove);
+            }
+        };
+        
+        animateMove();
+    }
+    
     startPolling() {
         // Initial connection test
         this.testConnection();
@@ -339,6 +408,9 @@ class OpenBotWorld {
             data: agentData
         });
         
+        // Store agent name mapping for chat clicks
+        this.agentNameMap.set(agentData.name, agentData.id);
+        
         console.log('Agent joined:', agentData.name);
         this.updateAgentList();
     }
@@ -348,6 +420,14 @@ class OpenBotWorld {
         if (agent) {
             this.scene.remove(agent.mesh);
             this.agents.delete(agentId);
+            
+            // Remove from name map
+            for (const [name, id] of this.agentNameMap.entries()) {
+                if (id === agentId) {
+                    this.agentNameMap.delete(name);
+                    break;
+                }
+            }
             console.log('Agent left:', agentId);
             this.updateAgentList();
         }
@@ -372,7 +452,18 @@ class OpenBotWorld {
         const chatDiv = document.getElementById('chat-messages');
         const messageDiv = document.createElement('div');
         messageDiv.className = 'chat-message';
-        messageDiv.textContent = `${message.agentName}: ${message.message}`;
+        
+        // Create clickable agent name
+        const agentNameSpan = document.createElement('span');
+        agentNameSpan.className = 'chat-message-agent';
+        agentNameSpan.textContent = message.agentName;
+        agentNameSpan.style.cursor = 'pointer';
+        agentNameSpan.addEventListener('click', () => {
+            this.zoomToAgent(message.agentId);
+        });
+        
+        messageDiv.appendChild(agentNameSpan);
+        messageDiv.appendChild(document.createTextNode(`: ${message.message}`));
         chatDiv.appendChild(messageDiv);
         
         // Keep only last 20 messages
