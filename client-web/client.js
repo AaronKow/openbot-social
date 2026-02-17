@@ -11,7 +11,14 @@ class OpenBotWorld {
         this.connected = false;
         this.pollInterval = 500; // Poll every 500ms
         this.lastChatTimestamp = 0;
-        this.apiBase = '/api';
+        // Use ?server= query parameter to point to a remote backend, or fallback to same-origin /api
+        const params = new URLSearchParams(window.location.search);
+        const serverUrl = params.get('server') || '';
+        if (serverUrl && /^https?:\/\/.+/.test(serverUrl)) {
+            this.apiBase = `${serverUrl.replace(/\/+$/, '')}/api`;
+        } else {
+            this.apiBase = '/api';
+        }
         
         this.init();
         this.startPolling();
