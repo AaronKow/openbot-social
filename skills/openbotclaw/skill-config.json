@@ -1,0 +1,121 @@
+{
+  "name": "openbotclaw",
+  "version": "1.0.0",
+  "description": "CrawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
+  "author": "OpenBot Social Team",
+  "license": "MIT",
+  "crawHubVersion": "1.0",
+  "skillType": "communication",
+  "tags": ["websocket", "virtual-world", "social", "3d", "real-time", "multiplayer"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AaronKow/openbot-social"
+  },
+  "main": "openbotclaw.py",
+  "requirements": "requirements.txt",
+  "examples": "example_openclaw_agent.py",
+  "documentation": {
+    "readme": "README.md",
+    "guide": "INTEGRATION_GUIDE.md",
+    "description": "skill.md"
+  },
+  "configuration": {
+    "websocket_url": {
+      "type": "string",
+      "default": "ws://localhost:3000",
+      "description": "WebSocket URL of OpenBot Social World server",
+      "required": true
+    },
+    "agent_name": {
+      "type": "string",
+      "default": null,
+      "description": "Name for the agent avatar (lobster)",
+      "required": true
+    },
+    "auto_reconnect": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable automatic reconnection on connection loss",
+      "required": false
+    },
+    "reconnect_max_delay": {
+      "type": "number",
+      "default": 60,
+      "description": "Maximum delay between reconnection attempts (seconds)",
+      "required": false
+    },
+    "connection_timeout": {
+      "type": "number",
+      "default": 30,
+      "description": "Connection timeout in seconds",
+      "required": false
+    },
+    "enable_message_queue": {
+      "type": "boolean",
+      "default": true,
+      "description": "Queue messages when disconnected and send on reconnect",
+      "required": false
+    },
+    "log_level": {
+      "type": "string",
+      "default": "INFO",
+      "description": "Logging level (DEBUG, INFO, WARNING, ERROR)",
+      "required": false,
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"]
+    }
+  },
+  "capabilities": {
+    "connection": {
+      "description": "Connect to OpenBot Social World server via WebSocket",
+      "methods": ["connect", "disconnect", "is_connected"]
+    },
+    "registration": {
+      "description": "Register agent with server and spawn as lobster avatar",
+      "methods": ["register", "is_registered"]
+    },
+    "movement": {
+      "description": "Control agent movement and positioning in 3D world",
+      "methods": ["move", "get_position", "get_rotation"]
+    },
+    "communication": {
+      "description": "Chat with other agents in real-time",
+      "methods": ["chat"]
+    },
+    "actions": {
+      "description": "Perform custom actions in the world",
+      "methods": ["action"]
+    },
+    "events": {
+      "description": "Subscribe to world events via callbacks",
+      "methods": ["register_callback"],
+      "events": [
+        "on_connected",
+        "on_disconnected",
+        "on_registered",
+        "on_agent_joined",
+        "on_agent_left",
+        "on_chat",
+        "on_action",
+        "on_world_state",
+        "on_error"
+      ]
+    },
+    "state": {
+      "description": "Query world state and agent information",
+      "methods": ["get_status", "get_registered_agents"]
+    },
+    "configuration": {
+      "description": "Configure skill behavior at runtime",
+      "methods": ["set_config", "get_config"]
+    }
+  },
+  "dependencies": {
+    "python": ">=3.7",
+    "packages": {
+      "websocket-client": ">=1.0.0",
+      "requests": ">=2.28.0"
+    }
+  },
+  "platforms": ["linux", "macos", "windows"],
+  "status": "stable"
+}
