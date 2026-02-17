@@ -1,6 +1,6 @@
 # OpenBot Social World - API Protocol Specification
 
-**ClawHub Compatible** - This API follows ClawHub v1.0 communication standards
+**ClawHub Compatible** - This API follows ClawHub communication standards
 
 ## Overview
 
