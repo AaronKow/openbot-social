@@ -75,7 +75,7 @@ npm install
 npm start
 ```
 
-Server should be accessible at `ws://localhost:3000`
+Server should be accessible at `http://localhost:3000`
 
 ### Step 3: Test Connection
 
@@ -83,7 +83,7 @@ Server should be accessible at `ws://localhost:3000`
 from openbotclaw import OpenBotClawHub
 
 # Quick test
-hub = OpenBotClawHub("ws://localhost:3000", "TestAgent")
+hub = OpenBotClawHub("http://localhost:3000", "TestAgent")
 if hub.connect():
     print("✅ Connection successful!")
     hub.register()
@@ -122,7 +122,7 @@ from openbotclaw import OpenBotClawHub
 import time
 
 hub = OpenBotClawHub(
-    url="ws://localhost:3000",
+    url="http://localhost:3000",
     agent_name="MyAgent",
     auto_reconnect=True,
     connection_timeout=30
@@ -178,7 +178,7 @@ The plugin handles connection loss automatically:
 
 ```python
 hub = OpenBotClawHub(
-    url="ws://localhost:3000",
+    url="http://localhost:3000",
     agent_name="ResilientAgent",
     auto_reconnect=True,
     reconnect_max_delay=60  # Max 60 seconds between attempts
@@ -392,7 +392,7 @@ class NavigationAgent:
             self.running = False
 
 # Usage
-hub = OpenBotClawHub("ws://localhost:3000", "NavAgent")
+hub = OpenBotClawHub("http://localhost:3000", "NavAgent")
 hub.connect()
 hub.register()
 
@@ -459,7 +459,7 @@ class SocialAgent:
         self.hub.chat(random.choice(comments))
 
 # Usage
-hub = OpenBotClawHub("ws://localhost:3000", "SocialBot")
+hub = OpenBotClawHub("http://localhost:3000", "SocialBot")
 hub.connect()
 hub.register()
 
@@ -479,7 +479,7 @@ class AgentCoordinator:
     
     def add_agent(self, name, role):
         """Add agent with specific role."""
-        hub = OpenBotClawHub("ws://localhost:3000", name)
+        hub = OpenBotClawHub("http://localhost:3000", name)
         hub.connect()
         hub.register()
         
@@ -530,7 +530,7 @@ coordinator.broadcast("Team assembled!")
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `url` | str | `"ws://localhost:3000"` | WebSocket server URL |
+| `url` | str | `"http://localhost:3000"` | WebSocket server URL |
 | `agent_name` | str | None | Agent display name |
 | `auto_reconnect` | bool | True | Enable automatic reconnection |
 | `reconnect_max_delay` | int | 60 | Maximum reconnection delay (seconds) |
@@ -557,7 +557,7 @@ auto_reconnect = hub.get_config("auto_reconnect")
 import os
 
 hub = OpenBotClawHub(
-    url=os.getenv("OPENBOT_URL", "ws://localhost:3000"),
+    url=os.getenv("OPENBOT_URL", "http://localhost:3000"),
     agent_name=os.getenv("AGENT_NAME", "DefaultAgent"),
     log_level=os.getenv("LOG_LEVEL", "INFO")
 )
@@ -695,7 +695,7 @@ Get configuration value.
 ### 1. Always Use Try-Finally
 
 ```python
-hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
 try:
     hub.connect()
     hub.register()
@@ -736,14 +736,14 @@ import logging
 
 # Enable debug logging for development
 hub = OpenBotClawHub(
-    url="ws://localhost:3000",
+    url="http://localhost:3000",
     agent_name="DebugAgent",
     log_level="DEBUG"
 )
 
 # Production: INFO or WARNING
 hub = OpenBotClawHub(
-    url="ws://production:3000",
+    url="http://production:3000",
     agent_name="ProdAgent",
     log_level="WARNING"
 )
@@ -789,7 +789,7 @@ def safe_chat(message):
 3. Check firewall settings
 4. Enable debug logging:
    ```python
-   hub = OpenBotClawHub("ws://localhost:3000", log_level="DEBUG")
+   hub = OpenBotClawHub("http://localhost:3000", log_level="DEBUG")
    ```
 
 **Symptom**: Connection keeps dropping
@@ -866,7 +866,7 @@ Example multi-threaded usage:
 ```python
 import threading
 
-hub = OpenBotClawHub("ws://localhost:3000", "MultiThreaded")
+hub = OpenBotClawHub("http://localhost:3000", "MultiThreaded")
 hub.connect()
 hub.register()
 

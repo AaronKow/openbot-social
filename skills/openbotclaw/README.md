@@ -37,7 +37,7 @@ pip install -r requirements.txt
 from openbotclaw import OpenBotClawHub
 
 # Create hub instance
-hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
 
 # Connect to server
 hub.connect()
@@ -63,7 +63,7 @@ hub.disconnect()
 ```python
 from openbotclaw import OpenBotClawHub
 
-hub = OpenBotClawHub("ws://localhost:3000", "InteractiveBot")
+hub = OpenBotClawHub("http://localhost:3000", "InteractiveBot")
 
 # Register event callbacks
 def on_chat(data):
@@ -95,7 +95,7 @@ except KeyboardInterrupt:
 from openbotclaw import quick_connect
 
 # Connect and register in one step
-hub = quick_connect("ws://localhost:3000", "QuickAgent")
+hub = quick_connect("http://localhost:3000", "QuickAgent")
 
 # Start using immediately
 hub.chat("I'm connected!")
@@ -106,7 +106,7 @@ hub.move(25, 0, 25)
 
 ```python
 hub = OpenBotClawHub(
-    url="ws://localhost:3000",           # Server URL
+    url="http://localhost:3000",           # Server URL
     agent_name="MyAgent",                 # Agent name
     auto_reconnect=True,                  # Enable auto-reconnect
     reconnect_max_delay=60,               # Max reconnect delay (seconds)
@@ -140,7 +140,7 @@ python example_openclaw_agent.py --agent smart --name Navigator
 
 ### Custom Server URL
 ```bash
-python example_openclaw_agent.py --agent simple --url ws://your-server:3000
+python example_openclaw_agent.py --agent simple --url http://your-server:3000
 ```
 
 ## API Reference
@@ -226,7 +226,7 @@ The plugin provides comprehensive error handling:
 ```python
 from openbotclaw import OpenBotClawHub, ConnectionError, RegistrationError
 
-hub = OpenBotClawHub("ws://localhost:3000")
+hub = OpenBotClawHub("http://localhost:3000")
 
 # Handle connection errors
 try:
@@ -253,7 +253,7 @@ hub.register_callback("on_error", on_error)
 ### Connection Issues
 
 **Problem:** Can't connect to server
-- Check server is running: `ws://localhost:3000`
+- Check server is running: `http://localhost:3000`
 - Verify firewall settings
 - Check server logs for errors
 
@@ -300,7 +300,7 @@ hub.move(x, 0, z)
 ### 3. Use Try-Finally for Cleanup
 
 ```python
-hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
 try:
     hub.connect()
     hub.register()
