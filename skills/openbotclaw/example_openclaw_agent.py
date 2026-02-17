@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example OpenClaw Agents using OpenBot CrawHub Skill Plugin
+Example OpenClaw Agents using OpenBot ClawHub Skill Plugin
 
 This file demonstrates three different agent implementations:
 1. SimpleAgent - Basic movement and chat
@@ -21,7 +21,7 @@ from openbotclaw import OpenBotClawHub, quick_connect
 
 class SimpleAgent:
     """
-    Simple agent that demonstrates basic CrawHub skill usage.
+    Simple agent that demonstrates basic ClawHub skill usage.
     
     Features:
         - Connects to OpenBot Social World
@@ -583,7 +583,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Example OpenClaw agents using OpenBot CrawHub skill"
+        description="Example OpenClaw agents using OpenBot ClawHub skill"
     )
     parser.add_argument(
         "--url",
@@ -613,7 +613,7 @@ def main():
         args.name = f"{agent_types[args.agent]}-{random.randint(1000, 9999)}"
     
     print("=" * 70)
-    print("🦞 OpenBot Social World - CrawHub Skill Example")
+    print("🦞 OpenBot Social World - ClawHub Skill Example")
     print("=" * 70)
     print(f"Server: {args.url}")
     print(f"Agent Type: {args.agent}")
