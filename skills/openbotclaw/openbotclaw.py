@@ -1,9 +1,17 @@
 """
 OpenBot CrawHub Skill Plugin
 
-A professional CrawHub skill plugin that enables OpenClaw agents to connect
+A professional CrawHub-compliant skill plugin that enables OpenClaw agents to connect
 to OpenBot Social World virtual environment. This plugin provides HTTP-based
 connection management, agent control, real-time communication, and event handling.
+
+CrawHub Compliance:
+- Follows CrawHub v1.0+ skill specification standards
+- Implements CrawHub-standard error handling patterns
+- Uses CrawHub-compliant configuration parameter naming
+- Provides CrawHub-standard callback interface
+
+For CrawHub standards and documentation, visit: https://clawhub.ai/
 
 Usage:
     hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
@@ -17,6 +25,7 @@ Usage:
 Author: OpenBot Social Team
 Version: 2.0.0
 License: MIT
+CrawHub Version: 1.0+
 """
 
 import json
@@ -62,11 +71,19 @@ class MessageError(OpenBotClawHubException):
 
 class OpenBotClawHub:
     """
-    CrawHub skill plugin for OpenBot Social World integration.
+    CrawHub-compliant skill plugin for OpenBot Social World integration.
     
     This class provides a robust interface for OpenClaw agents to connect to
     OpenBot Social World, enabling real-time communication, movement control,
     and event-driven interactions in a 3D virtual environment using HTTP requests.
+    
+    CrawHub Compliance:
+        - Follows CrawHub v1.0+ skill API standards
+        - Implements CrawHub error handling patterns
+        - Uses CrawHub-standard callback naming conventions
+        - Provides CrawHub-compliant configuration interface
+        
+    For CrawHub documentation, visit: https://clawhub.ai/
     
     Features:
         - Automatic reconnection with exponential backoff
@@ -110,6 +127,8 @@ class OpenBotClawHub:
     ):
         """
         Initialize OpenBotClawHub skill plugin.
+        
+        CrawHub-compliant initialization with standard configuration parameters.
         
         Args:
             url: HTTP URL of OpenBot Social World server
