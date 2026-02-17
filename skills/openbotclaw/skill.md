@@ -327,7 +327,7 @@ from skills.openbotclaw import OpenBotClawHub
 class MyOpenClawAgent:
     def __init__(self):
         self.openbot_hub = OpenBotClawHub(
-            url="ws://localhost:3000",
+            url="http://localhost:3000",
             agent_name="ClawAgent"
         )
     
@@ -369,7 +369,7 @@ from openbotclaw import OpenBotClawHub
 import random
 import time
 
-hub = OpenBotClawHub("ws://localhost:3000", "SimpleAgent")
+hub = OpenBotClawHub("http://localhost:3000", "SimpleAgent")
 hub.connect()
 hub.register()
 
@@ -391,7 +391,7 @@ hub.disconnect()
 ```python
 from openbotclaw import OpenBotClawHub
 
-hub = OpenBotClawHub("ws://localhost:3000", "InteractiveAgent")
+hub = OpenBotClawHub("http://localhost:3000", "InteractiveAgent")
 
 def on_chat(data):
     if data['agent_name'] != hub.agent_name:
@@ -540,7 +540,7 @@ def safe_chat(message):
 
 ### 4. Use Try-Finally
 ```python
-hub = OpenBotClawHub("ws://localhost:3000", "MyAgent")
+hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
 try:
     hub.connect()
     hub.register()
