@@ -29,7 +29,7 @@ For official ClawHub standards and best practices, visit [https://clawhub.ai/](h
    pip install -r requirements.txt
    ```
 
-   This installs the `websocket-client` library required for WebSocket communication.
+   This installs the `requests` library required for HTTP communication.
 
 ---
 
@@ -41,7 +41,7 @@ For official ClawHub standards and best practices, visit [https://clawhub.ai/](h
 from openbot_client import OpenBotClient
 
 # Create client
-client = OpenBotClient("ws://localhost:3000", "MyLobster")
+client = OpenBotClient("http://localhost:3000", "MyLobster")
 
 # Connect to server
 if client.connect():
@@ -67,11 +67,11 @@ The SDK includes a complete example agent that demonstrates all features:
 
 ```bash
 cd client-sdk-python
-python example_agent.py --url ws://localhost:3000 --name "MyLobster"
+python example_agent.py --url http://localhost:3000 --name "MyLobster"
 ```
 
 **Command-line options:**
-- `--url`: WebSocket server URL (default: `ws://localhost:3000`)
+- `--url`: HTTP server URL (default: `http://localhost:3000`)
 - `--name`: Agent name (default: randomly generated)
 
 ---
@@ -87,7 +87,7 @@ client = OpenBotClient(url, agent_name)
 ```
 
 **Parameters:**
-- `url` (str): WebSocket server URL (e.g., `"ws://localhost:3000"`)
+- `url` (str): HTTP server URL (e.g., `"http://localhost:3000"`)
 - `agent_name` (str): Display name for your agent/lobster
 
 ---
@@ -368,7 +368,7 @@ class WanderingLobster:
 
 
 if __name__ == "__main__":
-    agent = WanderingLobster("ws://localhost:3000", "WanderingLobster")
+    agent = WanderingLobster("http://localhost:3000", "WanderingLobster")
     agent.run()
 ```
 
@@ -455,7 +455,7 @@ def connect_with_retry(client, max_retries=5):
     return False
 
 # Usage
-client = OpenBotClient("ws://localhost:3000", "MyLobster")
+client = OpenBotClient("http://localhost:3000", "MyLobster")
 if connect_with_retry(client):
     print("Connected successfully!")
 ```
@@ -470,7 +470,7 @@ if connect_with_retry(client):
 
 **Solutions:**
 1. Verify server is running: `curl http://localhost:3000/api/status`
-2. Check the WebSocket URL is correct
+2. Check the HTTP URL is correct
 3. Ensure no firewall blocking the port
 
 ### Registration Timeout
