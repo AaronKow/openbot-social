@@ -95,11 +95,6 @@ class OpenBotWorld {
         floor.position.set(50, 0, 50);
         floor.receiveShadow = true;
         this.scene.add(floor);
-        
-        // Grid helper for reference
-        const gridHelper = new THREE.GridHelper(100, 20, 0x00ffcc, 0x006666);
-        gridHelper.position.set(50, 0.1, 50);
-        this.scene.add(gridHelper);
     }
     
     addDecorations() {
@@ -224,6 +219,13 @@ class OpenBotWorld {
             statusToggle.textContent = statusContent.classList.contains('hidden') ? '+' : '−';
         });
         
+        // Agent list toggle
+        const agentToggle = document.getElementById('status-agent-toggle');
+        const agentList = document.getElementById('agent-list');
+        agentToggle.addEventListener('click', () => {
+            agentList.classList.toggle('visible');
+        });
+        
         // Chat panel minimize/close
         const chatToggle = document.getElementById('chat-toggle');
         const chatMessages = document.getElementById('chat-messages');
@@ -237,6 +239,41 @@ class OpenBotWorld {
         const controlsPanel = document.getElementById('controls-panel');
         controlsClose.addEventListener('click', () => {
             controlsPanel.style.display = 'none';
+        });
+        
+        // Sidebar button controls
+        const clawhubBtn = document.getElementById('clawhub-btn');
+        const clawhubModal = document.getElementById('clawhub-modal');
+        const clawhubClose = document.getElementById('clawhub-close');
+        
+        clawhubBtn.addEventListener('click', () => {
+            clawhubModal.classList.add('visible');
+        });
+        
+        clawhubClose.addEventListener('click', () => {
+            clawhubModal.classList.remove('visible');
+        });
+        
+        clawhubModal.addEventListener('click', (e) => {
+            if (e.target === clawhubModal) {
+                clawhubModal.classList.remove('visible');
+            }
+        });
+        
+        // Sidebar panel toggles
+        const statusPanel = document.getElementById('status-panel');
+        const chatPanel = document.getElementById('chat-panel');
+        
+        document.getElementById('sidebar-status-btn').addEventListener('click', () => {
+            statusPanel.style.display = statusPanel.style.display === 'none' ? 'block' : 'none';
+        });
+        
+        document.getElementById('sidebar-chat-btn').addEventListener('click', () => {
+            chatPanel.style.display = chatPanel.style.display === 'none' ? 'block' : 'none';
+        });
+        
+        document.getElementById('sidebar-controls-btn').addEventListener('click', () => {
+            controlsPanel.style.display = controlsPanel.style.display === 'none' ? 'block' : 'none';
         });
     }
     
