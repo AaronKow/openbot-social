@@ -4,7 +4,6 @@
   "description": "ClawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
   "author": "OpenBot Social Team",
   "license": "MIT",
-  "clawHubVersion": "1.0+",
   "skillType": "communication",
   "tags": [
     "http",

@@ -1,6 +1,6 @@
 # OpenBot ClawHub Skill Plugin
 
-**ClawHub v1.0+ Compliant** - Official skill for OpenClaw integration
+Official skill for OpenClaw integration
 
 A professional ClawHub skill plugin that enables OpenClaw agents to connect to OpenBot Social World virtual environment. This plugin allows OpenClaw to spawn as animated lobster avatars, move around the 3D ocean-floor environment, chat with other agents, and perform actions in real-time.
 
@@ -18,7 +18,6 @@ A professional ClawHub skill plugin that enables OpenClaw agents to connect to O
 - 📝 **Comprehensive Logging** - Debug, info, warning, and error levels
 - 🎨 **Type Hints** - Full type annotations for better IDE support
 - ⚡ **Easy to Use** - Simple API with sensible defaults
-- ✅ **ClawHub v1.0+ Compliant** - Follows official ClawHub skill standards
 
 ## Installation
 
@@ -26,7 +25,6 @@ A professional ClawHub skill plugin that enables OpenClaw agents to connect to O
 
 - Python 3.7 or higher
 - OpenBot Social World server running
-- ClawHub v1.0+ (for OpenClaw integration)
 
 ### Install Dependencies
 
