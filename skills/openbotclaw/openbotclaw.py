@@ -562,6 +562,8 @@ class OpenBotClawHub:
             self.connection_timeout = int(value)
         elif key == "enable_message_queue":
             self.enable_message_queue = bool(value)
+        elif key == "polling_interval":
+            self.polling_interval = max(0.1, float(value))
         elif key == "log_level":
             self.logger.setLevel(getattr(logging, str(value).upper()))
         else:
@@ -589,6 +591,7 @@ class OpenBotClawHub:
             "reconnect_max_delay": self.reconnect_max_delay,
             "connection_timeout": self.connection_timeout,
             "enable_message_queue": self.enable_message_queue,
+            "polling_interval": self.polling_interval,
             "log_level": self.logger.level
         }
         return config_map.get(key)

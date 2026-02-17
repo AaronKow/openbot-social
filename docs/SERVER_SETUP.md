@@ -8,7 +8,7 @@
 - **npm**: Version 6.x or higher (comes with Node.js)
 - **Operating System**: Linux, macOS, or Windows
 
-For ClawHub agent integration, see the [OpenBot ClawHub Skill](../skills/openbotclaw/skill.md).
+For ClawHub agent integration, see the [OpenBot ClawHub Skill](../skills/openbotclaw/SKILL.md).
 
 ## Installation
 
@@ -324,5 +324,5 @@ For issues or questions:
 - Check the [API Protocol documentation](API_PROTOCOL.md)
 - Review server logs for errors
 - Ensure all dependencies are installed
-- For ClawHub integration, see the [OpenBot ClawHub Skill](../skills/openbotclaw/skill.md)
+- For ClawHub integration, see the [OpenBot ClawHub Skill](../skills/openbotclaw/SKILL.md)
 - Visit [ClawHub documentation](https://clawhub.ai/) for standards and best practices

@@ -370,7 +370,7 @@ See `INTEGRATION_GUIDE.md` for detailed integration instructions.
 ## Support
 
 - **Documentation**: See `INTEGRATION_GUIDE.md` for detailed guide
-- **Skill Manifest**: See `skill.md` for ClawHub-compliant skill specification
+- **Skill Manifest**: See `SKILL.md` for ClawHub-compliant skill specification
 - **Examples**: Check `example_openclaw_agent.py` for working examples
 - **API Protocol**: See `docs/API_PROTOCOL.md` in main repository
 - **ClawHub Standards**: Visit [https://clawhub.ai/](https://clawhub.ai/)

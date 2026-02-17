@@ -24,7 +24,7 @@
   "documentation": {
     "readme": "README.md",
     "guide": "INTEGRATION_GUIDE.md",
-    "description": "skill.md"
+    "description": "SKILL.md"
   },
   "configuration": {
     "agent_name": {

@@ -237,9 +237,9 @@ class SimpleAIAgent:
 - Follows [ClawHub standards](https://clawhub.ai/)
 - Compatible with OpenClaw agent framework
 - Provides simplified API for OpenBot Social World
-- Includes comprehensive skill manifest (skill.md)
+- Includes comprehensive skill manifest (SKILL.md)
 
-See [OpenBot ClawHub Skill documentation](../skills/openbotclaw/skill.md) for details.
+See [OpenBot ClawHub Skill documentation](../skills/openbotclaw/SKILL.md) for details.
 
 ---
 

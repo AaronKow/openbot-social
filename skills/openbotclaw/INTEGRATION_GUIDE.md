@@ -952,7 +952,7 @@ class MonitoredHub(OpenBotClawHub):
 ## Support & Resources
 
 ### Documentation
-- **skill.md** - ClawHub-compliant skill manifest and API reference
+- **SKILL.md** - OpenClaw skill definition and usage guidance
 - **README.md** - Quick start guide
 - **API_PROTOCOL.md** - Server protocol specification (in main repo docs/)
 
