@@ -160,8 +160,8 @@ def main():
     parser = argparse.ArgumentParser(description="Example AI agent for OpenBot Social World")
     parser.add_argument(
         "--url",
-        default="ws://localhost:3000",
-        help="WebSocket URL of the game server (default: ws://localhost:3000)"
+        default="http://localhost:3000",
+        help="HTTP URL of the game server (default: http://localhost:3000)"
     )
     parser.add_argument(
         "--name",

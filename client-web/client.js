@@ -8,11 +8,13 @@ class OpenBotWorld {
         this.renderer = null;
         this.controls = null;
         this.agents = new Map(); // agentId -> { mesh, data }
-        this.ws = null;
         this.connected = false;
+        this.pollInterval = 500; // Poll every 500ms
+        this.lastChatTimestamp = 0;
+        this.apiBase = '/api';
         
         this.init();
-        this.connectWebSocket();
+        this.startPolling();
         this.animate();
     }
     
@@ -213,82 +215,112 @@ class OpenBotWorld {
         return group;
     }
     
-    connectWebSocket() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}`;
+    startPolling() {
+        // Initial connection test
+        this.testConnection();
         
-        console.log('Connecting to:', wsUrl);
-        this.ws = new WebSocket(wsUrl);
+        // Start polling for world state
+        setInterval(() => this.pollWorldState(), this.pollInterval);
         
-        this.ws.onopen = () => {
-            console.log('Connected to server');
-            this.connected = true;
-            this.updateStatus();
-        };
-        
-        this.ws.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            this.handleMessage(message);
-        };
-        
-        this.ws.onclose = () => {
-            console.log('Disconnected from server');
+        // Poll for chat messages slightly less frequently
+        setInterval(() => this.pollChatMessages(), this.pollInterval * 2);
+    }
+    
+    async testConnection() {
+        try {
+            const response = await fetch(`${this.apiBase}/ping`);
+            if (response.ok) {
+                console.log('Connected to server');
+                this.connected = true;
+                this.updateStatus();
+            }
+        } catch (error) {
+            console.error('Connection error:', error);
             this.connected = false;
             this.updateStatus();
-            
-            // Reconnect after 3 seconds
-            setTimeout(() => this.connectWebSocket(), 3000);
-        };
+        }
+    }
+    
+    async pollWorldState() {
+        if (!this.connected) {
+            await this.testConnection();
+            return;
+        }
         
-        this.ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-        };
+        try {
+            const response = await fetch(`${this.apiBase}/world-state`);
+            if (response.ok) {
+                const data = await response.json();
+                this.handleWorldState(data);
+            } else {
+                this.connected = false;
+                this.updateStatus();
+            }
+        } catch (error) {
+            console.error('Poll error:', error);
+            this.connected = false;
+            this.updateStatus();
+        }
+    }
+    
+    async pollChatMessages() {
+        if (!this.connected) return;
+        
+        try {
+            const url = `${this.apiBase}/chat?since=${this.lastChatTimestamp}`;
+            const response = await fetch(url);
+            
+            if (response.ok) {
+                const data = await response.json();
+                const messages = data.messages || [];
+                
+                messages.forEach(msg => {
+                    if (msg.timestamp > this.lastChatTimestamp) {
+                        this.lastChatTimestamp = msg.timestamp;
+                        this.addChatMessage(msg);
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('Chat poll error:', error);
+        }
     }
     
     handleMessage(message) {
-        switch (message.type) {
-            case 'world_state':
-                this.handleWorldState(message);
-                break;
-                
-            case 'agent_joined':
-                this.addAgent(message.agent);
-                break;
-                
-            case 'agent_left':
-                this.removeAgent(message.agentId);
-                break;
-                
-            case 'agent_moved':
-                this.updateAgentPosition(message.agentId, message.position, message.rotation);
-                break;
-                
-            case 'chat_message':
-                this.addChatMessage(message);
-                break;
-                
-            case 'agent_action':
-                console.log('Agent action:', message.agentId, message.action);
-                break;
-                
-            case 'pong':
-                // Handle ping response
-                break;
-                
-            default:
-                console.log('Unknown message type:', message.type);
-        }
-        
-        this.updateStatus();
+        // This method is no longer used with HTTP polling
+        // Keeping for potential compatibility
     }
     
-    handleWorldState(message) {
-        document.getElementById('tick-count').textContent = message.tick;
+    handleWorldState(data) {
+        // Update tick count
+        if (data.tick) {
+            document.getElementById('tick-count').textContent = data.tick;
+        }
         
-        // Add all agents
-        message.agents.forEach(agent => {
-            this.addAgent(agent);
+        // Get current agent IDs from the server
+        const serverAgentIds = new Set();
+        data.agents.forEach(agent => {
+            serverAgentIds.add(agent.id);
+            
+            if (this.agents.has(agent.id)) {
+                // Update existing agent
+                this.updateAgentPosition(agent.id, agent.position, agent.rotation);
+                this.agents.get(agent.id).data = agent;
+            } else {
+                // Add new agent
+                this.addAgent(agent);
+            }
         });
+        
+        // Remove agents that are no longer on the server
+        const localAgentIds = Array.from(this.agents.keys());
+        localAgentIds.forEach(agentId => {
+            if (!serverAgentIds.has(agentId)) {
+                this.removeAgent(agentId);
+            }
+        });
+        
+        this.updateStatus();
     }
     
     addAgent(agentData) {

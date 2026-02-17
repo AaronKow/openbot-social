@@ -1,31 +1,32 @@
 const express = require('express');
-const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
-const http = require('http');
 const path = require('path');
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Configuration
 const PORT = process.env.PORT || 3000;
 const TICK_RATE = 30; // 30 updates per second
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
+const AGENT_TIMEOUT = 30000; // 30 seconds of inactivity before cleanup
 
 // World State
 const worldState = {
   agents: new Map(), // agentId -> agent data
   objects: new Map(), // objectId -> object data
+  chatMessages: [], // Recent chat messages
   tick: 0
 };
 
 // Agent class to manage individual agents
 class Agent {
-  constructor(id, name, ws) {
+  constructor(id, name) {
     this.id = id;
     this.name = name;
-    this.ws = ws;
     this.position = {
       x: Math.random() * WORLD_SIZE.x,
       y: 0,
@@ -52,24 +53,6 @@ class Agent {
   }
 }
 
-// Broadcast message to all connected clients except sender
-function broadcast(message, excludeWs = null) {
-  const data = JSON.stringify(message);
-  wss.clients.forEach(client => {
-    if (client !== excludeWs && client.readyState === 1) { // 1 = OPEN
-      client.send(data);
-    }
-  });
-}
-
-// Broadcast to specific agent
-function sendToAgent(agentId, message) {
-  const agent = worldState.agents.get(agentId);
-  if (agent && agent.ws.readyState === 1) {
-    agent.ws.send(JSON.stringify(message));
-  }
-}
-
 // Validate movement
 function validatePosition(pos) {
   return {
@@ -79,163 +62,297 @@ function validatePosition(pos) {
   };
 }
 
-// Handle WebSocket connections
-wss.on('connection', (ws) => {
-  console.log('New client connected');
-  let currentAgent = null;
-
-  ws.on('message', (data) => {
-    try {
-      const message = JSON.parse(data);
-      
-      switch (message.type) {
-        case 'register':
-          // Register new agent
-          const agentId = uuidv4();
-          const agent = new Agent(agentId, message.name || 'Anonymous', ws);
-          worldState.agents.set(agentId, agent);
-          currentAgent = agent;
-
-          // Send registration success
-          ws.send(JSON.stringify({
-            type: 'registered',
-            success: true,
-            agentId: agentId,
-            position: agent.position,
-            worldSize: WORLD_SIZE
-          }));
-
-          // Broadcast new agent to others
-          broadcast({
-            type: 'agent_joined',
-            agent: agent.toJSON()
-          }, ws);
-
-          // Send current world state to new agent
-          ws.send(JSON.stringify({
-            type: 'world_state',
-            tick: worldState.tick,
-            agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
-            objects: Array.from(worldState.objects.values())
-          }));
-
-          console.log(`Agent registered: ${agent.name} (${agentId})`);
-          break;
-
-        case 'move':
-          if (!currentAgent) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Not registered' }));
-            return;
-          }
-
-          // Update agent position
-          if (message.position) {
-            currentAgent.position = validatePosition(message.position);
-          }
-          if (message.rotation !== undefined) {
-            currentAgent.rotation = message.rotation;
-          }
-          currentAgent.state = 'moving';
-          currentAgent.lastUpdate = Date.now();
-
-          // Broadcast movement
-          broadcast({
-            type: 'agent_moved',
-            agentId: currentAgent.id,
-            position: currentAgent.position,
-            rotation: currentAgent.rotation
-          });
-          break;
-
-        case 'chat':
-          if (!currentAgent) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Not registered' }));
-            return;
-          }
-
-          // Broadcast chat message
-          broadcast({
-            type: 'chat_message',
-            agentId: currentAgent.id,
-            agentName: currentAgent.name,
-            message: message.message,
-            timestamp: Date.now()
-          });
-
-          console.log(`${currentAgent.name}: ${message.message}`);
-          break;
-
-        case 'action':
-          if (!currentAgent) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Not registered' }));
-            return;
-          }
-
-          currentAgent.lastAction = message.action;
-          currentAgent.lastUpdate = Date.now();
-
-          // Broadcast action
-          broadcast({
-            type: 'agent_action',
-            agentId: currentAgent.id,
-            action: message.action
-          });
-          break;
-
-        case 'ping':
-          ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
-          break;
-
-        default:
-          ws.send(JSON.stringify({ 
-            type: 'error', 
-            message: `Unknown message type: ${message.type}` 
-          }));
-      }
-    } catch (error) {
-      console.error('Error handling message:', error);
-      ws.send(JSON.stringify({ 
-        type: 'error', 
-        message: 'Invalid message format' 
-      }));
-    }
+// Add chat message to history (keep last 100 messages)
+function addChatMessage(agentId, agentName, message) {
+  worldState.chatMessages.push({
+    agentId,
+    agentName,
+    message,
+    timestamp: Date.now()
   });
+  
+  // Keep only last 100 messages
+  if (worldState.chatMessages.length > 100) {
+    worldState.chatMessages = worldState.chatMessages.slice(-100);
+  }
+}
 
-  ws.on('close', () => {
-    if (currentAgent) {
-      console.log(`Agent disconnected: ${currentAgent.name} (${currentAgent.id})`);
-      worldState.agents.delete(currentAgent.id);
-      
-      // Broadcast agent left
-      broadcast({
-        type: 'agent_left',
-        agentId: currentAgent.id
+// CORS middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// ============= HTTP API ENDPOINTS =============
+
+// Register a new agent
+app.post('/api/register', (req, res) => {
+  try {
+    const { name } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Name is required' 
       });
     }
-  });
+    
+    const agentId = uuidv4();
+    const agent = new Agent(agentId, name);
+    worldState.agents.set(agentId, agent);
+    
+    console.log(`Agent registered: ${agent.name} (${agentId})`);
+    
+    res.json({
+      success: true,
+      agentId: agentId,
+      position: agent.position,
+      worldSize: WORLD_SIZE
+    });
+  } catch (error) {
+    console.error('Error registering agent:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
 
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+// Move agent
+app.post('/api/move', (req, res) => {
+  try {
+    const { agentId, position, rotation } = req.body;
+    
+    if (!agentId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'agentId is required' 
+      });
+    }
+    
+    const agent = worldState.agents.get(agentId);
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Agent not found' 
+      });
+    }
+    
+    // Update agent position
+    if (position) {
+      agent.position = validatePosition(position);
+    }
+    if (rotation !== undefined) {
+      agent.rotation = rotation;
+    }
+    agent.state = 'moving';
+    agent.lastUpdate = Date.now();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error moving agent:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Send chat message
+app.post('/api/chat', (req, res) => {
+  try {
+    const { agentId, message } = req.body;
+    
+    if (!agentId || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'agentId and message are required' 
+      });
+    }
+    
+    const agent = worldState.agents.get(agentId);
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Agent not found' 
+      });
+    }
+    
+    // Add chat message to history
+    addChatMessage(agentId, agent.name, message);
+    console.log(`${agent.name}: ${message}`);
+    
+    agent.lastUpdate = Date.now();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error sending chat:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Perform action
+app.post('/api/action', (req, res) => {
+  try {
+    const { agentId, action } = req.body;
+    
+    if (!agentId || !action) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'agentId and action are required' 
+      });
+    }
+    
+    const agent = worldState.agents.get(agentId);
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Agent not found' 
+      });
+    }
+    
+    agent.lastAction = action;
+    agent.lastUpdate = Date.now();
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error performing action:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Ping endpoint
+app.get('/api/ping', (req, res) => {
+  res.json({ 
+    success: true, 
+    timestamp: Date.now() 
   });
+});
+
+// Get world state
+app.get('/api/world-state', (req, res) => {
+  try {
+    const { agentId } = req.query;
+    
+    // Update agent's last seen time if provided
+    if (agentId) {
+      const agent = worldState.agents.get(agentId);
+      if (agent) {
+        agent.lastUpdate = Date.now();
+      }
+    }
+    
+    res.json({
+      tick: worldState.tick,
+      agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
+      objects: Array.from(worldState.objects.values())
+    });
+  } catch (error) {
+    console.error('Error getting world state:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Get specific agent
+app.get('/api/agent/:agentId', (req, res) => {
+  try {
+    const { agentId } = req.params;
+    
+    const agent = worldState.agents.get(agentId);
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Agent not found' 
+      });
+    }
+    
+    res.json(agent.toJSON());
+  } catch (error) {
+    console.error('Error getting agent:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Get chat messages (with optional since parameter)
+app.get('/api/chat', (req, res) => {
+  try {
+    const { since } = req.query;
+    
+    let messages = worldState.chatMessages;
+    
+    // Filter messages since timestamp if provided
+    if (since) {
+      const sinceTime = parseInt(since);
+      messages = messages.filter(msg => msg.timestamp > sinceTime);
+    }
+    
+    res.json({ messages });
+  } catch (error) {
+    console.error('Error getting chat messages:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
+});
+
+// Disconnect agent (optional cleanup endpoint)
+app.delete('/api/disconnect/:agentId', (req, res) => {
+  try {
+    const { agentId } = req.params;
+    
+    const agent = worldState.agents.get(agentId);
+    if (agent) {
+      console.log(`Agent disconnected: ${agent.name} (${agentId})`);
+      worldState.agents.delete(agentId);
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ 
+        success: false, 
+        error: 'Agent not found' 
+      });
+    }
+  } catch (error) {
+    console.error('Error disconnecting agent:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
+  }
 });
 
 // Game loop - Update world state periodically
 function gameLoop() {
   worldState.tick++;
 
-  // Clean up disconnected agents
+  // Clean up inactive agents (no updates for AGENT_TIMEOUT ms)
+  const now = Date.now();
   for (const [agentId, agent] of worldState.agents.entries()) {
-    if (!agent.connected || agent.ws.readyState !== 1) {
+    if (now - agent.lastUpdate > AGENT_TIMEOUT) {
+      console.log(`Cleaning up inactive agent: ${agent.name} (${agentId})`);
       worldState.agents.delete(agentId);
-      broadcast({
-        type: 'agent_left',
-        agentId: agentId
-      });
     }
   }
 
   // Update agent states (idle if no recent actions)
-  const now = Date.now();
   for (const agent of worldState.agents.values()) {
     if (now - agent.lastUpdate > 1000) {
       agent.state = 'idle';
@@ -249,7 +366,7 @@ setInterval(gameLoop, 1000 / TICK_RATE);
 // Serve static files (web client)
 app.use(express.static(path.join(__dirname, '../client-web')));
 
-// API endpoints
+// Status API endpoint
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
@@ -259,6 +376,7 @@ app.get('/api/status', (req, res) => {
   });
 });
 
+// Get all agents (alias for compatibility)
 app.get('/api/agents', (req, res) => {
   res.json({
     agents: Array.from(worldState.agents.values()).map(a => a.toJSON())
@@ -266,9 +384,9 @@ app.get('/api/agents', (req, res) => {
 });
 
 // Start server
-server.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`OpenBot Social Server running on port ${PORT}`);
-  console.log(`WebSocket: ws://localhost:${PORT}`);
+  console.log(`HTTP API: http://localhost:${PORT}/api`);
   console.log(`Web Client: http://localhost:${PORT}`);
-  console.log(`API: http://localhost:${PORT}/api/status`);
+  console.log(`API Status: http://localhost:${PORT}/api/status`);
 });
