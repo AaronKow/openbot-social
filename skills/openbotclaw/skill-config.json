@@ -1,12 +1,19 @@
 {
   "name": "openbotclaw",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "CrawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
   "author": "OpenBot Social Team",
   "license": "MIT",
-  "crawHubVersion": "1.0",
+  "crawHubVersion": "1.0+",
   "skillType": "communication",
-  "tags": ["websocket", "virtual-world", "social", "3d", "real-time", "multiplayer"],
+  "tags": [
+    "http",
+    "virtual-world",
+    "social",
+    "3d",
+    "real-time",
+    "multiplayer"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/AaronKow/openbot-social"
@@ -20,12 +27,6 @@
     "description": "skill.md"
   },
   "configuration": {
-    "websocket_url": {
-      "type": "string",
-      "default": "ws://localhost:3000",
-      "description": "WebSocket URL of OpenBot Social World server",
-      "required": true
-    },
     "agent_name": {
       "type": "string",
       "default": null,
@@ -61,33 +62,67 @@
       "default": "INFO",
       "description": "Logging level (DEBUG, INFO, WARNING, ERROR)",
       "required": false,
-      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"]
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR"
+      ]
+    },
+    "url": {
+      "type": "string",
+      "default": "http://localhost:3000",
+      "description": "HTTP URL of OpenBot Social World server",
+      "required": true
+    },
+    "polling_interval": {
+      "type": "number",
+      "default": 1.0,
+      "description": "Interval between world-state polling requests in seconds",
+      "required": false
     }
   },
   "capabilities": {
     "connection": {
-      "description": "Connect to OpenBot Social World server via WebSocket",
-      "methods": ["connect", "disconnect", "is_connected"]
+      "description": "Connect to OpenBot Social World server via HTTP",
+      "methods": [
+        "connect",
+        "disconnect",
+        "is_connected"
+      ]
     },
     "registration": {
       "description": "Register agent with server and spawn as lobster avatar",
-      "methods": ["register", "is_registered"]
+      "methods": [
+        "register",
+        "is_registered"
+      ]
     },
     "movement": {
       "description": "Control agent movement and positioning in 3D world",
-      "methods": ["move", "get_position", "get_rotation"]
+      "methods": [
+        "move",
+        "get_position",
+        "get_rotation"
+      ]
     },
     "communication": {
       "description": "Chat with other agents in real-time",
-      "methods": ["chat"]
+      "methods": [
+        "chat"
+      ]
     },
     "actions": {
       "description": "Perform custom actions in the world",
-      "methods": ["action"]
+      "methods": [
+        "action"
+      ]
     },
     "events": {
       "description": "Subscribe to world events via callbacks",
-      "methods": ["register_callback"],
+      "methods": [
+        "register_callback"
+      ],
       "events": [
         "on_connected",
         "on_disconnected",
@@ -102,20 +137,29 @@
     },
     "state": {
       "description": "Query world state and agent information",
-      "methods": ["get_status", "get_registered_agents"]
+      "methods": [
+        "get_status",
+        "get_registered_agents"
+      ]
     },
     "configuration": {
       "description": "Configure skill behavior at runtime",
-      "methods": ["set_config", "get_config"]
+      "methods": [
+        "set_config",
+        "get_config"
+      ]
     }
   },
   "dependencies": {
     "python": ">=3.7",
     "packages": {
-      "websocket-client": ">=1.0.0",
       "requests": ">=2.28.0"
     }
   },
-  "platforms": ["linux", "macos", "windows"],
+  "platforms": [
+    "linux",
+    "macos",
+    "windows"
+  ],
   "status": "stable"
 }

@@ -33,7 +33,7 @@ import time
 import threading
 import logging
 import queue
-from typing import Callable, Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List
 from enum import Enum
 import requests
 from requests.adapters import HTTPAdapter
@@ -230,7 +230,7 @@ class OpenBotClawHub:
         # Set default headers
         session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': f'OpenBotClawHub/{agent_name or "Anonymous"}'
+            'User-Agent': f'OpenBotClawHub/{self.agent_name or "Anonymous"}'
         })
         
         return session
@@ -719,12 +719,13 @@ class OpenBotClawHub:
             return True
         except requests.exceptions.RequestException:
             self.logger.warning("Connection check failed")
+            was_registered = self.is_registered()
             with self._lock:
                 self.state = ConnectionState.DISCONNECTED
                 self.agent_id = None
             self._trigger_callback("on_disconnected", {
                 "message": "Connection lost",
-                "was_registered": self.is_registered()
+                "was_registered": was_registered
             })
             return False
     

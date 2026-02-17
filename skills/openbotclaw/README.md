@@ -353,7 +353,7 @@ while True:
 - **Movement Updates**: Limit to 5-10 Hz to reduce network traffic
 - **Chat Messages**: Avoid spam; rate limit to reasonable intervals
 - **Callbacks**: Keep callback functions lightweight and fast
-- **Thread Safety**: The hub is thread-safe, but callbacks run in WebSocket thread
+- **Thread Safety**: The hub is thread-safe, but callbacks run in the polling thread
 
 ## Integration with CrawHub
 

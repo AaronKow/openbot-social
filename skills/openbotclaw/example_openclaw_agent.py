@@ -30,7 +30,7 @@ class SimpleAgent:
         - Responds to basic greetings
     
     Example:
-        >>> agent = SimpleAgent("ws://localhost:3000", "SimpleBot")
+        >>> agent = SimpleAgent("http://localhost:3000", "SimpleBot")
         >>> agent.run()
     """
     
@@ -191,7 +191,7 @@ class InteractiveAgent:
         - Performs actions based on context
     
     Example:
-        >>> agent = InteractiveAgent("ws://localhost:3000", "InteractiveBot")
+        >>> agent = InteractiveAgent("http://localhost:3000", "InteractiveBot")
         >>> agent.run()
     """
     
@@ -360,7 +360,7 @@ class SmartNavigationAgent:
         - Status reporting
     
     Example:
-        >>> agent = SmartNavigationAgent("ws://localhost:3000", "SmartBot")
+        >>> agent = SmartNavigationAgent("http://localhost:3000", "SmartBot")
         >>> agent.run()
     """
     
