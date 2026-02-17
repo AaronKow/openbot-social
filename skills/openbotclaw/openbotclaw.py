@@ -1,17 +1,17 @@
 """
-OpenBot CrawHub Skill Plugin
+OpenBot ClawHub Skill Plugin
 
-A professional CrawHub-compliant skill plugin that enables OpenClaw agents to connect
+A professional ClawHub-compliant skill plugin that enables OpenClaw agents to connect
 to OpenBot Social World virtual environment. This plugin provides HTTP-based
 connection management, agent control, real-time communication, and event handling.
 
-CrawHub Compliance:
-- Follows CrawHub v1.0+ skill specification standards
-- Implements CrawHub-standard error handling patterns
-- Uses CrawHub-compliant configuration parameter naming
-- Provides CrawHub-standard callback interface
+ClawHub Compliance:
+- Follows ClawHub v1.0+ skill specification standards
+- Implements ClawHub-standard error handling patterns
+- Uses ClawHub-compliant configuration parameter naming
+- Provides ClawHub-standard callback interface
 
-For CrawHub standards and documentation, visit: https://clawhub.ai/
+For ClawHub standards and documentation, visit: https://clawhub.ai/
 
 Usage:
     hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
@@ -25,7 +25,7 @@ Usage:
 Author: OpenBot Social Team
 Version: 2.0.0
 License: MIT
-CrawHub Version: 1.0+
+ClawHub Version: 1.0+
 """
 
 import json
@@ -33,7 +33,7 @@ import time
 import threading
 import logging
 import queue
-from typing import Callable, Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List
 from enum import Enum
 import requests
 from requests.adapters import HTTPAdapter
@@ -71,19 +71,19 @@ class MessageError(OpenBotClawHubException):
 
 class OpenBotClawHub:
     """
-    CrawHub-compliant skill plugin for OpenBot Social World integration.
+    ClawHub-compliant skill plugin for OpenBot Social World integration.
     
     This class provides a robust interface for OpenClaw agents to connect to
     OpenBot Social World, enabling real-time communication, movement control,
     and event-driven interactions in a 3D virtual environment using HTTP requests.
     
-    CrawHub Compliance:
-        - Follows CrawHub v1.0+ skill API standards
-        - Implements CrawHub error handling patterns
-        - Uses CrawHub-standard callback naming conventions
-        - Provides CrawHub-compliant configuration interface
+    ClawHub Compliance:
+        - Follows ClawHub v1.0+ skill API standards
+        - Implements ClawHub error handling patterns
+        - Uses ClawHub-standard callback naming conventions
+        - Provides ClawHub-compliant configuration interface
         
-    For CrawHub documentation, visit: https://clawhub.ai/
+    For ClawHub documentation, visit: https://clawhub.ai/
     
     Features:
         - Automatic reconnection with exponential backoff
@@ -128,7 +128,7 @@ class OpenBotClawHub:
         """
         Initialize OpenBotClawHub skill plugin.
         
-        CrawHub-compliant initialization with standard configuration parameters.
+        ClawHub-compliant initialization with standard configuration parameters.
         
         Args:
             url: HTTP URL of OpenBot Social World server
@@ -230,7 +230,7 @@ class OpenBotClawHub:
         # Set default headers
         session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': f'OpenBotClawHub/{agent_name or "Anonymous"}'
+            'User-Agent': f'OpenBotClawHub/{self.agent_name or "Anonymous"}'
         })
         
         return session
@@ -562,6 +562,8 @@ class OpenBotClawHub:
             self.connection_timeout = int(value)
         elif key == "enable_message_queue":
             self.enable_message_queue = bool(value)
+        elif key == "polling_interval":
+            self.polling_interval = max(0.1, float(value))
         elif key == "log_level":
             self.logger.setLevel(getattr(logging, str(value).upper()))
         else:
@@ -589,6 +591,7 @@ class OpenBotClawHub:
             "reconnect_max_delay": self.reconnect_max_delay,
             "connection_timeout": self.connection_timeout,
             "enable_message_queue": self.enable_message_queue,
+            "polling_interval": self.polling_interval,
             "log_level": self.logger.level
         }
         return config_map.get(key)
@@ -719,12 +722,13 @@ class OpenBotClawHub:
             return True
         except requests.exceptions.RequestException:
             self.logger.warning("Connection check failed")
+            was_registered = self.is_registered()
             with self._lock:
                 self.state = ConnectionState.DISCONNECTED
                 self.agent_id = None
             self._trigger_callback("on_disconnected", {
                 "message": "Connection lost",
-                "was_registered": self.is_registered()
+                "was_registered": was_registered
             })
             return False
     
