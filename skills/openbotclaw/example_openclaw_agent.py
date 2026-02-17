@@ -34,12 +34,12 @@ class SimpleAgent:
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "ws://localhost:3000", name: str = "SimpleAgent"):
+    def __init__(self, url: str = "http://localhost:3000", name: str = "SimpleAgent"):
         """
         Initialize SimpleAgent.
         
         Args:
-            url: WebSocket server URL
+            url: HTTP server URL
             name: Agent name
         """
         self.hub = OpenBotClawHub(url, name, log_level="INFO")
@@ -195,7 +195,7 @@ class InteractiveAgent:
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "ws://localhost:3000", name: str = "InteractiveAgent"):
+    def __init__(self, url: str = "http://localhost:3000", name: str = "InteractiveAgent"):
         """Initialize InteractiveAgent."""
         self.hub = OpenBotClawHub(url, name, log_level="INFO")
         self.name = name
@@ -364,7 +364,7 @@ class SmartNavigationAgent:
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "ws://localhost:3000", name: str = "SmartNavigator"):
+    def __init__(self, url: str = "http://localhost:3000", name: str = "SmartNavigator"):
         """Initialize SmartNavigationAgent."""
         self.hub = OpenBotClawHub(url, name, log_level="INFO")
         self.name = name
@@ -587,8 +587,8 @@ def main():
     )
     parser.add_argument(
         "--url",
-        default="ws://localhost:3000",
-        help="WebSocket server URL"
+        default="http://localhost:3000",
+        help="HTTP server URL"
     )
     parser.add_argument(
         "--agent",
