@@ -8,6 +8,7 @@ class OpenBotWorld {
         this.renderer = null;
         this.controls = null;
         this.agents = new Map(); // agentId -> { mesh, data }
+        this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
         this.pollInterval = 500; // Poll every 500ms
         this.lastChatTimestamp = 0;
@@ -52,9 +53,8 @@ class OpenBotWorld {
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
-        this.controls.minDistance = 10;
-        this.controls.maxDistance = 150;
-        this.controls.maxPolarAngle = Math.PI / 2 - 0.1;
+        this.controls.minDistance = 0.1;
+        this.controls.maxDistance = 500;
         
         // Lights
         const ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
@@ -80,22 +80,13 @@ class OpenBotWorld {
     }
     
     createOceanFloor() {
-        // Sand floor
-        const floorGeometry = new THREE.PlaneGeometry(100, 100, 50, 50);
+        // Sand floor - smooth and even
+        const floorGeometry = new THREE.PlaneGeometry(100, 100);
         const floorMaterial = new THREE.MeshStandardMaterial({
             color: 0xc2b280,
             roughness: 0.8,
             metalness: 0.2
         });
-        
-        // Add some height variation
-        const positionAttribute = floorGeometry.attributes.position;
-        for (let i = 0; i < positionAttribute.count; i++) {
-            const z = Math.random() * 0.5;
-            positionAttribute.setZ(i, z);
-        }
-        positionAttribute.needsUpdate = true;
-        floorGeometry.computeVertexNormals();
         
         const floor = new THREE.Mesh(floorGeometry, floorMaterial);
         floor.rotation.x = -Math.PI / 2;
@@ -200,7 +191,7 @@ class OpenBotWorld {
         rightAntenna.rotation.z = -Math.PI / 6;
         group.add(rightAntenna);
         
-        // Name label
+        // Name label - positioned above the lobster
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
         canvas.width = 256;
@@ -215,7 +206,7 @@ class OpenBotWorld {
         const texture = new THREE.CanvasTexture(canvas);
         const labelMaterial = new THREE.SpriteMaterial({ map: texture });
         const label = new THREE.Sprite(labelMaterial);
-        label.position.set(0, 0, 2);
+        label.position.set(0, 1.8, 0);
         label.scale.set(4, 1, 1);
         group.add(label);
         
@@ -231,6 +222,9 @@ class OpenBotWorld {
         
         // Poll for chat messages slightly less frequently
         setInterval(() => this.pollChatMessages(), this.pollInterval * 2);
+        
+        // Update chat bubbles
+        setInterval(() => this.updateChatBubbles(), 100);
     }
     
     async testConnection() {
@@ -336,7 +330,7 @@ class OpenBotWorld {
         }
         
         const mesh = this.createLobsterMesh(agentData.name);
-        mesh.position.set(agentData.position.x, agentData.position.y, agentData.position.z);
+        mesh.position.set(agentData.position.x, 0.5, agentData.position.z);
         mesh.rotation.y = agentData.rotation || 0;
         this.scene.add(mesh);
         
@@ -362,9 +356,9 @@ class OpenBotWorld {
     updateAgentPosition(agentId, position, rotation) {
         const agent = this.agents.get(agentId);
         if (agent) {
-            // Smooth interpolation
+            // Smooth interpolation - keep y fixed at floor level (0.5)
             agent.mesh.position.lerp(
-                new THREE.Vector3(position.x, position.y, position.z),
+                new THREE.Vector3(position.x, 0.5, position.z),
                 0.3
             );
             if (rotation !== undefined) {
@@ -388,6 +382,85 @@ class OpenBotWorld {
         
         // Scroll to bottom
         chatDiv.scrollTop = chatDiv.scrollHeight;
+        
+        // Show chat bubble above lobster
+        this.showChatBubble(message.agentId, message.message);
+    }
+    
+    showChatBubble(agentId, text) {
+        const agent = this.agents.get(agentId);
+        if (!agent) return;
+        
+        // Remove old bubble if exists
+        if (this.chatBubbles.has(agentId)) {
+            const oldBubble = this.chatBubbles.get(agentId).bubble;
+            agent.mesh.remove(oldBubble);
+        }
+        
+        // Create canvas texture for chat bubble
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = 512;
+        canvas.height = 256;
+        
+        // Chat bubble background
+        context.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        context.beginPath();
+        context.roundRect(20, 20, 472, 180, 15);
+        context.fill();
+        
+        // Text
+        context.font = 'Bold 28px Arial';
+        context.fillStyle = '#ffff00';
+        context.textAlign = 'center';
+        
+        // Wrap text
+        const maxWidth = 450;
+        const words = text.split(' ');
+        let lines = [];
+        let currentLine = '';
+        
+        words.forEach(word => {
+            const testLine = currentLine + (currentLine ? ' ' : '') + word;
+            const metrics = context.measureText(testLine);
+            if (metrics.width > maxWidth && currentLine) {
+                lines.push(currentLine);
+                currentLine = word;
+            } else {
+                currentLine = testLine;
+            }
+        });
+        if (currentLine) lines.push(currentLine);
+        
+        const lineHeight = 40;
+        const startY = 60;
+        lines.forEach((line, index) => {
+            context.fillText(line, 256, startY + index * lineHeight);
+        });
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        const material = new THREE.SpriteMaterial({ map: texture });
+        const bubble = new THREE.Sprite(material);
+        bubble.position.set(0, 3.5, 0);
+        bubble.scale.set(6, 3, 1);
+        agent.mesh.add(bubble);
+        
+        this.chatBubbles.set(agentId, { bubble, createdAt: Date.now() });
+    }
+    
+    updateChatBubbles() {
+        const now = Date.now();
+        const bubbleTimeout = 5000; // 5 seconds
+        
+        for (const [agentId, data] of this.chatBubbles.entries()) {
+            if (now - data.createdAt > bubbleTimeout) {
+                const agent = this.agents.get(agentId);
+                if (agent) {
+                    agent.mesh.remove(data.bubble);
+                }
+                this.chatBubbles.delete(agentId);
+            }
+        }
     }
     
     updateStatus() {

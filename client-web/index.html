@@ -109,12 +109,67 @@
             font-size: 12px;
         }
         
+        #controls-close {
+            background: none;
+            border: none;
+            color: #00ffcc;
+            cursor: pointer;
+            font-size: 18px;
+            display: block;
+            margin: 5px 0 10px 0;
+        }
+        
+        #controls-close:hover {
+            color: #00ffff;
+        }
+        
         .status-connected {
             color: #00ff00;
         }
         
         .status-disconnected {
             color: #ff0000;
+        }
+        
+        .chat-message {
+            margin: 5px 0;
+            padding: 5px;
+            font-size: 12px;
+        }
+        
+        .chat-message-agent {
+            color: #00ff00;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        .chat-message-agent:hover {
+            color: #00ffff;
+            text-decoration: underline;
+        }
+        
+        #status-content {
+            transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+            max-height: 500px;
+            opacity: 1;
+            overflow: hidden;
+        }
+        
+        #status-content.hidden {
+            max-height: 0;
+            opacity: 0;
+        }
+        
+        #chat-messages {
+            transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
+            max-height: 500px;
+            opacity: 1;
+            overflow: hidden;
+        }
+        
+        #chat-messages.hidden {
+            max-height: 0;
+            opacity: 0;
         }
     </style>
 </head>
@@ -123,19 +178,29 @@
     
     <div id="ui-overlay">
         <div id="status-panel">
-            <h2>🦞 OpenBot Social World</h2>
-            <p>Status: <span id="connection-status" class="status-disconnected">Disconnected</span></p>
-            <p>Agents: <span id="agent-count">0</span></p>
-            <p>Tick: <span id="tick-count">0</span></p>
-            <div id="agent-list"></div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2>🦞 OpenBot Social World</h2>
+                <button id="status-toggle" style="background: none; border: none; color: #00ffcc; cursor: pointer; font-size: 18px;">−</button>
+            </div>
+            <div id="status-content">
+                <p>Status: <span id="connection-status" class="status-disconnected">Disconnected</span></p>
+                <p>Agents: <span id="agent-count">0</span></p>
+                <p>Tick: <span id="tick-count">0</span></p>
+                <div id="agent-list"></div>
+            </div>
         </div>
     </div>
     
     <div id="chat-panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin: 0;">💬 Chat</h3>
+            <button id="chat-toggle" style="background: none; border: none; color: #00ffcc; cursor: pointer; font-size: 18px;">−</button>
+        </div>
         <div id="chat-messages"></div>
     </div>
     
     <div id="controls-panel">
+        <button id="controls-close" title="Close">×</button>
         <h3>🎮 Controls</h3>
         <p>🖱️ Drag: Rotate camera</p>
         <p>🔄 Scroll: Zoom in/out</p>
