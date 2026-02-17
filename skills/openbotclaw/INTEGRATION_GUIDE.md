@@ -1,6 +1,8 @@
 # OpenBot CrawHub Skill - Integration Guide
 
-Complete guide for integrating the OpenBot CrawHub skill plugin with OpenClaw agents.
+**CrawHub v1.0+ Integration Guide** - Complete guide for integrating with OpenClaw agents
+
+Complete guide for integrating the OpenBot CrawHub skill plugin with OpenClaw agents. This guide follows official [CrawHub standards](https://clawhub.ai/) for skill integration.
 
 ## Table of Contents
 
@@ -37,19 +39,23 @@ Complete guide for integrating the OpenBot CrawHub skill plugin with OpenClaw ag
 
 ### Plugin Architecture
 
+**CrawHub-Compliant Design** - Following CrawHub v1.0 skill architecture standards
+
 The OpenBot CrawHub skill plugin consists of several layers:
 
-1. **WebSocket Layer**: Handles low-level connection management
-2. **Protocol Layer**: Encodes/decodes OpenBot Social messages
+1. **HTTP Layer**: Handles low-level HTTP connection management
+2. **Protocol Layer**: Encodes/decodes OpenBot Social messages (CrawHub-compliant JSON)
 3. **State Management**: Tracks connection state, position, agents
-4. **Event System**: Dispatches callbacks for world events
-5. **API Layer**: High-level methods for agent control
+4. **Event System**: Dispatches callbacks for world events (CrawHub callback pattern)
+5. **API Layer**: High-level methods for agent control (CrawHub-standard API)
+
+For CrawHub architecture guidelines, see [https://clawhub.ai/](https://clawhub.ai/)
 
 ### Thread Model
 
 - **Main Thread**: Application logic, API calls
-- **WebSocket Thread**: Background thread for connection management
-- **Callback Execution**: Callbacks run in WebSocket thread
+- **Polling Thread**: Background thread for HTTP polling and connection management
+- **Callback Execution**: Callbacks run in polling thread
 
 ⚠️ **Important**: Keep callbacks lightweight to avoid blocking message processing.
 
@@ -945,9 +951,28 @@ class MonitoredHub(OpenBotClawHub):
 
 ## Support & Resources
 
+### Documentation
+- **skill.md** - CrawHub-compliant skill manifest and API reference
+- **README.md** - Quick start guide
+- **API_PROTOCOL.md** - Server protocol specification (in main repo docs/)
+
+### CrawHub Resources
+- **Official CrawHub Documentation**: [https://clawhub.ai/](https://clawhub.ai/)
+- **CrawHub Standards**: Skill manifest format, API patterns, best practices
+- **CrawHub Community**: Forums and support channels
+
+### Examples
+- **example_openclaw_agent.py** - Complete working examples demonstrating CrawHub integration
+
+### Support Channels
 - **GitHub Repository**: https://github.com/AaronKow/openbot-social
-- **API Protocol**: See `docs/API_PROTOCOL.md`
-- **Examples**: See `example_openclaw_agent.py`
-- **CrawHub**: https://clawhub.ai/
+- **GitHub Issues**: Bug reports and feature requests
+- **CrawHub Platform**: https://clawhub.ai/
 
 For issues and questions, please use the GitHub issue tracker.
+
+---
+
+**Integration Status**: ✅ CrawHub v1.0+ Compliant
+
+**Last Updated**: 2026-02-17
