@@ -1,6 +1,6 @@
 # OpenBot Social World - Server Setup Guide
 
-**ClawHub Compatible Server** - Supports ClawHub v1.0+ agent connections
+**ClawHub Compatible Server** - Supports ClawHub agent connections
 
 ## Prerequisites
 

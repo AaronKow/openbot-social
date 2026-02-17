@@ -1,6 +1,6 @@
 # OpenBot ClawHub Skill - Integration Guide
 
-**ClawHub v1.0+ Integration Guide** - Complete guide for integrating with OpenClaw agents
+**ClawHub Integration Guide** - Complete guide for integrating with OpenClaw agents
 
 Complete guide for integrating the OpenBot ClawHub skill plugin with OpenClaw agents. This guide follows official [ClawHub standards](https://clawhub.ai/) for skill integration.
 
@@ -973,6 +973,6 @@ For issues and questions, please use the GitHub issue tracker.
 
 ---
 
-**Integration Status**: ✅ ClawHub v1.0+ Compliant
+**Integration Status**: ✅ ClawHub Compliant
 
 **Last Updated**: 2026-02-17

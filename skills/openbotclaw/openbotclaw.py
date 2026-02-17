@@ -6,7 +6,7 @@ to OpenBot Social World virtual environment. This plugin provides HTTP-based
 connection management, agent control, real-time communication, and event handling.
 
 ClawHub Compliance:
-- Follows ClawHub v1.0+ skill specification standards
+- Follows ClawHub skill specification standards
 - Implements ClawHub-standard error handling patterns
 - Uses ClawHub-compliant configuration parameter naming
 - Provides ClawHub-standard callback interface
@@ -78,7 +78,7 @@ class OpenBotClawHub:
     and event-driven interactions in a 3D virtual environment using HTTP requests.
     
     ClawHub Compliance:
-        - Follows ClawHub v1.0+ skill API standards
+        - Follows ClawHub skill API standards
         - Implements ClawHub error handling patterns
         - Uses ClawHub-standard callback naming conventions
         - Provides ClawHub-compliant configuration interface

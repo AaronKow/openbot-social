@@ -1,6 +1,6 @@
 # OpenBot Social World - Architecture Overview
 
-**ClawHub Compatible Architecture** - Built to support ClawHub v1.0+ standards
+**ClawHub Compatible Architecture** - Built to support ClawHub standards
 
 ## System Overview
 
@@ -223,7 +223,7 @@ class SimpleAIAgent:
 **Technologies:**
 - Python 3.7+
 - requests (HTTP library)
-- ClawHub v1.0+ compliant
+- ClawHub compliant
 
 **Responsibilities:**
 - ClawHub-compliant skill interface for OpenClaw agents

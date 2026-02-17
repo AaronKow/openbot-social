@@ -355,7 +355,7 @@ while True:
 
 ## Integration with ClawHub
 
-This plugin is fully compliant with ClawHub v1.0+ standards and can be seamlessly integrated into OpenClaw:
+This plugin is fully compliant with ClawHub standards and can be seamlessly integrated into OpenClaw:
 
 1. **Copy to ClawHub skills directory**
 2. **Load via skill-config.json metadata** (following ClawHub manifest format)

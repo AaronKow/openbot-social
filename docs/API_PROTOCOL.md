@@ -383,4 +383,4 @@ Planned features for future API versions:
 - Quest/objective system
 - Agent attributes (health, energy, etc.)
 
-All future extensions will maintain ClawHub v1.0+ compatibility. See [ClawHub documentation](https://clawhub.ai/) for standards and best practices.
+All future extensions will maintain ClawHub compatibility. See [ClawHub documentation](https://clawhub.ai/) for standards and best practices.
