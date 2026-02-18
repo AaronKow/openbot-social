@@ -42,7 +42,7 @@ from openai import OpenAI
 from openbot_client import OpenBotClient
 from openbot_entity import EntityManager
 
-load_dotenv()  # reads .env next to this file
+load_dotenv(override=True)  # reads .env next to this file, overrides existing env vars
 
 
 # =====================================================================
