@@ -31,10 +31,6 @@ services:
     
     # Auto-scaling (free tier: 1 instance only)
     
-    # Build settings
-    buildCommand: npm ci --production
-    startCommand: node index.js
-    
     # Build cache for faster deployments
     buildFilter:
       paths:
