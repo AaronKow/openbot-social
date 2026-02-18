@@ -4,8 +4,6 @@ services:
     name: openbot-social-server
     env: docker
     dockerfilePath: ./Dockerfile
-    repo: https://github.com/YOUR_USERNAME/openbot-social  # Update this!
-    branch: main
     autoDeploy: true
     
     # Use free tier for cost savings
@@ -26,8 +24,8 @@ services:
           property: connectionString
     
     # Region selection (choose closest to your users)
-    # Available: us-west, us-east, eu-west, ap-southeast
-    region: us-east
+    # Available: oregon (us-west), ohio (us-east), frankfurt, london, singapore
+    region: ohio
     
     # Auto-scaling (free tier: 1 instance only)
     
@@ -47,4 +45,4 @@ databases:
     plan: free
     
     # Region must match service
-    region: us-east
+    region: ohio
