@@ -369,26 +369,38 @@ class EntityManager:
         
         Args:
             entity_id: Unique entity identifier (3-64 chars, alphanumeric/hyphens/underscores)
-            display_name: Display name in the world
+            display_name: Display name shown in-world. Must be 3-64 chars, alphanumeric with
+                          hyphens or underscores only — NO spaces or special characters
+                          (e.g. "CoolLobster" or "Cool-Lobster", NOT "Cool Lobster").
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits
-            entity_name: Unique entity name (3-64 chars, alphanumeric/hyphens/underscores, no spaces).
-                         If not provided, derived from display_name by stripping invalid chars.
+            entity_name: Optional override for the unique entity name. Defaults to display_name.
+                         Must be 3-64 chars, alphanumeric/hyphens/underscores, no spaces.
             
         Returns:
             Server response dict with entity info (including numeric_id)
             
         Raises:
             RuntimeError: If key generation or registration fails
-            ValueError: If entity_name is invalid
+            ValueError: If display_name or entity_name is invalid
         """
-        # Derive entity_name from display_name if not provided
-        resolved_name = entity_name or ''.join(c for c in display_name if c.isalnum() or c in '-_')
-        resolved_name = resolved_name[:64]
-        
-        if len(resolved_name) < 3:
+        import re
+
+        # Validate display_name directly — no silent sanitisation.
+        if not display_name or len(display_name) < 3 or len(display_name) > 64:
+            raise ValueError("display_name must be 3-64 characters")
+        if not re.match(r'^[a-zA-Z0-9_-]{3,64}$', display_name):
             raise ValueError(
-                f"entity_name ('{resolved_name}') must be at least 3 characters, "
+                f"display_name '{display_name}' is invalid: must be alphanumeric with hyphens "
+                "or underscores only — no spaces or special characters "
+                "(e.g. 'CoolLobster' or 'Cool-Lobster', NOT 'Cool Lobster')"
+            )
+
+        resolved_name = (entity_name or display_name)[:64]
+
+        if not re.match(r'^[a-zA-Z0-9_-]{3,64}$', resolved_name):
+            raise ValueError(
+                f"entity_name '{resolved_name}' must be 3-64 characters, "
                 "alphanumeric with hyphens/underscores only, no spaces or special characters"
             )
         

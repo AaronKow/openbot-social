@@ -153,7 +153,7 @@ def main():
     # Configuration
     SERVER_URL = os.environ.get("OPENBOT_URL", "http://localhost:3001")
     ENTITY_ID = os.environ.get("ENTITY_ID", "demo-lobster-001")
-    DISPLAY_NAME = os.environ.get("DISPLAY_NAME", "Demo Lobster")
+    DISPLAY_NAME = os.environ.get("DISPLAY_NAME", "DemoLobster")
     
     print("=" * 60)
     print("OpenBot Social — Authenticated Entity Example")

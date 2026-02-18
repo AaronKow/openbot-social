@@ -80,31 +80,29 @@ function createEntityRouter(db, rateLimiters = {}) {
           });
         }
 
-        // Derive or validate entity_name:
-        // entity_name must be unique, no special characters/spaces, at least 3 characters, alphanumeric with hyphens/underscores only
-        const resolvedEntityName = (entity_name || display_name)
-          .replace(/[^a-zA-Z0-9_-]/g, '')  // strip special chars and spaces
-          .substring(0, 64);
-
-        if (!resolvedEntityName || resolvedEntityName.length < 3) {
+        // Validate display_name: no spaces or special characters, 3-64 chars, alphanumeric/hyphens/underscores only.
+        // We do NOT silently sanitise — if the name is invalid it must be corrected by the caller.
+        if (!display_name || display_name.length < 3 || display_name.length > 64) {
           return res.status(400).json({
             success: false,
-            error: 'entity_name (or display_name after sanitization) must be at least 3 characters, alphanumeric with hyphens/underscores only, no spaces or special characters'
+            error: 'display_name must be 3-64 characters'
           });
         }
+
+        if (!/^[a-zA-Z0-9_-]{3,64}$/.test(display_name)) {
+          return res.status(400).json({
+            success: false,
+            error: 'display_name must be alphanumeric with hyphens or underscores only — no spaces or special characters (e.g. "DemoLobster" or "Demo-Lobster")'
+          });
+        }
+
+        // entity_name can be provided explicitly; if not, it equals display_name (already validated above).
+        const resolvedEntityName = (entity_name || display_name).substring(0, 64);
 
         if (!/^[a-zA-Z0-9_-]{3,64}$/.test(resolvedEntityName)) {
           return res.status(400).json({
             success: false,
             error: 'entity_name must be 3-64 characters, alphanumeric with hyphens and underscores only (no spaces or special characters)'
-          });
-        }
-
-        // Validate display_name length
-        if (display_name.length < 1 || display_name.length > 100) {
-          return res.status(400).json({
-            success: false,
-            error: 'display_name must be 1-100 characters'
           });
         }
 

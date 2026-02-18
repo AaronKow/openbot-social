@@ -16,6 +16,7 @@ class OpenBotWorld {
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // Server start time for uptime
         this.totalEntitiesCreated = 0; // Total entities ever created
+        this.followedAgentId = null; // Agent currently being followed by camera
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -290,42 +291,51 @@ class OpenBotWorld {
     zoomToAgent(agentId) {
         const agent = this.agents.get(agentId);
         if (!agent) return;
-        
+
+        // Toggle follow: clicking the same lobster again releases the camera
+        if (this.followedAgentId === agentId) {
+            this.followedAgentId = null;
+            this.controls.enabled = true;
+            return;
+        }
+
+        this.followedAgentId = agentId;
+        this.controls.enabled = false; // Disable manual orbit while following
+
         const targetPos = agent.mesh.position.clone();
-        const targetDistance = 15;
-        
-        // Animate camera to lobster
+
+        // Animate fly-in
         const startPos = this.camera.position.clone();
+        const startTarget = this.controls.target.clone();
         const startTime = Date.now();
-        const duration = 1000; // 1 second animation
-        
+        const duration = 1000;
+
         const animateMove = () => {
+            if (this.followedAgentId !== agentId) return; // cancelled mid-flight
             const elapsed = Date.now() - startTime;
             const progress = Math.min(elapsed / duration, 1);
-            
-            // Smooth easing
-            const easeProgress = progress < 0.5 
-                ? 2 * progress * progress 
+            const easeProgress = progress < 0.5
+                ? 2 * progress * progress
                 : -1 + (4 - 2 * progress) * progress;
-            
-            // Interpolate camera position
-            const cameraTargetX = targetPos.x + 10;
-            const cameraTargetY = targetPos.y + 8;
-            const cameraTargetZ = targetPos.z + 10;
-            
-            this.camera.position.x = startPos.x + (cameraTargetX - startPos.x) * easeProgress;
-            this.camera.position.y = startPos.y + (cameraTargetY - startPos.y) * easeProgress;
-            this.camera.position.z = startPos.z + (cameraTargetZ - startPos.z) * easeProgress;
-            
-            // Look at the lobster
-            this.controls.target.copy(targetPos);
-            this.controls.target.y = targetPos.y;
-            
+
+            const livePos = this.agents.get(agentId)?.mesh.position;
+            if (!livePos) return;
+
+            const camTargetX = livePos.x + 10;
+            const camTargetY = livePos.y + 8;
+            const camTargetZ = livePos.z + 10;
+
+            this.camera.position.x = startPos.x + (camTargetX - startPos.x) * easeProgress;
+            this.camera.position.y = startPos.y + (camTargetY - startPos.y) * easeProgress;
+            this.camera.position.z = startPos.z + (camTargetZ - startPos.z) * easeProgress;
+
+            this.controls.target.lerp(livePos, easeProgress);
+
             if (progress < 1) {
                 requestAnimationFrame(animateMove);
             }
         };
-        
+
         animateMove();
     }
     
@@ -690,7 +700,28 @@ class OpenBotWorld {
     
     animate() {
         requestAnimationFrame(() => this.animate());
-        
+
+        // Continuously follow the selected lobster
+        if (this.followedAgentId) {
+            const followed = this.agents.get(this.followedAgentId);
+            if (followed) {
+                const livePos = followed.mesh.position;
+                // Softly glide the orbit target to the lobster's current position
+                this.controls.target.lerp(livePos, 0.1);
+                // Keep camera at a fixed offset above/behind the lobster
+                const desiredCamPos = new THREE.Vector3(
+                    livePos.x + 10,
+                    livePos.y + 8,
+                    livePos.z + 10
+                );
+                this.camera.position.lerp(desiredCamPos, 0.1);
+            } else {
+                // Agent left the world — release follow
+                this.followedAgentId = null;
+                this.controls.enabled = true;
+            }
+        }
+
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
     }
