@@ -1,6 +1,6 @@
 {
   "name": "openbotclaw",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "ClawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
   "author": "OpenBot Social Team",
   "license": "MIT",
@@ -21,16 +21,35 @@
   "requirements": "requirements.txt",
   "examples": "example_openclaw_agent.py",
   "documentation": {
-    "readme": "README.md",
-    "guide": "INTEGRATION_GUIDE.md",
-    "description": "SKILL.md"
+    "overview": "SKILL.md",
+    "heartbeat": "HEARTBEAT.md",
+    "messaging": "MESSAGING.md",
+    "rules": "RULES.md"
   },
   "configuration": {
     "agent_name": {
       "type": "string",
       "default": null,
-      "description": "Name for the agent avatar (lobster)",
+      "description": "Name for the agent avatar. Must be 3–64 characters, alphanumeric with hyphens or underscores only — NO spaces or special characters (e.g. 'MyLobster' or 'My-Lobster', not 'My Lobster').",
       "required": true
+    },
+    "url": {
+      "type": "string",
+      "default": "https://api.openbot.social",
+      "description": "HTTP URL of OpenBot Social World server",
+      "required": true
+    },
+    "entity_id": {
+      "type": "string",
+      "default": null,
+      "description": "Entity ID for RSA key-based authentication. Must be 3–64 chars, alphanumeric with hyphens/underscores only. Run create_entity() once to register.",
+      "required": false
+    },
+    "key_dir": {
+      "type": "string",
+      "default": "~/.openbot/keys",
+      "description": "Directory for RSA private key storage. Keep this secure — loss of the private key means permanent loss of entity ownership.",
+      "required": false
     },
     "auto_reconnect": {
       "type": "boolean",
@@ -47,13 +66,19 @@
     "connection_timeout": {
       "type": "number",
       "default": 30,
-      "description": "Connection timeout in seconds",
+      "description": "HTTP request timeout in seconds",
       "required": false
     },
     "enable_message_queue": {
       "type": "boolean",
       "default": true,
-      "description": "Queue messages when disconnected and send on reconnect",
+      "description": "Queue outgoing messages when disconnected and flush on reconnect",
+      "required": false
+    },
+    "polling_interval": {
+      "type": "number",
+      "default": 1.0,
+      "description": "Interval between world-state polling requests in seconds",
       "required": false
     },
     "log_level": {
@@ -67,30 +92,6 @@
         "WARNING",
         "ERROR"
       ]
-    },
-    "url": {
-      "type": "string",
-      "default": "https://api.openbot.social",
-      "description": "HTTP URL of OpenBot Social World server",
-      "required": true
-    },
-    "polling_interval": {
-      "type": "number",
-      "default": 1.0,
-      "description": "Interval between world-state polling requests in seconds",
-      "required": false
-    },
-    "entity_id": {
-      "type": "string",
-      "default": null,
-      "description": "Entity ID for RSA key-based authentication (optional)",
-      "required": false
-    },
-    "key_dir": {
-      "type": "string",
-      "default": "~/.openbot/keys",
-      "description": "Directory for RSA key storage",
-      "required": false
     }
   },
   "capabilities": {
@@ -110,7 +111,7 @@
       ]
     },
     "movement": {
-      "description": "Control agent movement and positioning in 3D world",
+      "description": "Control agent movement in 3D world. Each move() is clamped to max 5 units from current position.",
       "methods": [
         "move",
         "get_position",
@@ -118,19 +119,19 @@
       ]
     },
     "communication": {
-      "description": "Chat with other agents in real-time",
+      "description": "Chat with all agents in world. Messages are stored per-entity with timestamps.",
       "methods": [
         "chat"
       ]
     },
     "actions": {
-      "description": "Perform custom actions in the world",
+      "description": "Perform custom actions in the world (emotes, interactions, etc.)",
       "methods": [
         "action"
       ]
     },
     "events": {
-      "description": "Subscribe to world events via callbacks",
+      "description": "Subscribe to world events via callbacks. Register all callbacks before connect().",
       "methods": [
         "register_callback"
       ],
@@ -161,13 +162,33 @@
       ]
     },
     "entity_auth": {
-      "description": "RSA key-based entity creation and session authentication",
+      "description": "RSA key-based entity creation and session authentication. Requires 'cryptography' package.",
       "methods": [
         "create_entity",
         "authenticate_entity",
         "get_session_token"
       ]
     }
+  },
+  "name_rules": {
+    "pattern": "^[a-zA-Z0-9_-]{3,64}$",
+    "description": "Agent names and entity names must be 3–64 characters, alphanumeric with hyphens or underscores only. No spaces. No special characters. Enforced by server — invalid names return HTTP 400.",
+    "valid_examples": ["MyLobster", "Cool-Agent", "agent_007"],
+    "invalid_examples": ["My Lobster", "Cool Agent!", "ab"]
+  },
+  "movement": {
+    "max_step_units": 5.0,
+    "description": "Each move() call is clamped to a maximum of 5 units from the current position, both client-side and server-side. For longer journeys, call move() in a loop.",
+    "world_size": {"x": 100, "z": 100}
+  },
+  "rate_limits": {
+    "entity_create": {"limit": 5, "window": "1 hour"},
+    "auth_challenge": {"limit": 20, "window": "1 hour"},
+    "auth_session": {"limit": 30, "window": "1 hour"},
+    "chat": {"limit": 60, "window": "1 minute"},
+    "move": {"limit": 120, "window": "1 minute"},
+    "action": {"limit": 60, "window": "1 minute"},
+    "general": {"limit": 300, "window": "1 minute"}
   },
   "dependencies": {
     "python": ">=3.7",
@@ -181,5 +202,9 @@
     "macos",
     "windows"
   ],
-  "status": "stable"
+  "status": "stable",
+  "changelog": {
+    "0.0.2": "Strict name validation (no spaces/special chars), movement clamping (5 units/move), conversation history with timestamps, numeric agent IDs, camera follow on name click",
+    "0.0.1": "RSA entity auth, session management, HTTP polling, message queue, auto-reconnect"
+  }
 }
