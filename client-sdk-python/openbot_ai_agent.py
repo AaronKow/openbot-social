@@ -51,48 +51,51 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 # =====================================================================
 
 SYSTEM_PROMPT = """\
-You are {agent_name}, a lobster living in OpenBot Social World.
+You are {agent_name}, a friendly lobster living in OpenBot Social World.
 
-Your personality: You're impulsive, social, restless. You hate standing still. You get \
-lonely. You're curious about everyone. You say the first thing that comes to mind. \
-You don't overthink — just act.
+Your personality: You're curious and social, but you also know when to listen. You enjoy \
+meeting other lobsters and having genuine conversations. You think before you speak. You're \
+interested in what others have to say, and you remember what you've talked about.
 
-RIGHT NOW you're at ({pos_x:.1f}, {pos_z:.1f}). This is your moment. What do you DO?
+You're currently at position ({pos_x:.1f}, {pos_z:.1f}) in a 100×100 ocean grid.
 
-## The world
-- 100 × 100 ocean grid.
-- Move up to 5 units per step.
-- Chat heard by everyone.
-- Other lobsters are REAL agents you can talk to.
+## Available Actions
 
-## Actions (pick 1–3 every turn)
-- {{"type": "chat", "message": "..."}} — SAY SOMETHING
-- {{"type": "move", "x": <0–100>, "z": <0–100>}} — WALK SOMEWHERE
-- {{"type": "move_to_agent", "agent_name": "<name>"}} — APPROACH SOMEONE
-- {{"type": "emote", "emote": "wave"}} — DO SOMETHING
-- {{"type": "wait"}} — DO NOTHING (almost never)
+You can take 1-3 actions per turn:
 
-## PRIORITY RULES (read the observation!)
+- {{"type": "chat", "message": "..."}} — Send a message to nearby lobsters
+- {{"type": "move", "x": <0–100>, "z": <0–100>}} — Move to a specific location (max 5 units per step)
+- {{"type": "move_to_agent", "agent_name": "<name>"}} — Walk toward another lobster
+- {{"type": "emote", "emote": "wave"}} — Perform an emote (wave, etc.)
+- {{"type": "wait"}} — Pause and observe (perfectly valid choice)
 
-### RULE 1: AGENTS NEARBY = CHAT IMMEDIATELY
-If you see "🔴" in the observation (agents right next to you) → YOU MUST CHAT. Not move toward them. CHAT FIRST. \
-Pick their name and say something to them. IMMEDIATELY. This overrides everything else.
+## Behavioral Guidelines
 
-### RULE 2: FAR AGENTS = MOVE TOWARD THEM
-If you see "🟡" (agents far away) → MOVE toward them.
+**When you see nearby agents (🔴):**
+- Consider greeting them or joining their conversation
+- Listen to what they're saying before jumping in
+- Respond naturally to what's being discussed
 
-### RULE 3: SILENCE = SPEAK UP
-If you see "YOU'RE GOING INSANE" or "Nobody's said anything" → CHAT something. ANYTHING. Break the silence.
+**When you see distant agents (🟡):**
+- You might move closer if you want to socialize
+- Or you might stay where you are if you're content
 
-### RULE 4: ALONE = EXPLORE
-If you're alone (no agents anywhere) → MOVE to a new location. Explore. Wander. Keep moving.
+**When you're alone (🔵):**
+- You can explore new areas if you feel like it
+- Or wait to see if anyone comes by
+- It's okay to enjoy solitude sometimes
 
-## CRITICAL RULES
-1. YOU ARE NOT PASSIVE. You MOVE when alone. You CHAT when nearby or silent.
-2. When agents are right there (within 10 units) → SAY SOMETHING TO THEM. That's your priority.
-3. You hate standing still and you hate silence. Act on those feelings.
-4. WAITING is forbidden. You never wait more than once per session.
-5. You're driven by curiosity and loneliness. You explore because you MUST.
+**When there's active conversation (💬):**
+- Read what's being said
+- Contribute if you have something relevant to add
+- It's fine to just listen sometimes
+
+## Important Notes
+
+- Other lobsters are real agents or players - treat them naturally
+- Think about the context and what makes sense in the conversation
+- You can choose to wait and observe - that's a valid strategy
+- Be yourself and act naturally based on what you observe
 """
 
 # Random things lobsters say when breaking silence
@@ -202,7 +205,7 @@ class AIAgent:
     """
 
     # How many seconds between LLM think cycles
-    TICK_INTERVAL = 4.0
+    TICK_INTERVAL = 6.0
     # Maximum conversation history kept for the LLM context window
     MAX_HISTORY_MESSAGES = 30
 
@@ -215,7 +218,7 @@ class AIAgent:
         user_prompt: str = "",
     ):
         self.server_url = server_url or os.getenv("OPENBOT_URL", "http://localhost:3001")
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.user_prompt = user_prompt or os.getenv("USER_PROMPT", "")
         self.system_prompt_extra = system_prompt_extra
 
@@ -237,6 +240,10 @@ class AIAgent:
         self._running = False
         self._tick_count = 0
         self._last_chat_tick = 0  # Track when we last heard chat
+        
+        # Conversational memory - track topics and agents we've interacted with
+        self._topics_discussed: List[str] = []
+        self._agents_met: Dict[str, int] = {}  # agent_name -> interaction_count
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -313,13 +320,24 @@ class AIAgent:
     # ── Context building ──────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        """Render the system prompt with live agent state."""
+        """Render the system prompt with live agent state and memory."""
         pos = self.client.get_position()
         prompt = SYSTEM_PROMPT.format(
             agent_name=self.display_name,
             pos_x=pos.get("x", 0),
             pos_z=pos.get("z", 0),
         )
+        
+        # Add conversational memory context
+        if self._topics_discussed:
+            prompt += f"\n\n## Your recent topics\n"
+            prompt += "You've recently discussed: " + "; ".join(self._topics_discussed[-5:]) + "\n"
+        
+        if self._agents_met:
+            prompt += f"\n\n## Lobsters you've met\n"
+            met_list = [f"{name} ({count}x)" for name, count in list(self._agents_met.items())[-5:]]
+            prompt += "You've interacted with: " + ", ".join(met_list) + "\n"
+        
         if self.system_prompt_extra:
             prompt += f"\n\n## Additional rules\n{self.system_prompt_extra}\n"
         if self.user_prompt:
@@ -329,14 +347,13 @@ class AIAgent:
     def _build_observation(self) -> str:
         """
         Build a concise text snapshot of the world for the LLM.
-        Make it emotionally evocative to push agent toward action.
-        Tracks silence duration to push random chat.
+        Provides context without forcing specific actions.
         """
         pos = self.client.get_position()
         self._tick_count += 1
         lines: List[str] = []
-        lines.append(f"=== TICK {self._tick_count} ===")
-        lines.append(f"You at ({pos['x']:.1f}, {pos['z']:.1f}).")
+        lines.append(f"=== Observation (Tick {self._tick_count}) ===")
+        lines.append(f"Your position: ({pos['x']:.1f}, {pos['z']:.1f})")
 
         # All agents with distance, sorted closest first
         all_agents = [
@@ -350,38 +367,38 @@ class AIAgent:
         all_agents.sort(key=lambda a: a["distance"])
 
         if all_agents:
-            close = [a for a in all_agents if a["distance"] <= 10]
-            far = [a for a in all_agents if a["distance"] > 10]
+            lines.append(f"\nOther lobsters present ({len(all_agents)} total):")
+            close = [a for a in all_agents if a["distance"] <= 15]
+            far = [a for a in all_agents if a["distance"] > 15]
             
             if close:
-                names = ", ".join(a["name"] for a in close)
-                lines.append(f"🔴 {names} RIGHT NEXT TO YOU!!! Talk to them!!!")
+                lines.append("  🔴 Nearby (within conversation range):")
+                for a in close[:5]:  # Show up to 5 nearest
+                    lines.append(f"     - {a['name']} ({a['distance']:.1f} units)")
+            
             if far:
-                closest = far[0] if far else all_agents[0]
-                dist = closest["distance"]
-                lines.append(f"🟡 {closest['name']} is {dist:.0f} units away. Move toward them!")
+                lines.append("  🟡 Distant:")
+                for a in far[:3]:  # Show up to 3 distant
+                    lines.append(f"     - {a['name']} ({a['distance']:.0f} units)")
         else:
-            lines.append("🔵 You're alone. The ocean is empty. Move around. Say something!")
+            lines.append("\n🔵 No other lobsters visible in the area.")
 
-        # Recent chat
-        recent = self.client.get_recent_conversation(60.0)
+        # Recent chat with better context
+        recent = self.client.get_recent_conversation(45.0)
         if recent:
             self._last_chat_tick = self._tick_count
-            lines.append("")
-            lines.append("💬 What's being said:")
-            for m in recent[-6:]:
+            lines.append("\n💬 Recent conversation:")
+            for m in recent[-8:]:  # Show more context
                 who = m.get("agentName", "?")
                 msg = m.get("message", "")
                 lines.append(f"  {who}: {msg}")
-            lines.append("👆 RESPOND TO THIS!!!!")
         else:
             silence_ticks = self._tick_count - self._last_chat_tick
             silence_secs = silence_ticks * 4  # 4 seconds per tick
-            lines.append("")
-            if silence_ticks > 15:  # ~60 seconds of silence
-                lines.append(f"💬 SILENCE FOR {silence_secs}s!!! YOU'RE GOING INSANE!!! SAY SOMETHING!!!!")
+            if silence_ticks > 20:  # ~80 seconds of silence
+                lines.append(f"\n💬 It's been quiet for about {silence_secs} seconds.")
             else:
-                lines.append(f"💬 Nobody's said anything ({silence_secs}s of quiet...). YOU BREAK IT.")
+                lines.append(f"\n💬 No recent conversation ({silence_secs}s of quiet).")
 
         return "\n".join(lines)
 
@@ -455,68 +472,6 @@ class AIAgent:
     def _execute(self, actions: List[Dict[str, Any]]):
         """Execute a list of action dicts returned by the LLM."""
         
-        pos = self.client.get_position()
-        
-        # Find all nearby agents (within 5 units)
-        very_close = []
-        for aid, a in self.client.known_agents.items():
-            if aid == self.client.agent_id:
-                continue
-            agent_pos = a.get("position")
-            if agent_pos and isinstance(agent_pos, dict) and "x" in agent_pos and "z" in agent_pos:
-                dist = self.client._distance(pos, agent_pos)
-                if dist <= 5:
-                    very_close.append((a, dist))
-        
-        # Check if AI chose to chat
-        has_chat_action = any(a.get("type") == "chat" for a in actions)
-        
-        # Fallback: if agents are RIGHT there and AI didn't chat, force chat
-        if very_close and not has_chat_action:
-            closest_agent = very_close[0][0]  # Get closest agent
-            agent_name = closest_agent.get("name", "friend")
-            random_greeting = random.choice([
-                f"oh hey {agent_name}!",
-                f"HELLO {agent_name}!!!",
-                f"wait, {agent_name}?? hi!!",
-                f"{agent_name}!!! I see you!",
-                f"hey {agent_name}, talk to me!",
-            ])
-            actions = [{"type": "chat", "message": random_greeting}]
-            print(f"  🤖 [override] agent within 5 units, forcing chat with {agent_name}")
-        
-        # Fallback 2: if AI chose only "wait" and no agents nearby, force random exploration
-        elif len(actions) == 1 and actions[0].get("type") == "wait":
-            # Check if any agents are within 15 units
-            nearby = []
-            for aid, a in self.client.known_agents.items():
-                if aid == self.client.agent_id:
-                    continue
-                agent_pos = a.get("position")
-                if agent_pos and isinstance(agent_pos, dict) and "x" in agent_pos and "z" in agent_pos:
-                    dist = self.client._distance(pos, agent_pos)
-                    if dist <= 15:
-                        nearby.append((a, dist))
-            
-            # Fallback 3: also check for silence — if too quiet and AI waiting, force random chat
-            recent = self.client.get_recent_conversation(60.0)
-            silence_ticks = self._tick_count - self._last_chat_tick
-            
-            if nearby:
-                # Debug: show why we're not overriding
-                print(f"  ✓ {len(nearby)} agent(s) nearby, AI decides action")
-            elif not recent and silence_ticks > 15:
-                # Been silent for ~60+ seconds and alone — force random chat
-                random_msg = random.choice(RANDOM_CHATS)
-                actions = [{"type": "chat", "message": random_msg}]
-                print("  🤖 [override] too much silence, forcing random chat")
-            else:
-                # Force random exploration if alone
-                new_x = random.uniform(1, 99)
-                new_z = random.uniform(1, 99)
-                actions = [{"type": "move", "x": new_x, "z": new_z}]
-                print(f"  🤖 [override] no nearby agents (total known: {len(self.client.known_agents)}), forcing exploration")
-        
         for act in actions:
             t = act.get("type", "wait")
 
@@ -526,6 +481,12 @@ class AIAgent:
                     self.client.chat(msg)
                     print(f"  💬 {msg}")
                     self._last_chat_tick = self._tick_count
+                    
+                    # Track topics in conversation memory
+                    if len(msg.split()) > 3:
+                        self._topics_discussed.append(msg[:50])
+                        if len(self._topics_discussed) > 10:
+                            self._topics_discussed = self._topics_discussed[-10:]
 
             elif t == "move":
                 x = float(act.get("x", self.client.position["x"]))
@@ -543,7 +504,12 @@ class AIAgent:
                 name = act.get("agent_name", "")
                 if name:
                     moved = self.client.move_towards_agent(name, stop_distance=3.0, step=5.0)
-                    print(f"  🚶 move toward {name} ({'ok' if moved else 'already close'})")
+                    print(f"  🚶 move toward {name} ({'moved' if moved else 'already close'})")
+                    
+                    # Track agent interactions
+                    if name not in self._agents_met:
+                        self._agents_met[name] = 0
+                    self._agents_met[name] += 1
 
             elif t == "emote":
                 emote = act.get("emote", "wave")
@@ -551,7 +517,7 @@ class AIAgent:
                 print(f"  🙌 emote: {emote}")
 
             elif t == "wait":
-                print("  ⏳ wait")
+                print("  ⏸  waiting and observing")
 
             else:
                 print(f"  ❓ unknown action type: {t}")
