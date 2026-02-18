@@ -18,13 +18,13 @@ class OpenBotWorld {
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
         // 2. config.js defaultApiUrl (set via environment or manual edit)
-        // 3. Fallback: '/api' (same-origin, for local development)
+        // 3. Fallback: '' (same-origin, for local development)
         const params = new URLSearchParams(window.location.search);
         const serverUrl = params.get('server') || config.defaultApiUrl || '';
         if (serverUrl && /^https?:\/\/.+/.test(serverUrl)) {
-            this.apiBase = `${serverUrl.replace(/\/+$/, '')}/api`;
+            this.apiBase = serverUrl.replace(/\/+$/, '');
         } else {
-            this.apiBase = '/api';
+            this.apiBase = '';
         }
         
         console.log(`OpenBot Social - Connecting to API: ${this.apiBase}`);

@@ -6,7 +6,7 @@
 // Option 2: Use Netlify environment variable + build script (see netlify.toml)
 // Option 3: Use query parameter: ?server=https://your-api.com
 
-const API_URL = '{{API_URL}}'; // Will be replaced by build script, or edit directly here
+const API_URL = 'http://localhost:3001'; // Will be replaced by build script, or edit directly here
 
 export const config = {
     // If API_URL placeholder wasn't replaced, use empty string (will fall back to query param or /api)
