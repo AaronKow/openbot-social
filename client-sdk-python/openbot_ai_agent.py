@@ -125,60 +125,57 @@ RANDOM_CHATS = [
 ]
 
 # =====================================================================
-# OpenAI tool definitions (function-calling style)
-# We let the model pick from these structured tools instead of generating
-# raw JSON, so we get guaranteed schema conformance.
+# OpenAI tool definitions — Responses API format (gpt-5-nano)
+# Fields are at the top level (no nested "function" wrapper).
 # =====================================================================
 
 TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "perform_actions",
-            "description": "Execute one or more world actions this tick.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "actions": {
-                        "type": "array",
-                        "description": "1-3 actions to perform this tick, in order.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "enum": ["chat", "move", "move_to_agent", "emote", "wait"],
-                                    "description": "The kind of action."
-                                },
-                                "message": {
-                                    "type": "string",
-                                    "description": "Chat message text (only for type=chat)."
-                                },
-                                "x": {
-                                    "type": "number",
-                                    "description": "Target X coordinate (only for type=move)."
-                                },
-                                "z": {
-                                    "type": "number",
-                                    "description": "Target Z coordinate (only for type=move)."
-                                },
-                                "agent_name": {
-                                    "type": "string",
-                                    "description": "Name of agent to walk toward (only for type=move_to_agent)."
-                                },
-                                "emote": {
-                                    "type": "string",
-                                    "description": "Emote to perform (only for type=emote)."
-                                }
+        "name": "perform_actions",
+        "description": "Execute one or more world actions this tick.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "description": "1-3 actions to perform this tick, in order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["chat", "move", "move_to_agent", "emote", "wait"],
+                                "description": "The kind of action."
                             },
-                            "required": ["type"]
+                            "message": {
+                                "type": "string",
+                                "description": "Chat message text (only for type=chat)."
+                            },
+                            "x": {
+                                "type": "number",
+                                "description": "Target X coordinate (only for type=move)."
+                            },
+                            "z": {
+                                "type": "number",
+                                "description": "Target Z coordinate (only for type=move)."
+                            },
+                            "agent_name": {
+                                "type": "string",
+                                "description": "Name of agent to walk toward (only for type=move_to_agent)."
+                            },
+                            "emote": {
+                                "type": "string",
+                                "description": "Emote to perform (only for type=emote)."
+                            }
                         },
-                        "minItems": 1,
-                        "maxItems": 3
-                    }
-                },
-                "required": ["actions"]
-            }
+                        "required": ["type"]
+                    },
+                    "minItems": 1,
+                    "maxItems": 3
+                }
+            },
+            "required": ["actions"]
         }
     }
 ]
@@ -215,7 +212,7 @@ class AIAgent:
         user_prompt: str = "",
     ):
         self.server_url = server_url or os.getenv("OPENBOT_URL", "http://localhost:3001")
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-nano")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-5-nano")
         self.user_prompt = user_prompt or os.getenv("USER_PROMPT", "")
         self.system_prompt_extra = system_prompt_extra
 
@@ -391,6 +388,8 @@ class AIAgent:
         """
         Ask the LLM what to do given the current observation.
 
+        Uses the OpenAI Responses API (gpt-5-nano and newer models).
+
         Returns a list of action dicts, e.g.:
             [{"type": "chat", "message": "hello"}, {"type": "wait"}]
         """
@@ -403,48 +402,33 @@ class AIAgent:
         if len(self._llm_history) > self.MAX_HISTORY_MESSAGES:
             self._llm_history = self._llm_history[-self.MAX_HISTORY_MESSAGES:]
 
-        messages = [
-            {"role": "system", "content": self._build_system_prompt()},
-            *self._llm_history,
-        ]
-
         try:
-            response = self.openai.chat.completions.create(
+            response = self.openai.responses.create(
                 model=self.model,
-                messages=messages,
+                instructions=self._build_system_prompt(),
+                input=self._llm_history,
                 tools=TOOLS,
-                tool_choice={"type": "function", "function": {"name": "perform_actions"}},
-                max_completion_tokens=300,
+                tool_choice={"type": "function", "name": "perform_actions"},
             )
         except Exception as e:
             print(f"[LLM] API error: {e}")
             return [{"type": "wait"}]
 
-        choice = response.choices[0]
         actions = []
 
-        # Extract actions from tool call
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                if tc.function.name == "perform_actions":
-                    try:
-                        payload = json.loads(tc.function.arguments)
-                        actions = payload.get("actions", [])
-                    except json.JSONDecodeError:
-                        print(f"[LLM] Bad JSON from tool call: {tc.function.arguments}")
-
-        # Fallback: try parsing raw content as JSON
-        if not actions and choice.message.content:
-            try:
-                raw = json.loads(choice.message.content)
-                actions = raw.get("actions", [raw] if "type" in raw else [])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        # Responses API returns output as a list of items
+        for item in response.output:
+            if item.type == "function_call" and item.name == "perform_actions":
+                try:
+                    payload = json.loads(item.arguments)
+                    actions = payload.get("actions", [])
+                except json.JSONDecodeError:
+                    print(f"[LLM] Bad JSON from tool call: {item.arguments}")
 
         if not actions:
             actions = [{"type": "wait"}]
 
-        # Record assistant turn
+        # Record assistant turn as a concise summary for history context
         summary = "; ".join(_action_summary(a) for a in actions)
         self._llm_history.append({"role": "assistant", "content": summary})
 
