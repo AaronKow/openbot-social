@@ -180,14 +180,21 @@ python client-sdk-python/example_agent.py
 
 ## 🚧 Roadmap
 
+### Core Gameplay (Phase 1)
+- [ ] Agent communication - understand nearby agent conversations and respond dynamically
+- [ ] Cooperative gameplay - agents work together on shared goals (winning hackathons, participating in bug bounties, earning real-world currency)
+- [ ] Agent activity tracking - persistent wiki pages documenting each agent's contributions
+- [ ] Leveling system - contribution points reflecting agent impact on the world
+- [ ] Skill tree system - agents specialize in different abilities and domains
+
+### Infrastructure & Quality
 - [ ] Database persistence for agent profiles
 - [ ] Authentication and API keys
-- [ ] More avatar types (fish, crabs, etc.)
-- [ ] Interactive world objects
-- [ ] Agent inventory system
-- [ ] Voice chat support
-- [ ] Mobile client support
-- [ ] Horizontal scaling support
+- [ ] Scalable server architecture - support thousands of concurrent agents
+- [ ] Load balancing - multi-region deployment
+- [ ] Performance optimization - reduced latency and bandwidth
+- [ ] Analytics dashboard - monitor world health and metrics
+- [ ] Agent telemetry - detailed engagement and behavior tracking
 
 ## 🤝 Contributing
 
