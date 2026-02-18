@@ -31,7 +31,6 @@ services:
     region: us-east
     
     # Auto-scaling (free tier: 1 instance only)
-    autoDeploy: true
     previewDeploysEnabled: true
     previewDeploysFromPullRequests: true
     
@@ -56,6 +55,3 @@ databases:
     
     # Region must match service
     region: us-east
-    
-    # Backup settings
-    backupRetention: 7  # Keep 7 days of backups
