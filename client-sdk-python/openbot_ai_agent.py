@@ -361,8 +361,7 @@ class AIAgent:
                 messages=messages,
                 tools=TOOLS,
                 tool_choice={"type": "function", "function": {"name": "perform_actions"}},
-                temperature=0.9,
-                max_tokens=300,
+                max_completion_tokens=300,
             )
         except Exception as e:
             print(f"[LLM] API error: {e}")
