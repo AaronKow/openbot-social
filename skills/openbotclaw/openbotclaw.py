@@ -221,6 +221,10 @@ class OpenBotClawHub:
             "on_error": []
         }
         
+        # Chat history buffer (rolling window of recent messages)
+        self._chat_history: List[Dict[str, Any]] = []
+        self._chat_history_max = 50
+        
         # Entity authentication
         self.entity_id: Optional[str] = entity_id
         self.entity_manager = entity_manager
@@ -664,6 +668,116 @@ class OpenBotClawHub:
         with self._lock:
             return list(self.registered_agents.values())
     
+    # ── Social-awareness helpers ──────────────────────────────────
+
+    @staticmethod
+    def _distance(a: Dict[str, float], b: Dict[str, float]) -> float:
+        """Euclidean distance on the X-Z plane."""
+        dx = a.get('x', 0) - b.get('x', 0)
+        dz = a.get('z', 0) - b.get('z', 0)
+        return (dx * dx + dz * dz) ** 0.5
+
+    def get_nearby_agents(self, radius: float = 20.0) -> List[Dict[str, Any]]:
+        """
+        Return agents within *radius* world-units, sorted closest-first.
+
+        Each entry is the full agent dict augmented with a ``distance`` key.
+
+        Args:
+            radius: Maximum distance in world units (default 20)
+
+        Returns:
+            List of nearby agent dicts with added ``distance`` field
+
+        Example:
+            >>> for a in hub.get_nearby_agents(15):
+            ...     print(f"{a['name']} is {a['distance']} units away")
+        """
+        import math
+        my_pos = self.position
+        result = []
+        with self._lock:
+            for agent in self.registered_agents.values():
+                dist = self._distance(my_pos, agent.get('position', {}))
+                if dist <= radius:
+                    entry = dict(agent)
+                    entry['distance'] = round(dist, 1)
+                    result.append(entry)
+        result.sort(key=lambda a: a['distance'])
+        return result
+
+    def get_conversation_partners(self, radius: float = 15.0) -> List[Dict[str, Any]]:
+        """
+        Return agents close enough to hold a conversation with.
+        Convenience wrapper around ``get_nearby_agents`` with a tighter
+        default radius.
+        """
+        return self.get_nearby_agents(radius)
+
+    def move_towards_agent(
+        self,
+        agent_name_or_id: str,
+        stop_distance: float = 8.0,
+        step: float = 3.0,
+    ) -> bool:
+        """
+        Take one step towards a known agent.
+
+        Args:
+            agent_name_or_id: Agent id or display name
+            stop_distance: Don't get closer than this (default 8)
+            step: Max step size per call (clamped to 5 by server)
+
+        Returns:
+            True if a move was made, False if already close or not found
+        """
+        import math
+        target = None
+        with self._lock:
+            for a in self.registered_agents.values():
+                if a.get('id') == agent_name_or_id or a.get('name') == agent_name_or_id:
+                    target = a
+                    break
+        if not target:
+            return False
+
+        tpos = target.get('position', {})
+        dx = tpos.get('x', 0) - self.position['x']
+        dz = tpos.get('z', 0) - self.position['z']
+        dist = math.sqrt(dx * dx + dz * dz)
+
+        if dist <= stop_distance:
+            return False
+
+        move_dist = min(step, dist - stop_distance)
+        ratio = move_dist / dist if dist > 0 else 0
+        new_x = self.position['x'] + dx * ratio
+        new_z = self.position['z'] + dz * ratio
+        rotation = math.atan2(dz, dx)
+        return self.move(new_x, 0, new_z, rotation)
+    
+    def get_chat_history(self, last_n: int = 10) -> List[Dict[str, Any]]:
+        """
+        Return the most recent *last_n* chat messages from the history
+        buffer.  Each entry has keys:
+        ``agent_id``, ``agent_name``, ``message``, ``timestamp``.
+
+        Args:
+            last_n: How many recent messages to return (default 10)
+        """
+        with self._lock:
+            return list(self._chat_history[-last_n:])
+
+    def get_recent_conversation(self, seconds: float = 30.0) -> List[Dict[str, Any]]:
+        """
+        Return all chat messages from the last *seconds* seconds.
+        Useful for an agent that wants to "listen in" before engaging.
+        """
+        cutoff = time.time() - seconds
+        with self._lock:
+            return [m for m in self._chat_history
+                    if m.get('_local_time', 0) >= cutoff]
+    
     def register_callback(self, event_type: str, callback: Callable) -> None:
         """
         Register callback for specific event type.
@@ -973,6 +1087,19 @@ class OpenBotClawHub:
         # Don't log own messages
         if agent_id != self.agent_id:
             self.logger.debug(f"Chat [{agent_name}]: {msg}")
+        
+        # Store in rolling chat history buffer
+        entry = {
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "message": msg,
+            "timestamp": message.get("timestamp"),
+            "_local_time": time.time(),
+        }
+        with self._lock:
+            self._chat_history.append(entry)
+            if len(self._chat_history) > self._chat_history_max:
+                self._chat_history = self._chat_history[-self._chat_history_max:]
         
         self._trigger_callback("on_chat", {
             "agent_id": agent_id,
