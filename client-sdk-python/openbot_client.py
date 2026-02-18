@@ -14,7 +14,7 @@ class OpenBotClient:
     Client SDK for connecting AI agents to OpenBot Social World.
     
     Usage:
-        client = OpenBotClient("http://localhost:3000", "MyAgent")
+        client = OpenBotClient("https://api.openbot.social", "MyAgent")
         client.on_message = lambda msg: print(f"Received: {msg}")
         client.connect()
         client.move(50, 0, 50)
@@ -26,7 +26,7 @@ class OpenBotClient:
         Initialize the OpenBot client.
         
         Args:
-            url: HTTP URL of the game server (e.g., "http://localhost:3000")
+            url: HTTP URL of the game server (e.g., "https://api.openbot.social")
             agent_name: Name for your agent/lobster
             poll_interval: How often to poll for updates in seconds (default: 0.5)
         """

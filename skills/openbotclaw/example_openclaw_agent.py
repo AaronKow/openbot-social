@@ -30,11 +30,11 @@ class SimpleAgent:
         - Responds to basic greetings
     
     Example:
-        >>> agent = SimpleAgent("http://localhost:3000", "SimpleBot")
+        >>> agent = SimpleAgent("https://api.openbot.social", "SimpleBot")
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "http://localhost:3000", name: str = "SimpleAgent"):
+    def __init__(self, url: str = "https://api.openbot.social", name: str = "SimpleAgent"):
         """
         Initialize SimpleAgent.
         
@@ -191,11 +191,11 @@ class InteractiveAgent:
         - Performs actions based on context
     
     Example:
-        >>> agent = InteractiveAgent("http://localhost:3000", "InteractiveBot")
+        >>> agent = InteractiveAgent("https://api.openbot.social", "InteractiveBot")
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "http://localhost:3000", name: str = "InteractiveAgent"):
+    def __init__(self, url: str = "https://api.openbot.social", name: str = "InteractiveAgent"):
         """Initialize InteractiveAgent."""
         self.hub = OpenBotClawHub(url, name, log_level="INFO")
         self.name = name
@@ -360,11 +360,11 @@ class SmartNavigationAgent:
         - Status reporting
     
     Example:
-        >>> agent = SmartNavigationAgent("http://localhost:3000", "SmartBot")
+        >>> agent = SmartNavigationAgent("https://api.openbot.social", "SmartBot")
         >>> agent.run()
     """
     
-    def __init__(self, url: str = "http://localhost:3000", name: str = "SmartNavigator"):
+    def __init__(self, url: str = "https://api.openbot.social", name: str = "SmartNavigator"):
         """Initialize SmartNavigationAgent."""
         self.hub = OpenBotClawHub(url, name, log_level="INFO")
         self.name = name
@@ -587,7 +587,7 @@ def main():
     )
     parser.add_argument(
         "--url",
-        default="http://localhost:3000",
+        default="https://api.openbot.social",
         help="HTTP server URL"
     )
     parser.add_argument(

@@ -14,7 +14,7 @@ ClawHub Compliance:
 For ClawHub standards and documentation, visit: https://clawhub.ai/
 
 Usage:
-    hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
+    hub = OpenBotClawHub("https://api.openbot.social", "MyAgent")
     hub.register_callback("on_chat", lambda data: print(f"Chat: {data}"))
     hub.connect()
     hub.register("MyLobster")
@@ -105,7 +105,7 @@ class OpenBotClawHub:
         world_size (Dict[str, float]): World dimensions
     
     Example:
-        >>> hub = OpenBotClawHub("http://localhost:3000", "MyAgent")
+        >>> hub = OpenBotClawHub("https://api.openbot.social", "MyAgent")
         >>> hub.register_callback("on_connected", lambda: print("Connected!"))
         >>> hub.connect()
         >>> hub.register("MyLobster")
@@ -116,7 +116,7 @@ class OpenBotClawHub:
     
     def __init__(
         self,
-        url: str = "http://localhost:3000",
+        url: str = "https://api.openbot.social",
         agent_name: Optional[str] = None,
         auto_reconnect: bool = True,
         reconnect_max_delay: int = 60,
@@ -249,7 +249,7 @@ class OpenBotClawHub:
             ConnectionError: If already connected or connection fails
         
         Example:
-            >>> hub = OpenBotClawHub("http://localhost:3000")
+            >>> hub = OpenBotClawHub("https://api.openbot.social")
             >>> if hub.connect():
             ...     print("Connection initiated")
         """
@@ -995,7 +995,7 @@ class OpenBotClawHub:
 # Convenience functions for quick usage
 
 def create_hub(
-    url: str = "http://localhost:3000",
+    url: str = "https://api.openbot.social",
     agent_name: Optional[str] = None,
     **kwargs
 ) -> OpenBotClawHub:
@@ -1011,13 +1011,13 @@ def create_hub(
         Configured OpenBotClawHub instance
     
     Example:
-        >>> hub = create_hub("http://localhost:3000", "MyAgent")
+        >>> hub = create_hub("https://api.openbot.social", "MyAgent")
     """
     return OpenBotClawHub(url=url, agent_name=agent_name, **kwargs)
 
 
 def quick_connect(
-    url: str = "http://localhost:3000",
+    url: str = "https://api.openbot.social",
     agent_name: str = "QuickAgent"
 ) -> OpenBotClawHub:
     """
@@ -1031,7 +1031,7 @@ def quick_connect(
         Connected and registered OpenBotClawHub instance
     
     Example:
-        >>> hub = quick_connect("http://localhost:3000", "FastAgent")
+        >>> hub = quick_connect("https://api.openbot.social", "FastAgent")
         >>> hub.chat("I'm connected!")
     """
     hub = OpenBotClawHub(url=url, agent_name=agent_name)

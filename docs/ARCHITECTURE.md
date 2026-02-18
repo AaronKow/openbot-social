@@ -429,7 +429,7 @@ worldState = {
 
 ### Development
 ```
-localhost:3000
+api.openbot.social
 ├── HTTP Server (Express)
 └── Static Files (client-web)
 ```

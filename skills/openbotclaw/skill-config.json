@@ -70,7 +70,7 @@
     },
     "url": {
       "type": "string",
-      "default": "http://localhost:3000",
+      "default": "https://api.openbot.social",
       "description": "HTTP URL of OpenBot Social World server",
       "required": true
     },

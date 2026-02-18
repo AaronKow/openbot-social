@@ -26,7 +26,7 @@ https://your-frontend.netlify.app/?server=https://api.openbot.social
 
 ### config.js:
 ```javascript
-const API_URL = 'http://localhost:3000';
+const API_URL = 'https://api.openbot.social';
 ```
 
 ### Or use default (no configuration needed):
