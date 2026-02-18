@@ -60,13 +60,44 @@ async function initDatabase() {
     // Create entities table for RSA key-authenticated entities
     await client.query(`
       CREATE TABLE IF NOT EXISTS entities (
+        numeric_id SERIAL,
         entity_id VARCHAR(255) PRIMARY KEY,
         entity_type VARCHAR(100) NOT NULL DEFAULT 'lobster',
         display_name VARCHAR(255) NOT NULL,
+        entity_name VARCHAR(64) NOT NULL UNIQUE,
         public_key TEXT NOT NULL,
         public_key_fingerprint VARCHAR(64) NOT NULL UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add entity_name column if missing (migration for existing DBs)
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entities ADD COLUMN IF NOT EXISTS entity_name VARCHAR(64) UNIQUE;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
+    `);
+
+    // Add numeric_id column if missing (migration for existing DBs)
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entities ADD COLUMN IF NOT EXISTS numeric_id SERIAL;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
+    `);
+
+    // Create conversation_messages table for per-entity conversation history 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS conversation_messages (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL,
+        agent_id VARCHAR(255) NOT NULL,
+        agent_name VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        timestamp BIGINT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
@@ -115,6 +146,16 @@ async function initDatabase() {
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_entities_fingerprint 
       ON entities(public_key_fingerprint)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_entities_name 
+      ON entities(entity_name)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_conversation_messages_entity 
+      ON conversation_messages(entity_id, timestamp DESC)
     `);
 
     await client.query(`
@@ -244,7 +285,7 @@ async function loadRecentChatMessages(limit = 100) {
     agentId: row.agent_id,
     agentName: row.agent_name,
     message: row.message,
-    timestamp: row.timestamp
+    timestamp: parseInt(row.timestamp, 10)
   })).reverse(); // Return in chronological order
 }
 
@@ -301,16 +342,53 @@ async function deleteWorldObject(objectId) {
 
 // ============= ENTITY FUNCTIONS =============
 
-// Create a new entity
-async function createEntity(entityId, entityType, displayName, publicKey, publicKeyFingerprint) {
+// Create a new entity (with entity_name for unique naming)
+async function createEntity(entityId, entityType, displayName, publicKey, publicKeyFingerprint, entityName) {
   const query = `
-    INSERT INTO entities (entity_id, entity_type, display_name, public_key, public_key_fingerprint)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING *
+    INSERT INTO entities (entity_id, entity_type, display_name, public_key, public_key_fingerprint, entity_name)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    RETURNING *, numeric_id
   `;
-  const result = await pool.query(query, [entityId, entityType, displayName, publicKey, publicKeyFingerprint]);
+  const result = await pool.query(query, [entityId, entityType, displayName, publicKey, publicKeyFingerprint, entityName || entityId]);
   return result.rows[0];
 }
+
+// Check if entity_name already exists
+async function entityNameExists(entityName) {
+  const result = await pool.query('SELECT 1 FROM entities WHERE entity_name = $1', [entityName]);
+  return result.rows.length > 0;
+}
+
+// Save a conversation message for a specific entity
+async function saveConversationMessage(entityId, agentId, agentName, message, timestamp) {
+  await pool.query(
+    'INSERT INTO conversation_messages (entity_id, agent_id, agent_name, message, timestamp) VALUES ($1, $2, $3, $4, $5)',
+    [entityId, agentId, agentName, message, timestamp]
+  );
+}
+
+// Load conversation messages for an entity
+async function loadConversationMessages(entityId, limit = 100) {
+  const result = await pool.query(
+    'SELECT * FROM conversation_messages WHERE entity_id = $1 ORDER BY timestamp DESC LIMIT $2',
+    [entityId, limit]
+  );
+  return result.rows.map(row => ({
+    entityId: row.entity_id,
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp)
+  })).reverse();
+}
+
+// Get total number of entities ever created
+async function getEntityCount() {
+  const result = await pool.query('SELECT COUNT(*) as count FROM entities');
+  return parseInt(result.rows[0].count);
+}
+
+// Get active agent count (requires checking spawned agents - not a DB operation, handled in index.js)
 
 // Get entity by entity_id
 async function getEntity(entityId) {
@@ -332,13 +410,13 @@ async function entityExists(entityId) {
 
 // List all entities (with optional type filter)
 async function listEntities(entityType = null) {
-  let query = 'SELECT entity_id, entity_type, display_name, created_at FROM entities';
+  let query = 'SELECT entity_id, entity_type, display_name, entity_name, numeric_id, created_at FROM entities';
   const params = [];
   if (entityType) {
     query += ' WHERE entity_type = $1';
     params.push(entityType);
   }
-  query += ' ORDER BY created_at DESC';
+  query += ' ORDER BY numeric_id ASC';
   const result = await pool.query(query, params);
   return result.rows;
 }
@@ -479,7 +557,12 @@ module.exports = {
   getEntity,
   getEntityByFingerprint,
   entityExists,
+  entityNameExists,
   listEntities,
+  getEntityCount,
+  // Conversation functions
+  saveConversationMessage,
+  loadConversationMessages,
   // Session functions
   createSession,
   getSession,

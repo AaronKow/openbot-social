@@ -97,7 +97,7 @@ class SimpleAgent:
         print(f"🎯 New target: ({self.target_position['x']:.1f}, {self.target_position['z']:.1f})")
     
     def _move_towards_target(self):
-        """Move gradually towards target."""
+        """Move gradually towards target with realistic step size."""
         if not self.target_position:
             return
         
@@ -113,10 +113,8 @@ class SimpleAgent:
             self.target_position = None
             return
         
-        # Move towards target
-        speed = 1.5
-        if distance < speed:
-            speed = distance
+        # Move towards target with realistic step (max 3 units per call)
+        speed = min(3.0, distance)
         
         new_x = pos["x"] + (dx / distance) * speed
         new_z = pos["z"] + (dz / distance) * speed
@@ -300,7 +298,7 @@ class InteractiveAgent:
         return nearest
     
     def _move_towards_agent(self, agent: Dict[str, Any]):
-        """Move towards target agent."""
+        """Move towards target agent with realistic step size."""
         my_pos = self.hub.get_position()
         target_pos = agent["position"]
         
@@ -310,8 +308,9 @@ class InteractiveAgent:
         distance = math.sqrt(dx * dx + dz * dz)
         
         if distance > 10:  # Only move if far away
-            new_x = my_pos["x"] + (dx / distance) * 2.0
-            new_z = my_pos["z"] + (dz / distance) * 2.0
+            step = min(3.0, distance)  # Realistic step (max 3 units)
+            new_x = my_pos["x"] + (dx / distance) * step
+            new_z = my_pos["z"] + (dz / distance) * step
             rotation = math.atan2(dz, dx)
             self.hub.move(new_x, 0, new_z, rotation)
     
@@ -439,7 +438,7 @@ class SmartNavigationAgent:
         print(f"📍 Generated {len(self.waypoints)} patrol waypoints")
     
     def _navigate_patrol(self):
-        """Navigate patrol route."""
+        """Navigate patrol route with realistic step size."""
         if not self.waypoints:
             return
         
@@ -456,8 +455,8 @@ class SmartNavigationAgent:
             print(f"✅ Reached waypoint {self.current_waypoint_idx}")
             return
         
-        # Move towards waypoint
-        speed = 2.0
+        # Move towards waypoint with realistic step (max 3 units)
+        speed = min(3.0, distance)
         new_x = pos["x"] + (dx / distance) * speed
         new_z = pos["z"] + (dz / distance) * speed
         rotation = math.atan2(dz, dx)
@@ -485,29 +484,29 @@ class SmartNavigationAgent:
         dz = target_pos["z"] - my_pos["z"]
         distance = math.sqrt(dx * dx + dz * dz)
         
-        # Maintain following distance
+        # Maintain following distance (realistic step max 3 units)
         if distance > 8:
-            speed = 1.5
+            speed = min(3.0, distance)
             new_x = my_pos["x"] + (dx / distance) * speed
             new_z = my_pos["z"] + (dz / distance) * speed
             rotation = math.atan2(dz, dx)
             self.hub.move(new_x, 0, new_z, rotation)
     
     def _navigate_explore(self):
-        """Random exploration."""
+        """Random exploration with realistic step sizes."""
         pos = self.hub.get_position()
         world_size = self.hub.world_size
         
-        # Pick random direction
+        # Pick random direction with small, realistic step (2-4 units)
         angle = random.uniform(0, 2 * math.pi)
-        distance = random.uniform(5, 15)
+        distance = random.uniform(2, 4)
         
         new_x = pos["x"] + math.cos(angle) * distance
         new_z = pos["z"] + math.sin(angle) * distance
         
         # Clamp to world bounds
-        new_x = max(10, min(world_size["x"] - 10, new_x))
-        new_z = max(10, min(world_size["y"] - 10, new_z))
+        new_x = max(5, min(world_size["x"] - 5, new_x))
+        new_z = max(5, min(world_size["y"] - 5, new_z))
         
         self.hub.move(new_x, 0, new_z, angle)
     

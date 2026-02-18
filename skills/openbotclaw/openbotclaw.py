@@ -242,7 +242,8 @@ class OpenBotClawHub:
         entity_id: str,
         display_name: str,
         entity_type: str = "lobster",
-        key_size: int = 2048
+        key_size: int = 2048,
+        entity_name: str = None
     ) -> Dict[str, Any]:
         """
         Create a new entity with RSA key-based authentication.
@@ -255,9 +256,11 @@ class OpenBotClawHub:
             display_name: Display name in the world
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits (default: 2048)
+            entity_name: Unique entity name (3-64 chars, alphanumeric/hyphens/underscores, no spaces).
+                         If not provided, derived from display_name.
         
         Returns:
-            Dict with entity creation results
+            Dict with entity creation results (includes numeric_id)
         
         Raises:
             RuntimeError: If entity auth not available or creation fails
@@ -274,10 +277,10 @@ class OpenBotClawHub:
             )
         
         result = self.entity_manager.create_entity(
-            entity_id, display_name, entity_type, key_size
+            entity_id, display_name, entity_type, key_size, entity_name=entity_name
         )
         self.entity_id = entity_id
-        self.logger.info(f"Entity created: {entity_id} ({entity_type})")
+        self.logger.info(f"Entity created: #{result.get('numeric_id', '?')} {entity_id} ({entity_type})")
         return result
     
     def authenticate_entity(self, entity_id: Optional[str] = None) -> Dict[str, Any]:
@@ -504,6 +507,11 @@ class OpenBotClawHub:
         """
         Move agent to specified position.
         
+        Movement is clamped both client-side and server-side to a maximum
+        step distance of 5 units per request, ensuring realistic walking
+        behavior in the 3D world. For large moves, call move() multiple
+        times to walk there gradually.
+        
         Args:
             x: X coordinate (horizontal)
             y: Y coordinate (vertical height, typically 0 for ocean floor)
@@ -524,10 +532,26 @@ class OpenBotClawHub:
             return False
         
         # Validate coordinates
-        if not (0 <= x <= self.world_size["x"] and 0 <= z <= self.world_size["y"]):
-            self.logger.warning(f"Position out of bounds: ({x}, {y}, {z})")
+        target_x = max(0, min(self.world_size["x"], float(x)))
+        target_z = max(0, min(self.world_size["y"], float(z)))
+        target_y = max(0, min(5, float(y)))
         
-        self.position = {"x": float(x), "y": float(y), "z": float(z)}
+        # Client-side distance clamping for realistic movement
+        MAX_STEP = 5.0
+        dx = target_x - self.position["x"]
+        dy = target_y - self.position["y"]
+        dz = target_z - self.position["z"]
+        import math
+        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+        
+        if distance > MAX_STEP and distance > 0:
+            scale = MAX_STEP / distance
+            target_x = self.position["x"] + dx * scale
+            target_y = self.position["y"] + dy * scale
+            target_z = self.position["z"] + dz * scale
+            self.logger.debug(f"Movement clamped from {distance:.1f} to {MAX_STEP} units")
+        
+        self.position = {"x": target_x, "y": target_y, "z": target_z}
         if rotation is not None:
             self.rotation = float(rotation)
         
@@ -996,6 +1020,12 @@ class OpenBotClawHub:
         """
         Send message to server via HTTP POST.
         
+        Maps message types to correct API endpoints:
+        - register -> POST /spawn (with auth)
+        - move -> POST /move
+        - chat -> POST /chat
+        - action -> POST /action
+        
         Args:
             data: Message dictionary
         
@@ -1012,27 +1042,58 @@ class OpenBotClawHub:
                 return False
         
         try:
-            # Map message types to HTTP endpoints
             msg_type = data.get('type')
-            endpoint = f"{self.url}/action"
             
-            # Add agent ID to request if available
-            if self.agent_id:
-                data['agentId'] = self.agent_id
+            # Map message types to HTTP endpoints and payloads
+            if msg_type == 'register':
+                endpoint = f"{self.url}/spawn"
+                payload = {}  # spawn uses auth header, no body needed
+            elif msg_type == 'move':
+                endpoint = f"{self.url}/move"
+                payload = {
+                    "agentId": self.agent_id,
+                    "position": data.get("position"),
+                }
+                if "rotation" in data:
+                    payload["rotation"] = data["rotation"]
+            elif msg_type == 'chat':
+                endpoint = f"{self.url}/chat"
+                payload = {
+                    "agentId": self.agent_id,
+                    "message": data.get("message")
+                }
+            elif msg_type == 'action':
+                endpoint = f"{self.url}/action"
+                payload = {
+                    "agentId": self.agent_id,
+                    "action": data.get("action")
+                }
+            else:
+                endpoint = f"{self.url}/action"
+                if self.agent_id:
+                    data['agentId'] = self.agent_id
+                payload = data
             
             response = self.session.post(
                 endpoint,
-                json=data,
+                json=payload,
                 timeout=self.connection_timeout
             )
             response.raise_for_status()
             
-            # Handle response if present
+            # Handle response
             if response.content:
                 try:
                     response_data = response.json()
-                    # Process response message (e.g., registration confirmation)
-                    if response_data:
+                    # Process registration confirmation from /spawn
+                    if msg_type == 'register' and response_data.get('success'):
+                        self._handle_registered({
+                            "type": "registered",
+                            "agentId": response_data.get("agentId"),
+                            "position": response_data.get("position", {"x": 0, "y": 0, "z": 0}),
+                            "worldSize": response_data.get("worldSize", {"x": 100, "y": 100})
+                        })
+                    elif response_data:
                         self._handle_message(response_data)
                 except json.JSONDecodeError:
                     pass
@@ -1043,7 +1104,6 @@ class OpenBotClawHub:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to send message: {e}")
             
-            # Queue message if enabled
             if self.enable_message_queue:
                 self._message_queue.put(data)
             

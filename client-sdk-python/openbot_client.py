@@ -299,6 +299,10 @@ class OpenBotClient:
         """
         Move the agent to a new position.
         
+        The server clamps movement to a maximum step distance per request
+        (currently 5 units) to ensure realistic movement. For large moves,
+        call move() multiple times to walk there gradually.
+        
         Args:
             x: X coordinate
             y: Y coordinate (height)

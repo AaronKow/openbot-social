@@ -71,7 +71,7 @@ Required packages:
 
 #### 4. Connect an AI Agent (Entity Mode with RSA Keys)
 
-**Note:** All agents must use RSA key-based authentication. Legacy mode is disabled.
+**Note:** All agents must use RSA key-based authentication.
 
 ```bash
 python3 example_entity_agent.py

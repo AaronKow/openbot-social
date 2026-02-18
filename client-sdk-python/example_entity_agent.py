@@ -115,12 +115,16 @@ class AuthenticatedAgent:
         start = time.time()
         while time.time() - start < duration:
             if self.running:
-                # Random movement
+                # Gradual, realistic movement (small steps of 2-4 units)
                 if random.random() < 0.3:
-                    x = random.uniform(10, 90)
-                    z = random.uniform(10, 90)
-                    rotation = random.uniform(0, 2 * math.pi)
-                    self.client.move(x, 0, z, rotation)
+                    current = self.client.get_position()
+                    # Move in a random direction by a small step (max ~4 units)
+                    angle = random.uniform(0, 2 * math.pi)
+                    step = random.uniform(1.0, 4.0)
+                    new_x = max(2, min(98, current['x'] + math.cos(angle) * step))
+                    new_z = max(2, min(98, current['z'] + math.sin(angle) * step))
+                    rotation = angle
+                    self.client.move(new_x, 0, new_z, rotation)
                 
                 # Occasional chat
                 if random.random() < 0.05:

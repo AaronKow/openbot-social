@@ -62,7 +62,7 @@ function createEntityRouter(db, rateLimiters = {}) {
     rateLimiters.entityCreate || noopMiddleware,
     async (req, res) => {
       try {
-        const { entity_id, entity_type = 'lobster', display_name, public_key } = req.body;
+        const { entity_id, entity_type = 'lobster', display_name, public_key, entity_name } = req.body;
 
         // Validate required fields
         if (!entity_id || !display_name || !public_key) {
@@ -77,6 +77,26 @@ function createEntityRouter(db, rateLimiters = {}) {
           return res.status(400).json({
             success: false,
             error: 'entity_id must be 3-64 characters, alphanumeric with hyphens and underscores'
+          });
+        }
+
+        // Derive or validate entity_name:
+        // entity_name must be unique, no special characters/spaces, at least 3 characters, alphanumeric with hyphens/underscores only
+        const resolvedEntityName = (entity_name || display_name)
+          .replace(/[^a-zA-Z0-9_-]/g, '')  // strip special chars and spaces
+          .substring(0, 64);
+
+        if (!resolvedEntityName || resolvedEntityName.length < 3) {
+          return res.status(400).json({
+            success: false,
+            error: 'entity_name (or display_name after sanitization) must be at least 3 characters, alphanumeric with hyphens/underscores only, no spaces or special characters'
+          });
+        }
+
+        if (!/^[a-zA-Z0-9_-]{3,64}$/.test(resolvedEntityName)) {
+          return res.status(400).json({
+            success: false,
+            error: 'entity_name must be 3-64 characters, alphanumeric with hyphens and underscores only (no spaces or special characters)'
           });
         }
 
@@ -119,6 +139,15 @@ function createEntityRouter(db, rateLimiters = {}) {
             });
           }
 
+          // Check if entity_name already exists
+          const existingName = await db.entityNameExists(resolvedEntityName);
+          if (existingName) {
+            return res.status(409).json({
+              success: false,
+              error: `entity_name '${resolvedEntityName}' already exists. Each entity must have a unique name.`
+            });
+          }
+
           // Check if public key fingerprint already registered
           const existingKey = await db.getEntityByFingerprint(fingerprint);
           if (existingKey) {
@@ -134,16 +163,19 @@ function createEntityRouter(db, rateLimiters = {}) {
             entity_type,
             display_name,
             public_key,
-            fingerprint
+            fingerprint,
+            resolvedEntityName
           );
 
-          console.log(`Entity created: ${entity_id} (${entity_type}) - ${display_name}`);
+          console.log(`Entity created: #${entity.numeric_id} ${entity_id} (${entity_type}) - ${display_name} [name: ${resolvedEntityName}]`);
 
           return res.status(201).json({
             success: true,
             entity_id: entity.entity_id,
             entity_type: entity.entity_type,
             display_name: entity.display_name,
+            entity_name: resolvedEntityName,
+            numeric_id: entity.numeric_id,
             fingerprint: fingerprint,
             created_at: entity.created_at,
             message: 'Entity created successfully. Store your private key securely — it cannot be recovered.'
@@ -161,10 +193,28 @@ function createEntityRouter(db, rateLimiters = {}) {
             });
           }
 
+          // Check entity_name uniqueness in memory
+          for (const e of router._memoryEntities.values()) {
+            if (e.entity_name === resolvedEntityName) {
+              return res.status(409).json({
+                success: false,
+                error: `entity_name '${resolvedEntityName}' already exists. Each entity must have a unique name.`
+              });
+            }
+          }
+
+          // Assign incremented numeric_id in memory
+          let maxId = 0;
+          for (const e of router._memoryEntities.values()) {
+            if (e.numeric_id && e.numeric_id > maxId) maxId = e.numeric_id;
+          }
+
           const entity = {
             entity_id,
             entity_type,
             display_name,
+            entity_name: resolvedEntityName,
+            numeric_id: maxId + 1,
             public_key,
             public_key_fingerprint: fingerprint,
             created_at: new Date().toISOString()
@@ -172,13 +222,15 @@ function createEntityRouter(db, rateLimiters = {}) {
 
           router._memoryEntities.set(entity_id, entity);
 
-          console.log(`Entity created (in-memory): ${entity_id} (${entity_type}) - ${display_name}`);
+          console.log(`Entity created (in-memory): #${entity.numeric_id} ${entity_id} (${entity_type}) - ${display_name} [name: ${resolvedEntityName}]`);
 
           return res.status(201).json({
             success: true,
             entity_id,
             entity_type,
             display_name,
+            entity_name: resolvedEntityName,
+            numeric_id: entity.numeric_id,
             fingerprint,
             created_at: entity.created_at,
             message: 'Entity created successfully. Store your private key securely — it cannot be recovered.'
@@ -545,6 +597,8 @@ function createEntityRouter(db, rateLimiters = {}) {
           entity_id: entity.entity_id,
           entity_type: entity.entity_type,
           display_name: entity.display_name,
+          entity_name: entity.entity_name,
+          numeric_id: entity.numeric_id,
           fingerprint: entity.public_key_fingerprint,
           created_at: entity.created_at
         }

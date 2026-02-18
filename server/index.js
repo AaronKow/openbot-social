@@ -58,8 +58,13 @@ const worldState = {
   agents: new Map(), // agentId -> agent data
   objects: new Map(), // objectId -> object data
   chatMessages: [], // Recent chat messages
-  tick: 0
+  tick: 0,
+  startTime: Date.now(), // Server start time for uptime calculation
+  totalEntitiesCreated: 0 // Track total entities ever created
 };
+
+// Maximum movement distance per move request (prevents teleporting)
+const MAX_MOVE_DISTANCE = 5.0; // Max units an agent can move per request
 
 // Agent class to manage individual agents
 class Agent {
@@ -79,6 +84,8 @@ class Agent {
     this.lastUpdate = Date.now();
     this.entityId = null; // Link to authenticated entity (if any)
     this.entityType = null; // Entity type (lobster, crab, etc.)
+    this.entityName = null; // Unique entity name
+    this.numericId = null; // Incremented numeric ID
   }
 
   toJSON() {
@@ -91,22 +98,64 @@ class Agent {
       state: this.state,
       lastAction: this.lastAction,
       entityId: this.entityId,
-      entityType: this.entityType
+      entityType: this.entityType,
+      entityName: this.entityName,
+      numericId: this.numericId
     };
   }
 }
 
-// Validate movement
+// Validate movement position (clamp to world bounds)
 function validatePosition(pos) {
   return {
-    x: Math.max(0, Math.min(WORLD_SIZE.x, pos.x)),
-    y: Math.max(0, Math.min(5, pos.y)), // Limit y movement, prevent going below floor (y=0)
-    z: Math.max(0, Math.min(WORLD_SIZE.y, pos.z))
+    x: Math.max(0, Math.min(WORLD_SIZE.x, Number(pos.x) || 0)),
+    y: Math.max(0, Math.min(5, Number(pos.y) || 0)),
+    z: Math.max(0, Math.min(WORLD_SIZE.y, Number(pos.z) || 0))
   };
 }
 
+// Clamp movement to realistic distance from current position
+function clampMovement(currentPos, targetPos) {
+  const validated = validatePosition(targetPos);
+  const dx = validated.x - currentPos.x;
+  const dy = validated.y - currentPos.y;
+  const dz = validated.z - currentPos.z;
+  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+  if (distance <= MAX_MOVE_DISTANCE) {
+    return validated;
+  }
+
+  // Scale down to max distance
+  const scale = MAX_MOVE_DISTANCE / distance;
+  return validatePosition({
+    x: currentPos.x + dx * scale,
+    y: currentPos.y + dy * scale,
+    z: currentPos.z + dz * scale
+  });
+}
+
+// Format uptime from milliseconds to human readable string
+function formatUptime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const months = Math.floor(days / 30);
+
+  const parts = [];
+  if (months > 0) parts.push(`${months}mo`);
+  if (days % 30 > 0) parts.push(`${days % 30}d`);
+  if (hours % 24 > 0) parts.push(`${hours % 24}h`);
+  if (minutes % 60 > 0) parts.push(`${minutes % 60}m`);
+  parts.push(`${seconds % 60}s`);
+
+  return parts.join(' ');
+}
+
 // Add chat message to history (keep last 100 messages)
-async function addChatMessage(agentId, agentName, message) {
+// Also saves conversation per-entity for full chat history
+async function addChatMessage(agentId, agentName, message, entityId) {
   const timestamp = Date.now();
   worldState.chatMessages.push({
     agentId,
@@ -124,6 +173,10 @@ async function addChatMessage(agentId, agentName, message) {
   if (process.env.DATABASE_URL) {
     try {
       await db.saveChatMessage(agentId, agentName, message, timestamp);
+      // Also save to per-entity conversation history
+      if (entityId) {
+        await db.saveConversationMessage(entityId, agentId, agentName, message, timestamp);
+      }
     } catch (error) {
       console.error('Error saving chat message to database:', error);
     }
@@ -175,6 +228,8 @@ app.post('/spawn', requireAuth, async (req, res) => {
       agent = new Agent(agentId, entity.display_name);
       agent.entityId = entityId; // Link agent to entity
       agent.entityType = entity.entity_type;
+      agent.entityName = entity.entity_name || null;
+      agent.numericId = entity.numeric_id || null;
       worldState.agents.set(agentId, agent);
       
       console.log(`Entity spawned: ${entity.display_name} (${entityId}) as agent ${agentId}`);
@@ -190,7 +245,9 @@ app.post('/spawn', requireAuth, async (req, res) => {
       agentId: agent.id,
       position: agent.position,
       worldSize: WORLD_SIZE,
-      entityId: entityId
+      entityId: entityId,
+      entityName: agent.entityName,
+      numericId: agent.numericId
     });
   } catch (error) {
     console.error('Error spawning entity:', error);
@@ -221,12 +278,12 @@ app.post('/move', rateLimiters.move, (req, res) => {
       });
     }
     
-    // Update agent position
+    // Update agent position with realistic distance clamping
     if (position) {
-      agent.position = validatePosition(position);
+      agent.position = clampMovement(agent.position, position);
     }
     if (rotation !== undefined) {
-      agent.rotation = rotation;
+      agent.rotation = Number(rotation) || 0;
     }
     agent.state = 'moving';
     agent.lastUpdate = Date.now();
@@ -261,8 +318,8 @@ app.post('/chat', rateLimiters.chat, async (req, res) => {
       });
     }
     
-    // Add chat message to history
-    addChatMessage(agentId, agent.name, message);
+    // Add chat message to history (with entity link for conversation tracking)
+    addChatMessage(agentId, agent.name, message, agent.entityId);
     console.log(`${agent.name}: ${message}`);
     
     agent.lastUpdate = Date.now();
@@ -331,8 +388,12 @@ app.get('/world-state', (req, res) => {
       }
     }
     
+    const uptimeMs = Date.now() - worldState.startTime;
     res.json({
       tick: worldState.tick,
+      uptimeMs: uptimeMs,
+      uptimeFormatted: formatUptime(uptimeMs),
+      serverStartTime: worldState.startTime,
       agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
       objects: Array.from(worldState.objects.values())
     });
@@ -494,12 +555,27 @@ setInterval(() => {
 // Status API endpoint
 app.get('/status', async (req, res) => {
   const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
+  const uptimeMs = Date.now() - worldState.startTime;
+  
+  // Count total entities created
+  let totalEntities = worldState.totalEntitiesCreated;
+  if (process.env.DATABASE_URL) {
+    try {
+      totalEntities = await db.getEntityCount();
+    } catch (e) {
+      // fallback to cached count
+    }
+  }
   
   res.json({
     status: 'online',
-    agents: worldState.agents.size,
+    activeAgents: worldState.agents.size,
+    totalEntitiesCreated: totalEntities,
     tick: worldState.tick,
     uptime: process.uptime(),
+    uptimeFormatted: formatUptime(uptimeMs),
+    uptimeMs: uptimeMs,
+    serverStartTime: worldState.startTime,
     database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled'
   });
 });
@@ -523,6 +599,14 @@ async function startServer() {
       const recentMessages = await db.loadRecentChatMessages(100);
       worldState.chatMessages = recentMessages;
       console.log(`Loaded ${recentMessages.length} chat messages from database`);
+
+      // Load total entity count
+      try {
+        worldState.totalEntitiesCreated = await db.getEntityCount();
+        console.log(`Total entities created: ${worldState.totalEntitiesCreated}`);
+      } catch (e) {
+        console.warn('Could not load entity count:', e.message);
+      }
     } else {
       console.log('Database disabled - running in memory-only mode');
     }

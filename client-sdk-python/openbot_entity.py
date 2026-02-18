@@ -361,7 +361,8 @@ class EntityManager:
         entity_id: str, 
         display_name: str, 
         entity_type: str = "lobster",
-        key_size: int = 2048
+        key_size: int = 2048,
+        entity_name: str = None
     ) -> Dict[str, Any]:
         """
         Create a new entity: generate RSA key pair and register with server.
@@ -371,13 +372,26 @@ class EntityManager:
             display_name: Display name in the world
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits
+            entity_name: Unique entity name (3-64 chars, alphanumeric/hyphens/underscores, no spaces).
+                         If not provided, derived from display_name by stripping invalid chars.
             
         Returns:
-            Server response dict with entity info
+            Server response dict with entity info (including numeric_id)
             
         Raises:
             RuntimeError: If key generation or registration fails
+            ValueError: If entity_name is invalid
         """
+        # Derive entity_name from display_name if not provided
+        resolved_name = entity_name or ''.join(c for c in display_name if c.isalnum() or c in '-_')
+        resolved_name = resolved_name[:64]
+        
+        if len(resolved_name) < 3:
+            raise ValueError(
+                f"entity_name ('{resolved_name}') must be at least 3 characters, "
+                "alphanumeric with hyphens/underscores only, no spaces or special characters"
+            )
+        
         # Generate RSA key pair
         try:
             private_key_path, public_key_pem = generate_rsa_keypair(
@@ -395,6 +409,7 @@ class EntityManager:
                 "entity_id": entity_id,
                 "entity_type": entity_type,
                 "display_name": display_name,
+                "entity_name": resolved_name,
                 "public_key": public_key_pem
             },
             timeout=10
@@ -403,7 +418,8 @@ class EntityManager:
         result = response.json()
         
         if response.status_code == 201 and result.get('success'):
-            print(f"Entity created: {entity_id} ({entity_type})")
+            numeric_id = result.get('numeric_id', '?')
+            print(f"Entity created: #{numeric_id} {entity_id} ({entity_type}) [name: {resolved_name}]")
             print(f"Private key stored at: {private_key_path}")
             print(f"WARNING: Keep your private key safe. If lost, entity ownership cannot be recovered.")
             return result

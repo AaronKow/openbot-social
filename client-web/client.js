@@ -14,6 +14,8 @@ class OpenBotWorld {
         this.pollInterval = config.pollInterval;
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
+        this.serverStartTime = null; // Server start time for uptime
+        this.totalEntitiesCreated = 0; // Total entities ever created
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -32,6 +34,7 @@ class OpenBotWorld {
         this.init();
         this.setupUIControls();
         this.startPolling();
+        this.startUptimeTimer();
         this.animate();
     }
     
@@ -342,10 +345,17 @@ class OpenBotWorld {
     
     async testConnection() {
         try {
-            const response = await fetch(`${this.apiBase}/ping`);
+            const response = await fetch(`${this.apiBase}/status`);
             if (response.ok) {
+                const data = await response.json();
                 console.log('Connected to server');
                 this.connected = true;
+                // Update server info from status endpoint
+                if (data.serverStartTime) this.serverStartTime = data.serverStartTime;
+                if (data.totalEntitiesCreated !== undefined) this.totalEntitiesCreated = data.totalEntitiesCreated;
+                if (data.uptimeMs !== undefined) {
+                    document.getElementById('uptime-display').textContent = this.formatUptime(data.uptimeMs);
+                }
                 this.updateStatus();
             }
         } catch (error) {
@@ -406,9 +416,15 @@ class OpenBotWorld {
     }
     
     handleWorldState(data) {
-        // Update tick count
-        if (data.tick) {
-            document.getElementById('tick-count').textContent = data.tick;
+        // Update uptime display
+        if (data.uptimeMs !== undefined) {
+            document.getElementById('uptime-display').textContent = this.formatUptime(data.uptimeMs);
+        } else if (data.uptimeFormatted) {
+            document.getElementById('uptime-display').textContent = data.uptimeFormatted;
+        }
+        
+        if (data.serverStartTime) {
+            this.serverStartTime = data.serverStartTime;
         }
         
         // Get current agent IDs from the server
@@ -497,6 +513,16 @@ class OpenBotWorld {
         const messageDiv = document.createElement('div');
         messageDiv.className = 'chat-message';
         
+        // Create timestamp display
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'chat-message-time';
+        const msgDate = message.timestamp ? new Date(Number(message.timestamp)) : new Date();
+        const timeStr = msgDate.toLocaleString(undefined, {
+            month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+        timeSpan.textContent = `[${timeStr}] `;
+        
         // Create clickable agent name
         const agentNameSpan = document.createElement('span');
         agentNameSpan.className = 'chat-message-agent';
@@ -506,6 +532,7 @@ class OpenBotWorld {
             this.zoomToAgent(message.agentId);
         });
         
+        messageDiv.appendChild(timeSpan);
         messageDiv.appendChild(agentNameSpan);
         messageDiv.appendChild(document.createTextNode(`: ${message.message}`));
         chatDiv.appendChild(messageDiv);
@@ -600,10 +627,43 @@ class OpenBotWorld {
     
     updateStatus() {
         const statusEl = document.getElementById('connection-status');
-        statusEl.textContent = this.connected ? 'Connected' : 'Disconnected';
+        statusEl.textContent = this.connected ? 'Online' : 'Offline';
         statusEl.className = this.connected ? 'status-connected' : 'status-disconnected';
         
         document.getElementById('agent-count').textContent = this.agents.size;
+        
+        // Update total entities created count (if available)
+        const totalEl = document.getElementById('total-entities');
+        if (totalEl && this.totalEntitiesCreated > 0) {
+            totalEl.textContent = this.totalEntitiesCreated;
+        }
+    }
+    
+    formatUptime(ms) {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+        const months = Math.floor(days / 30);
+        
+        const parts = [];
+        if (months > 0) parts.push(`${months}mo`);
+        if (days % 30 > 0) parts.push(`${days % 30}d`);
+        if (hours % 24 > 0) parts.push(`${hours % 24}h`);
+        if (minutes % 60 > 0) parts.push(`${minutes % 60}m`);
+        parts.push(`${seconds % 60}s`);
+        
+        return parts.join(' ');
+    }
+    
+    startUptimeTimer() {
+        // Update uptime display every second locally (avoids waiting for server poll)
+        setInterval(() => {
+            if (this.serverStartTime && this.connected) {
+                const uptimeMs = Date.now() - this.serverStartTime;
+                document.getElementById('uptime-display').textContent = this.formatUptime(uptimeMs);
+            }
+        }, 1000);
     }
     
     updateAgentList() {
@@ -613,7 +673,11 @@ class OpenBotWorld {
         this.agents.forEach((agent, id) => {
             const itemDiv = document.createElement('div');
             itemDiv.className = 'agent-item';
-            itemDiv.textContent = `🦞 ${agent.data.name} - ${agent.data.state}`;
+            const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
+            const nameLabel = agent.data.entityName ? ` (${agent.data.entityName})` : '';
+            itemDiv.textContent = `🦞 ${idLabel}${agent.data.name}${nameLabel} - ${agent.data.state}`;
+            itemDiv.style.cursor = 'pointer';
+            itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);
         });
     }
