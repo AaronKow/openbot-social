@@ -13,7 +13,6 @@ services:
     
     # Health check for auto-recovery
     healthCheckPath: /api/status
-    healthCheckTimeout: 10
     
     # Environment variables
     envVars:
@@ -31,8 +30,6 @@ services:
     region: us-east
     
     # Auto-scaling (free tier: 1 instance only)
-    previewDeploysEnabled: true
-    previewDeploysFromPullRequests: true
     
     # Build settings
     buildCommand: npm ci --production
