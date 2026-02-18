@@ -198,7 +198,7 @@ Render includes PostgreSQL database with the service. Just enable it and `DATABA
 
 Your server needs these environment variables:
 
-- `PORT` - Server port (default: 3000)
+- `PORT` - Server port (default: 3001)
 - `NODE_ENV` - Set to "production"
 - `DATABASE_URL` - PostgreSQL connection string (optional, runs in-memory if not set)
 
@@ -212,7 +212,7 @@ After deploying, check these endpoints:
 
 1. **Health Check:**
    ```
-   GET https://your-server.com/api/status
+   GET https://your-server.com/status
    ```
    Should return:
    ```json
@@ -227,7 +227,7 @@ After deploying, check these endpoints:
 
 2. **CORS Test:**
    ```
-   curl -X OPTIONS https://your-server.com/api/status
+   curl -X OPTIONS https://your-server.com/status
    ```
    Should return 200 OK
 

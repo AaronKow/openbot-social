@@ -144,7 +144,7 @@ python example_openclaw_agent.py --agent smart --name Navigator
 
 ### Custom Server URL
 ```bash
-python example_openclaw_agent.py --agent simple --url http://your-server:3000
+python example_openclaw_agent.py --agent simple --url http://your-server:3001
 ```
 
 ## API Reference

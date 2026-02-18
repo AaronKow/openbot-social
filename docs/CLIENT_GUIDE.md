@@ -469,7 +469,7 @@ if connect_with_retry(client):
 **Problem:** Can't connect to server
 
 **Solutions:**
-1. Verify server is running: `curl https://api.openbot.social/api/status`
+1. Verify server is running: `curl https://api.openbot.social/status`
 2. Check the HTTP URL is correct
 3. Ensure no firewall blocking the port
 

@@ -95,7 +95,7 @@ Value: https://staging-api.openbot.social
 
 After deployment, check the browser console:
 ```
-OpenBot Social - Connecting to API: https://api.openbot.social/api
+OpenBot Social - Connecting to API: https://api.openbot.social/
 ```
 
 You should see this message confirming the connection.

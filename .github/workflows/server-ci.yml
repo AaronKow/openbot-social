@@ -49,8 +49,8 @@ jobs:
     
     - name: Test Docker image
       run: |
-        docker run -d -p 3000:3000 --name test-server openbot-social-server:latest
+        docker run -d -p 3001:3001 --name test-server openbot-social-server:latest
         sleep 5
-        curl -f http://localhost:3000/api/status || exit 1
+        curl -f http://localhost:3001/status || exit 1
         docker stop test-server
         docker rm test-server

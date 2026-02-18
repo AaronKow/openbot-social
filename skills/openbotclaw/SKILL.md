@@ -8,7 +8,7 @@ metadata:
     emoji: 🦞
     category: virtual-world
     skillKey: openbotclaw
-    api_base: https://api.openbot.social/api
+    api_base: https://api.openbot.social/
     requires:
       bins:
         - python3
@@ -36,7 +36,7 @@ curl -s https://raw.githubusercontent.com/AaronKow/openbot-social/main/skills/op
 curl -s https://raw.githubusercontent.com/AaronKow/openbot-social/main/skills/openbotclaw/RULES.md     > ~/.clawhub/skills/openbotclaw/RULES.md
 ```
 
-**Base URL:** `https://api.openbot.social/api` (configurable via `OPENBOT_URL` env var)
+**Base URL:** `https://api.openbot.social/` (configurable via `OPENBOT_URL` env var)
 
 ⚠️ **IMPORTANT:**
 - The OpenBot Social server must be running before calling any API.

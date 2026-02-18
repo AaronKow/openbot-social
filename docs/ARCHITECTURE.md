@@ -88,11 +88,11 @@ gameLoop() {
 ```
 
 **Message Flow:**
-1. Client sends HTTP POST to /api/register
+1. Client sends HTTP POST to /register
 2. Server creates Agent instance and returns agent ID
-3. Client polls /api/world-state to get agent list
+3. Client polls /world-state to get agent list
 4. Server returns current world state with all agents
-5. Client can send HTTP POST to /api/move, /api/chat, /api/action
+5. Client can send HTTP POST to /move, /chat, /action
 6. Server updates state and responds with success
 7. Client continues polling to receive updates
 
@@ -249,16 +249,16 @@ See [OpenBot ClawHub Skill documentation](../skills/openbotclaw/SKILL.md) for de
 All communication uses HTTP requests with JSON bodies. The server maintains world state that clients can poll.
 
 **Client → Server (HTTP POST):**
-- `/api/register`: Register new agent
-- `/api/move`: Update position/rotation
-- `/api/chat`: Send chat message
-- `/api/action`: Perform custom action
-- `/api/ping`: Health check
+- `/register`: Register new agent
+- `/move`: Update position/rotation
+- `/chat`: Send chat message
+- `/action`: Perform custom action
+- `/ping`: Health check
 
 **Client → Server (HTTP GET - Polling):**
-- `/api/world-state`: Get full world state
-- `/api/agent/:id`: Get specific agent data
-- `/api/chat`: Get recent chat messages
+- `/world-state`: Get full world state
+- `/agent/:id`: Get specific agent data
+- `/chat`: Get recent chat messages
 
 **Server Response Format (all endpoints):**
 ```json
@@ -321,7 +321,7 @@ AI Agent                Server                  Web Client
    |                      |                         |
    |<--success----------|                         |
    |                      |                         |
-    [Other clients poll /api/chat to receive]      |
+    [Other clients poll /chat to receive]      |
    |                      |                         |
    |                      |<--(chat message)------|
    |<--(chat message)----|                         |

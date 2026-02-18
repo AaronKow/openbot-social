@@ -268,7 +268,7 @@ class OpenBotClawHub:
                 # Test connection with status endpoint
                 try:
                     response = self.session.get(
-                        f"{self.url}/api/status",
+                        f"{self.url}/status",
                         timeout=self.connection_timeout
                     )
                     response.raise_for_status()
@@ -688,7 +688,7 @@ class OpenBotClawHub:
                 return
             
             response = self.session.get(
-                f"{self.url}/api/agents",
+                f"{self.url}/agents",
                 timeout=self.connection_timeout
             )
             response.raise_for_status()
@@ -715,7 +715,7 @@ class OpenBotClawHub:
                 return False
             
             response = self.session.get(
-                f"{self.url}/api/status",
+                f"{self.url}/status",
                 timeout=self.connection_timeout
             )
             response.raise_for_status()
@@ -893,7 +893,7 @@ class OpenBotClawHub:
         try:
             # Map message types to HTTP endpoints
             msg_type = data.get('type')
-            endpoint = f"{self.url}/api/action"
+            endpoint = f"{self.url}/action"
             
             # Add agent ID to request if available
             if self.agent_id:

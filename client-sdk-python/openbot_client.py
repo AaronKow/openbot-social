@@ -30,7 +30,7 @@ class OpenBotClient:
             agent_name: Name for your agent/lobster
             poll_interval: How often to poll for updates in seconds (default: 0.5)
         """
-        self.base_url = url.rstrip('/') + '/api'
+        self.base_url = url.rstrip('/')
         self.agent_name = agent_name
         self.poll_interval = poll_interval
         self.session = requests.Session()
@@ -226,7 +226,7 @@ class OpenBotClient:
         Send a POST request to the server.
         
         Args:
-            endpoint: API endpoint (without /api prefix)
+            endpoint: API endpoint (e.g., 'register', 'world-state')
             data: Dictionary to send as JSON
             
         Returns:

@@ -749,7 +749,7 @@ hub = OpenBotClawHub(
 
 # Production: INFO or WARNING
 hub = OpenBotClawHub(
-    url="http://production:3000",
+    url="http://production:3001",
     agent_name="ProdAgent",
     log_level="WARNING"
 )

@@ -10,7 +10,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Configuration
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const TICK_RATE = 30; // 30 updates per second
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = 30000; // 30 seconds of inactivity before cleanup
@@ -103,7 +103,7 @@ app.use((req, res, next) => {
 // ============= HTTP API ENDPOINTS =============
 
 // Register a new agent
-app.post('/api/register', (req, res) => {
+app.post('/register', (req, res) => {
   try {
     const { name } = req.body;
     
@@ -136,7 +136,7 @@ app.post('/api/register', (req, res) => {
 });
 
 // Move agent
-app.post('/api/move', (req, res) => {
+app.post('/move', (req, res) => {
   try {
     const { agentId, position, rotation } = req.body;
     
@@ -176,7 +176,7 @@ app.post('/api/move', (req, res) => {
 });
 
 // Send chat message
-app.post('/api/chat', async (req, res) => {
+app.post('/chat', async (req, res) => {
   try {
     const { agentId, message } = req.body;
     
@@ -212,7 +212,7 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // Perform action
-app.post('/api/action', (req, res) => {
+app.post('/action', (req, res) => {
   try {
     const { agentId, action } = req.body;
     
@@ -245,7 +245,7 @@ app.post('/api/action', (req, res) => {
 });
 
 // Ping endpoint
-app.get('/api/ping', (req, res) => {
+app.get('/ping', (req, res) => {
   res.json({ 
     success: true, 
     timestamp: Date.now() 
@@ -253,7 +253,7 @@ app.get('/api/ping', (req, res) => {
 });
 
 // Get world state
-app.get('/api/world-state', (req, res) => {
+app.get('/world-state', (req, res) => {
   try {
     const { agentId } = req.query;
     
@@ -280,7 +280,7 @@ app.get('/api/world-state', (req, res) => {
 });
 
 // Get specific agent
-app.get('/api/agent/:agentId', (req, res) => {
+app.get('/agent/:agentId', (req, res) => {
   try {
     const { agentId } = req.params;
     
@@ -303,7 +303,7 @@ app.get('/api/agent/:agentId', (req, res) => {
 });
 
 // Get chat messages (with optional since parameter)
-app.get('/api/chat', (req, res) => {
+app.get('/chat', (req, res) => {
   try {
     const { since } = req.query;
     
@@ -326,7 +326,7 @@ app.get('/api/chat', (req, res) => {
 });
 
 // Disconnect agent (optional cleanup endpoint)
-app.delete('/api/disconnect/:agentId', (req, res) => {
+app.delete('/disconnect/:agentId', (req, res) => {
   try {
     const { agentId } = req.params;
     
@@ -416,7 +416,7 @@ setInterval(() => {
 }, 1000 / TICK_RATE);
 
 // Status API endpoint
-app.get('/api/status', async (req, res) => {
+app.get('/status', async (req, res) => {
   const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
   
   res.json({
@@ -429,7 +429,7 @@ app.get('/api/status', async (req, res) => {
 });
 
 // Get all agents (alias for compatibility)
-app.get('/api/agents', (req, res) => {
+app.get('/agents', (req, res) => {
   res.json({
     agents: Array.from(worldState.agents.values()).map(a => a.toJSON())
   });
@@ -454,8 +454,8 @@ async function startServer() {
     // Start server
     app.listen(PORT, () => {
       console.log(`OpenBot Social Server running on port ${PORT}`);
-      console.log(`HTTP API: http://localhost:${PORT}/api`);
-      console.log(`API Status: http://localhost:${PORT}/api/status`);
+      console.log(`HTTP API: http://localhost:${PORT}/`);
+      console.log(`API Status: http://localhost:${PORT}/status`);
       console.log(`Database: ${process.env.DATABASE_URL ? 'Enabled' : 'Disabled'}`);
     });
   } catch (error) {

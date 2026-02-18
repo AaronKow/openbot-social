@@ -10,12 +10,12 @@ services:
     plan: free
     
     # Health check for auto-recovery
-    healthCheckPath: /api/status
+    healthCheckPath: /status
     
     # Environment variables
     envVars:
       - key: PORT
-        value: 3000
+        value: 3001
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
