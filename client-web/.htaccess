@@ -1,0 +1,93 @@
+# Apache Web Server Configuration for SEO
+# Uncomment if deploying to Apache server (alternative to Netlify)
+
+<IfModule mod_rewrite.c>
+  # Enable mod_rewrite
+  RewriteEngine On
+  RewriteBase /
+  
+  # Remove .html extension
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^([^\.]+)$ $1.html [NC,L]
+  
+  # Redirect to index.html for SPA routing
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+  
+  # Force HTTPS
+  RewriteCond %{HTTPS} off
+  RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+  
+  # Remove trailing slash
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^(.+)/$ /$1 [L,R=301]
+</IfModule>
+
+# Set proper content types
+<IfModule mod_mime.c>
+  AddType application/xml sitemap.xml
+  AddType text/plain robots.txt
+  AddEncoding gzip .gz
+  AddType text/javascript .js
+  AddType application/json .json
+</IfModule>
+
+# Cache control headers for performance (critical for SEO)
+<IfModule mod_expires.c>
+  ExpiresActive On
+  
+  # HTML - short cache
+  ExpiresByType text/html "access plus 1 hour"
+  
+  # Static assets - long cache
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType image/jpeg "access plus 1 year"
+  ExpiresByType image/gif "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/webp "access plus 1 year"
+  ExpiresByType font/ttf "access plus 1 year"
+  ExpiresByType application/font-woff "access plus 1 year"
+  ExpiresByType application/font-woff2 "access plus 1 year"
+  
+  # SEO files - medium cache
+  ExpiresByType application/xml "access plus 3 days"
+  ExpiresByType text/plain "access plus 1 day"
+</IfModule>
+
+# Security and SEO headers
+<IfModule mod_headers.c>
+  # Remove server info
+  Header unset X-Powered-By
+  Header unset X-AspNet-Version
+  
+  # Security headers
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set X-XSS-Protection "1; mode=block"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  
+  # Enable gzip compression (critical for SEO performance)
+  Header set ETag "%{FILE_ETAG}e"
+</IfModule>
+
+# Gzip compression
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html
+  AddOutputFilterByType DEFLATE text/plain
+  AddOutputFilterByType DEFLATE text/xml
+  AddOutputFilterByType DEFLATE text/css
+  AddOutputFilterByType DEFLATE text/javascript
+  AddOutputFilterByType DEFLATE application/javascript
+  AddOutputFilterByType DEFLATE application/json
+</IfModule>
+
+# Disable directory listing
+Options -Indexes
+
+# Whitelist important files
+<FilesMatch "^(robots\.txt|sitemap\.xml|\.well-known|index\.html)">
+  Allow from all
+</FilesMatch>

@@ -1,0 +1,56 @@
+name: Server CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'server/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'server/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: server/package-lock.json
+    
+    - name: Install dependencies
+      working-directory: ./server
+      run: npm ci
+    
+    - name: Check for syntax errors
+      working-directory: ./server
+      run: node -c index.js && node -c db.js
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Build Docker image
+      working-directory: ./server
+      run: docker build -t openbot-social-server:latest .
+    
+    - name: Test Docker image
+      run: |
+        docker run -d -p 3000:3000 --name test-server openbot-social-server:latest
+        sleep 5
+        curl -f http://localhost:3000/api/status || exit 1
+        docker stop test-server
+        docker rm test-server

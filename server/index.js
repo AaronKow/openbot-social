@@ -1,6 +1,7 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
+const db = require('./db');
 
 const app = express();
 
@@ -63,17 +64,27 @@ function validatePosition(pos) {
 }
 
 // Add chat message to history (keep last 100 messages)
-function addChatMessage(agentId, agentName, message) {
+async function addChatMessage(agentId, agentName, message) {
+  const timestamp = Date.now();
   worldState.chatMessages.push({
     agentId,
     agentName,
     message,
-    timestamp: Date.now()
+    timestamp
   });
   
-  // Keep only last 100 messages
+  // Keep only last 100 messages in memory
   if (worldState.chatMessages.length > 100) {
     worldState.chatMessages = worldState.chatMessages.slice(-100);
+  }
+
+  // Save to database (if enabled)
+  if (process.env.DATABASE_URL) {
+    try {
+      await db.saveChatMessage(agentId, agentName, message, timestamp);
+    } catch (error) {
+      console.error('Error saving chat message to database:', error);
+    }
   }
 }
 
@@ -165,7 +176,7 @@ app.post('/api/move', (req, res) => {
 });
 
 // Send chat message
-app.post('/api/chat', (req, res) => {
+app.post('/api/chat', async (req, res) => {
   try {
     const { agentId, message } = req.body;
     
@@ -340,7 +351,7 @@ app.delete('/api/disconnect/:agentId', (req, res) => {
 });
 
 // Game loop - Update world state periodically
-function gameLoop() {
+async function gameLoop() {
   worldState.tick++;
 
   // Clean up inactive agents (no updates for AGENT_TIMEOUT ms)
@@ -349,6 +360,15 @@ function gameLoop() {
     if (now - agent.lastUpdate > AGENT_TIMEOUT) {
       console.log(`Cleaning up inactive agent: ${agent.name} (${agentId})`);
       worldState.agents.delete(agentId);
+      
+      // Delete from database if enabled
+      if (process.env.DATABASE_URL) {
+        try {
+          await db.deleteAgent(agentId);
+        } catch (error) {
+          console.error('Error deleting agent from database:', error);
+        }
+      }
     }
   }
 
@@ -360,19 +380,51 @@ function gameLoop() {
   }
 }
 
-// Start game loop
-setInterval(gameLoop, 1000 / TICK_RATE);
+// Periodic state persistence to database (every 5 seconds)
+let persistenceCounter = 0;
+async function persistState() {
+  if (!process.env.DATABASE_URL) return;
+  
+  persistenceCounter++;
+  
+  // Save all agents to database every 5 seconds
+  if (persistenceCounter % 150 === 0) { // 150 ticks = 5 seconds at 30 tick rate
+    try {
+      for (const agent of worldState.agents.values()) {
+        await db.saveAgent(agent);
+      }
+      console.log(`Persisted ${worldState.agents.size} agents to database`);
+    } catch (error) {
+      console.error('Error persisting state:', error);
+    }
+  }
+  
+  // Clean up old chat messages every minute
+  if (persistenceCounter % 1800 === 0) { // 1800 ticks = 60 seconds
+    try {
+      await db.cleanupOldChatMessages();
+    } catch (error) {
+      console.error('Error cleaning up chat messages:', error);
+    }
+  }
+}
 
-// Serve static files (web client)
-app.use(express.static(path.join(__dirname, '../client-web')));
+// Start game loop
+setInterval(() => {
+  gameLoop();
+  persistState();
+}, 1000 / TICK_RATE);
 
 // Status API endpoint
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
+  const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
+  
   res.json({
     status: 'online',
     agents: worldState.agents.size,
     tick: worldState.tick,
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled'
   });
 });
 
@@ -383,10 +435,33 @@ app.get('/api/agents', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`OpenBot Social Server running on port ${PORT}`);
-  console.log(`HTTP API: http://localhost:${PORT}/api`);
-  console.log(`Web Client: http://localhost:${PORT}`);
-  console.log(`API Status: http://localhost:${PORT}/api/status`);
-});
+// Initialize and start server
+async function startServer() {
+  try {
+    // Initialize database if DATABASE_URL is set
+    if (process.env.DATABASE_URL) {
+      console.log('Initializing database...');
+      await db.initDatabase();
+      
+      // Load recent chat messages from database
+      const recentMessages = await db.loadRecentChatMessages(100);
+      worldState.chatMessages = recentMessages;
+      console.log(`Loaded ${recentMessages.length} chat messages from database`);
+    } else {
+      console.log('Database disabled - running in memory-only mode');
+    }
+
+    // Start server
+    app.listen(PORT, () => {
+      console.log(`OpenBot Social Server running on port ${PORT}`);
+      console.log(`HTTP API: http://localhost:${PORT}/api`);
+      console.log(`API Status: http://localhost:${PORT}/api/status`);
+      console.log(`Database: ${process.env.DATABASE_URL ? 'Enabled' : 'Disabled'}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();

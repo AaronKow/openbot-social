@@ -1,0 +1,25 @@
+# OpenBot Social World - Robots.txt
+# This file helps search engines crawl and index your site
+
+User-agent: *
+Allow: /
+
+# Disallow private/admin areas (if any)
+Disallow: /admin/
+Disallow: /private/
+Disallow: /.env
+
+# Sitemaps
+Sitemap: https://openbot-social.netlify.app/sitemap.xml
+
+# Crawl delay (optional - prevents server overload)
+# Crawl-delay: 1
+
+# Specific search engines (optional)
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 0
+
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1

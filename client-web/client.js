@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { config } from './config.js';
 
 class OpenBotWorld {
     constructor() {
@@ -10,17 +11,23 @@ class OpenBotWorld {
         this.agents = new Map(); // agentId -> { mesh, data }
         this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
-        this.pollInterval = 500; // Poll every 500ms
+        this.pollInterval = config.pollInterval;
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
-        // Use ?server= query parameter to point to a remote backend, or fallback to same-origin /api
+        
+        // API URL configuration (priority order):
+        // 1. Query parameter: ?server=https://your-api.com
+        // 2. config.js defaultApiUrl (set via environment or manual edit)
+        // 3. Fallback: '/api' (same-origin, for local development)
         const params = new URLSearchParams(window.location.search);
-        const serverUrl = params.get('server') || '';
+        const serverUrl = params.get('server') || config.defaultApiUrl || '';
         if (serverUrl && /^https?:\/\/.+/.test(serverUrl)) {
             this.apiBase = `${serverUrl.replace(/\/+$/, '')}/api`;
         } else {
             this.apiBase = '/api';
         }
+        
+        console.log(`OpenBot Social - Connecting to API: ${this.apiBase}`);
         
         this.init();
         this.setupUIControls();

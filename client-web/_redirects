@@ -1,0 +1,6 @@
+# Netlify Redirects Configuration for SEO
+
+# Redirect HTTP to HTTPS (Netlify does this automatically)
+# Redirect non-www to www or vice versa (consistent canonical)
+# All requests go to index.html for SPA routing
+/*    /index.html   200

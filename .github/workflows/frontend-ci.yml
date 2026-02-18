@@ -1,0 +1,38 @@
+name: Frontend CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'client-web/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'client-web/**'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Validate HTML
+      working-directory: ./client-web
+      run: |
+        echo "Checking for HTML syntax issues..."
+        if grep -r "TODO\|FIXME\|XXX" *.html *.js; then
+          echo "Warning: Found TODO/FIXME markers"
+        fi
+    
+    - name: Check JavaScript syntax
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+    
+    - name: Validate JS files
+      working-directory: ./client-web
+      run: node -c client.js
+
+  # Note: Netlify handles deployment automatically via GitHub integration
+  # No manual deployment step needed here

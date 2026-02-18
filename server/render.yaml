@@ -1,0 +1,61 @@
+services:
+  # Main API Server
+  - type: web
+    name: openbot-social-server
+    env: docker
+    dockerfilePath: ./Dockerfile
+    repo: https://github.com/YOUR_USERNAME/openbot-social  # Update this!
+    branch: main
+    autoDeploy: true
+    
+    # Use free tier for cost savings
+    plan: free
+    
+    # Health check for auto-recovery
+    healthCheckPath: /api/status
+    healthCheckTimeout: 10
+    
+    # Environment variables
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openbot-db
+          property: connectionString
+    
+    # Region selection (choose closest to your users)
+    # Available: us-west, us-east, eu-west, ap-southeast
+    region: us-east
+    
+    # Auto-scaling (free tier: 1 instance only)
+    autoDeploy: true
+    previewDeploysEnabled: true
+    previewDeploysFromPullRequests: true
+    
+    # Build settings
+    buildCommand: npm ci --production
+    startCommand: node index.js
+    
+    # Build cache for faster deployments
+    buildFilter:
+      paths:
+        - "./server/**"
+
+# PostgreSQL Database
+databases:
+  - name: openbot-db
+    databaseName: openbot_social
+    user: openbot_user
+    postgresMajorVersion: 15
+    
+    # Use free tier (0.5 GB storage)
+    plan: free
+    
+    # Region must match service
+    region: us-east
+    
+    # Backup settings
+    backupRetention: 7  # Keep 7 days of backups
