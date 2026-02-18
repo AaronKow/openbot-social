@@ -210,11 +210,13 @@ class AIAgent:
         model: Optional[str] = None,
         system_prompt_extra: str = "",
         user_prompt: str = "",
+        debug: bool = False,
     ):
         self.server_url = server_url or os.getenv("OPENBOT_URL", "http://localhost:3001")
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-5-nano")
         self.user_prompt = user_prompt or os.getenv("USER_PROMPT", "")
         self.system_prompt_extra = system_prompt_extra
+        self.debug = debug
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -414,9 +416,40 @@ class AIAgent:
             print(f"[LLM] API error: {e}")
             return [{"type": "wait"}]
 
+        if self.debug:
+            print("\n[DEBUG] === SYSTEM PROMPT ===")
+            system_prompt = self._build_system_prompt()
+            print(f"{system_prompt}\n")
+            print("[DEBUG] === CONVERSATION HISTORY ===")
+            for i, msg in enumerate(self._llm_history):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                print(f"  [{i}] {role}: {content}")
+            print(f"\n[DEBUG] === API CALL ===")
+            print(f"Model: {self.model}")
+            print(f"History size: {len(self._llm_history)} messages")
+            print("\n[DEBUG] === TOOLS SENT ===")
+            print(json.dumps(TOOLS, indent=2))
+            print("\n[DEBUG] === API RESPONSE ===")
+            output_items = [f'{item.type}:{getattr(item, "name", "")}' for item in response.output]
+            print(f"Response items: {output_items}")
+            for item in response.output:
+                if item.type == "reasoning":
+                    reasoning_text = getattr(item, "text", "")
+                    if len(reasoning_text) > 300:
+                        reasoning_text = reasoning_text[:300] + "..."
+                    print(f"  reasoning: {reasoning_text}")
+                elif item.type == "function_call":
+                    print(f"  function_call: {item.name}")
+                    print(f"    arguments: {item.arguments}")
+                else:
+                    print(f"  {item.type}: {getattr(item, 'content', '')}")
+            print("[DEBUG] ================================================\n")
+
         actions = []
 
-        # Responses API returns output as a list of items
         for item in response.output:
             if item.type == "function_call" and item.name == "perform_actions":
                 try:
@@ -427,7 +460,11 @@ class AIAgent:
 
         if not actions:
             actions = [{"type": "wait"}]
-
+        
+        if self.debug:
+            print(f"\n[DEBUG] === PARSED ACTIONS ===")
+            print(json.dumps(actions, indent=2))
+            print("[DEBUG] ================================================\n")
         # Record assistant turn as a concise summary for history context
         summary = "; ".join(_action_summary(a) for a in actions)
         self._llm_history.append({"role": "assistant", "content": summary})
@@ -618,6 +655,7 @@ examples:
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_create.add_argument("--user-prompt", default="", help="Extra instruction for the agent")
+    p_create.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_create.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
 
@@ -629,6 +667,7 @@ examples:
     p_resume.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_resume.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_resume.add_argument("--user-prompt", default="", help="Extra instruction for the agent")
+    p_resume.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_resume.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
 
@@ -643,6 +682,7 @@ examples:
         openai_api_key=getattr(args, "openai_key", None),
         model=getattr(args, "model", None),
         user_prompt=args.user_prompt,
+        debug=getattr(args, "debug", False),
     )
 
     ok = False
