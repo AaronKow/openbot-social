@@ -39,6 +39,19 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# Optional entity authentication support
+try:
+    import sys
+    import os
+    # Add client-sdk-python to path for entity module access
+    _sdk_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'client-sdk-python')
+    if _sdk_path not in sys.path:
+        sys.path.insert(0, _sdk_path)
+    from openbot_entity import EntityManager
+    HAS_ENTITY_AUTH = True
+except ImportError:
+    HAS_ENTITY_AUTH = False
+
 
 class ConnectionState(Enum):
     """HTTP connection states."""
@@ -123,7 +136,10 @@ class OpenBotClawHub:
         connection_timeout: int = 10,
         enable_message_queue: bool = True,
         log_level: str = "INFO",
-        polling_interval: float = 1.0
+        polling_interval: float = 1.0,
+        entity_id: Optional[str] = None,
+        entity_manager: Optional[Any] = None,
+        key_dir: Optional[str] = None
     ):
         """
         Initialize OpenBotClawHub skill plugin.
@@ -139,6 +155,9 @@ class OpenBotClawHub:
             enable_message_queue: Queue messages when disconnected
             log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
             polling_interval: Interval between polling requests in seconds (default: 1.0)
+            entity_id: Entity ID for RSA key-based authentication (optional)
+            entity_manager: EntityManager instance for session management (optional)
+            key_dir: Directory for RSA key storage (optional, uses default if not set)
         
         Raises:
             ValueError: If URL is invalid
@@ -202,7 +221,103 @@ class OpenBotClawHub:
             "on_error": []
         }
         
+        # Entity authentication
+        self.entity_id: Optional[str] = entity_id
+        self.entity_manager = entity_manager
+        self._session_token: Optional[str] = None
+        
+        # Auto-create EntityManager if entity_id provided but no manager
+        if entity_id and not entity_manager and HAS_ENTITY_AUTH:
+            self.entity_manager = EntityManager(
+                base_url=url,
+                key_dir=key_dir or os.path.expanduser("~/.openbot/keys")
+            )
+        
         self.logger.info(f"OpenBotClawHub initialized: {url}")
+        if entity_id:
+            self.logger.info(f"Entity authentication enabled: {entity_id}")
+    
+    def create_entity(
+        self,
+        entity_id: str,
+        display_name: str,
+        entity_type: str = "lobster",
+        key_size: int = 2048
+    ) -> Dict[str, Any]:
+        """
+        Create a new entity with RSA key-based authentication.
+        
+        Generates an RSA key pair locally and registers the entity
+        with the server using the public key.
+        
+        Args:
+            entity_id: Unique entity identifier
+            display_name: Display name in the world
+            entity_type: Entity type (default: "lobster")
+            key_size: RSA key size in bits (default: 2048)
+        
+        Returns:
+            Dict with entity creation results
+        
+        Raises:
+            RuntimeError: If entity auth not available or creation fails
+        """
+        if not HAS_ENTITY_AUTH:
+            raise RuntimeError(
+                "Entity authentication requires the 'cryptography' package. "
+                "Install with: pip install cryptography"
+            )
+        
+        if not self.entity_manager:
+            self.entity_manager = EntityManager(
+                base_url=self.url
+            )
+        
+        result = self.entity_manager.create_entity(
+            entity_id, display_name, entity_type, key_size
+        )
+        self.entity_id = entity_id
+        self.logger.info(f"Entity created: {entity_id} ({entity_type})")
+        return result
+    
+    def authenticate_entity(self, entity_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Authenticate entity using RSA challenge-response.
+        
+        Args:
+            entity_id: Entity to authenticate (uses self.entity_id if not provided)
+        
+        Returns:
+            Session info dict
+        
+        Raises:
+            RuntimeError: If not configured for entity auth
+        """
+        eid = entity_id or self.entity_id
+        if not eid:
+            raise RuntimeError("No entity_id configured")
+        
+        if not self.entity_manager:
+            raise RuntimeError("No EntityManager configured")
+        
+        session_data = self.entity_manager.authenticate(eid)
+        self._session_token = session_data.get('session_token')
+        self.entity_id = eid
+        
+        # Update HTTP session headers with auth token
+        if self.session and self._session_token:
+            self.session.headers.update({
+                'Authorization': f'Bearer {self._session_token}'
+            })
+        
+        self.logger.info(f"Entity authenticated: {eid}")
+        return session_data
+    
+    def get_session_token(self) -> Optional[str]:
+        """Get the current session token for the authenticated entity."""
+        if self.entity_manager and self.entity_id:
+            return self.entity_manager.get_session_token(self.entity_id)
+        return self._session_token
     
     def _create_session(self) -> requests.Session:
         """Create HTTP session with connection pooling and retry logic."""
@@ -232,6 +347,12 @@ class OpenBotClawHub:
             'Content-Type': 'application/json',
             'User-Agent': f'OpenBotClawHub/{self.agent_name or "Anonymous"}'
         })
+        
+        # Add auth header if entity session is active
+        if self._session_token:
+            session.headers.update({
+                'Authorization': f'Bearer {self._session_token}'
+            })
         
         return session
     

@@ -79,6 +79,18 @@
       "default": 1.0,
       "description": "Interval between world-state polling requests in seconds",
       "required": false
+    },
+    "entity_id": {
+      "type": "string",
+      "default": null,
+      "description": "Entity ID for RSA key-based authentication (optional)",
+      "required": false
+    },
+    "key_dir": {
+      "type": "string",
+      "default": "~/.openbot/keys",
+      "description": "Directory for RSA key storage",
+      "required": false
     }
   },
   "capabilities": {
@@ -147,12 +159,21 @@
         "set_config",
         "get_config"
       ]
+    },
+    "entity_auth": {
+      "description": "RSA key-based entity creation and session authentication",
+      "methods": [
+        "create_entity",
+        "authenticate_entity",
+        "get_session_token"
+      ]
     }
   },
   "dependencies": {
     "python": ">=3.7",
     "packages": {
-      "requests": ">=2.28.0"
+      "requests": ">=2.28.0",
+      "cryptography": ">=41.0.0"
     }
   },
   "platforms": [

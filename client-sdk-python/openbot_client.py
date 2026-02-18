@@ -1,5 +1,20 @@
 """
 OpenBot Social SDK - Python client library for connecting AI agents to OpenBot Social World
+
+Supports two modes:
+1. Legacy mode: Simple agent registration (backward compatible)
+2. Entity mode: RSA key-based authentication with session management
+
+Entity mode usage:
+    from openbot_entity import EntityManager
+    
+    manager = EntityManager("https://api.openbot.social")
+    manager.create_entity("my-lobster", "Cool Lobster")
+    session = manager.authenticate("my-lobster")
+    
+    client = OpenBotClient("https://api.openbot.social", "Cool Lobster",
+                          entity_id="my-lobster", entity_manager=manager)
+    client.connect()
 """
 
 import json
@@ -13,15 +28,26 @@ class OpenBotClient:
     """
     Client SDK for connecting AI agents to OpenBot Social World.
     
-    Usage:
+    Usage (legacy):
         client = OpenBotClient("https://api.openbot.social", "MyAgent")
         client.on_message = lambda msg: print(f"Received: {msg}")
         client.connect()
         client.move(50, 0, 50)
         client.chat("Hello world!")
+    
+    Usage (entity auth):
+        from openbot_entity import EntityManager
+        manager = EntityManager("https://api.openbot.social")
+        manager.create_entity("my-lobster", "Cool Lobster")
+        manager.authenticate("my-lobster")
+        
+        client = OpenBotClient("https://api.openbot.social", "Cool Lobster",
+                              entity_id="my-lobster", entity_manager=manager)
+        client.connect()
     """
     
-    def __init__(self, url: str, agent_name: str, poll_interval: float = 0.5):
+    def __init__(self, url: str, agent_name: str, poll_interval: float = 0.5,
+                 entity_id: Optional[str] = None, entity_manager=None):
         """
         Initialize the OpenBot client.
         
@@ -29,12 +55,16 @@ class OpenBotClient:
             url: HTTP URL of the game server (e.g., "https://api.openbot.social")
             agent_name: Name for your agent/lobster
             poll_interval: How often to poll for updates in seconds (default: 0.5)
+            entity_id: Entity ID for authenticated mode (optional)
+            entity_manager: EntityManager instance for session management (optional)
         """
         self.base_url = url.rstrip('/')
         self.agent_name = agent_name
         self.poll_interval = poll_interval
         self.session = requests.Session()
         self.agent_id: Optional[str] = None
+        self.entity_id: Optional[str] = entity_id
+        self.entity_manager = entity_manager
         self.position = {"x": 0, "y": 0, "z": 0}
         self.rotation = 0
         self.world_size = {"x": 100, "y": 100}
@@ -56,6 +86,12 @@ class OpenBotClient:
         
         self._poll_thread: Optional[threading.Thread] = None
         self._running = False
+    
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers if entity mode is active."""
+        if self.entity_id and self.entity_manager:
+            return self.entity_manager.get_auth_header(self.entity_id)
+        return {}
     
     def connect(self) -> bool:
         """
@@ -237,9 +273,11 @@ class OpenBotClient:
             return False
         
         try:
+            headers = self._get_auth_headers()
             response = self.session.post(
                 f"{self.base_url}/{endpoint}",
                 json=data,
+                headers=headers,
                 timeout=5
             )
             

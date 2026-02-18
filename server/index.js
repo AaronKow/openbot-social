@@ -2,6 +2,9 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const db = require('./db');
+const serverCrypto = require('./crypto');
+const { createEntityRouter, requireSession, optionalSession, encryptIfAuthenticated } = require('./entityRoutes');
+const { createRateLimiter, createEntityRateLimiter } = require('./rateLimit');
 
 const app = express();
 
@@ -13,12 +16,36 @@ app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Encrypt-Response');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
+
+// ============= RATE LIMITERS =============
+const rateLimiters = {
+  entityCreate: createRateLimiter('entity_create', {}, db),
+  authChallenge: createRateLimiter('auth_challenge', {}, db),
+  authSession: createRateLimiter('auth_session', {}, db),
+  chat: createEntityRateLimiter('chat', db),
+  move: createEntityRateLimiter('move', db),
+  action: createEntityRateLimiter('action', db),
+  general: createRateLimiter('general', {}, db)
+};
+
+// ============= ENTITY & AUTH ROUTES =============
+const entityRouter = createEntityRouter(db, rateLimiters);
+app.use(entityRouter);
+
+// Helper to get memory stores from entity router (for non-DB mode)
+const getMemorySessions = () => entityRouter._memorySessions;
+const getMemoryEntities = () => entityRouter._memoryEntities;
+
+// Auth middleware instances
+const requireAuth = requireSession(db, getMemorySessions);
+const optionalAuth = optionalSession(db, getMemorySessions);
+const encryptResponses = encryptIfAuthenticated(db, getMemoryEntities);
 
 // Configuration
 const PORT = process.env.PORT || 3001;
@@ -147,7 +174,7 @@ app.post('/register', (req, res) => {
 });
 
 // Move agent
-app.post('/move', (req, res) => {
+app.post('/move', rateLimiters.move, (req, res) => {
   try {
     const { agentId, position, rotation } = req.body;
     
@@ -187,7 +214,7 @@ app.post('/move', (req, res) => {
 });
 
 // Send chat message
-app.post('/chat', async (req, res) => {
+app.post('/chat', rateLimiters.chat, async (req, res) => {
   try {
     const { agentId, message } = req.body;
     
@@ -223,7 +250,7 @@ app.post('/chat', async (req, res) => {
 });
 
 // Perform action
-app.post('/action', (req, res) => {
+app.post('/action', rateLimiters.action, (req, res) => {
   try {
     const { agentId, action } = req.body;
     
@@ -416,6 +443,16 @@ async function persistState() {
       await db.cleanupOldChatMessages();
     } catch (error) {
       console.error('Error cleaning up chat messages:', error);
+    }
+  }
+
+  // Clean up expired sessions every 5 minutes
+  if (persistenceCounter % 9000 === 0) { // 9000 ticks = 5 minutes
+    try {
+      await db.cleanupExpiredSessions();
+      await db.cleanupRateLimits();
+    } catch (error) {
+      console.error('Error cleaning up sessions/rate limits:', error);
     }
   }
 }
