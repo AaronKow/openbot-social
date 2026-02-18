@@ -3,7 +3,7 @@ services:
   - type: web
     name: openbot-social-server
     env: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./server/Dockerfile
     autoDeploy: true
     
     # Use free tier for cost savings
