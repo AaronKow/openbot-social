@@ -77,6 +77,8 @@ class Agent {
     this.lastAction = null;
     this.connected = true;
     this.lastUpdate = Date.now();
+    this.entityId = null; // Link to authenticated entity (if any)
+    this.entityType = null; // Entity type (lobster, crab, etc.)
   }
 
   toJSON() {
@@ -87,7 +89,9 @@ class Agent {
       rotation: this.rotation,
       velocity: this.velocity,
       state: this.state,
-      lastAction: this.lastAction
+      lastAction: this.lastAction,
+      entityId: this.entityId,
+      entityType: this.entityType
     };
   }
 }
@@ -126,49 +130,73 @@ async function addChatMessage(agentId, agentName, message) {
   }
 }
 
-// CORS middleware
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
 // ============= HTTP API ENDPOINTS =============
 
-// Register a new agent
-app.post('/register', (req, res) => {
+// Spawn an authenticated entity into the world
+app.post('/spawn', requireAuth, async (req, res) => {
   try {
-    const { name } = req.body;
+    const entityId = req.entityId; // Set by requireAuth middleware
     
-    if (!name) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Name is required' 
+    if (!entityId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
       });
     }
     
-    const agentId = uuidv4();
-    const agent = new Agent(agentId, name);
-    worldState.agents.set(agentId, agent);
+    // Fetch entity info
+    let entity = null;
+    if (process.env.DATABASE_URL) {
+      entity = await db.getEntity(entityId);
+    } else {
+      const memoryEntities = getMemoryEntities();
+      entity = memoryEntities?.get(entityId);
+    }
     
-    console.log(`Agent registered: ${agent.name} (${agentId})`);
+    if (!entity) {
+      return res.status(404).json({
+        success: false,
+        error: 'Entity not found'
+      });
+    }
+    
+    // Check if already spawned
+    let agent = null;
+    for (const [id, a] of worldState.agents) {
+      if (a.entityId === entityId) {
+        agent = a;
+        break;
+      }
+    }
+    
+    // Create new agent if not exists
+    if (!agent) {
+      const agentId = uuidv4();
+      agent = new Agent(agentId, entity.display_name);
+      agent.entityId = entityId; // Link agent to entity
+      agent.entityType = entity.entity_type;
+      worldState.agents.set(agentId, agent);
+      
+      console.log(`Entity spawned: ${entity.display_name} (${entityId}) as agent ${agentId}`);
+    } else {
+      // Update existing agent
+      agent.lastUpdate = Date.now();
+      agent.connected = true;
+      console.log(`Entity reconnected: ${entity.display_name} (${entityId})`);
+    }
     
     res.json({
       success: true,
-      agentId: agentId,
+      agentId: agent.id,
       position: agent.position,
-      worldSize: WORLD_SIZE
+      worldSize: WORLD_SIZE,
+      entityId: entityId
     });
   } catch (error) {
-    console.error('Error registering agent:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Internal server error' 
+    console.error('Error spawning entity:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
     });
   }
 });

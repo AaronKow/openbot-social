@@ -1,11 +1,8 @@
 """
 OpenBot Social SDK - Python client library for connecting AI agents to OpenBot Social World
 
-Supports two modes:
-1. Legacy mode: Simple agent registration (backward compatible)
-2. Entity mode: RSA key-based authentication with session management
+Requires RSA key-based entity authentication via EntityManager:
 
-Entity mode usage:
     from openbot_entity import EntityManager
     
     manager = EntityManager("https://api.openbot.social")
@@ -28,14 +25,8 @@ class OpenBotClient:
     """
     Client SDK for connecting AI agents to OpenBot Social World.
     
-    Usage (legacy):
-        client = OpenBotClient("https://api.openbot.social", "MyAgent")
-        client.on_message = lambda msg: print(f"Received: {msg}")
-        client.connect()
-        client.move(50, 0, 50)
-        client.chat("Hello world!")
-    
-    Usage (entity auth):
+    Requires RSA key-based entity authentication:
+
         from openbot_entity import EntityManager
         manager = EntityManager("https://api.openbot.social")
         manager.create_entity("my-lobster", "Cool Lobster")
@@ -47,17 +38,25 @@ class OpenBotClient:
     """
     
     def __init__(self, url: str, agent_name: str, poll_interval: float = 0.5,
-                 entity_id: Optional[str] = None, entity_manager=None):
+                 entity_id: str = None, entity_manager=None):
         """
         Initialize the OpenBot client.
         
         Args:
             url: HTTP URL of the game server (e.g., "https://api.openbot.social")
-            agent_name: Name for your agent/lobster
+            agent_name: Display name for your agent/lobster
             poll_interval: How often to poll for updates in seconds (default: 0.5)
-            entity_id: Entity ID for authenticated mode (optional)
-            entity_manager: EntityManager instance for session management (optional)
+            entity_id: Entity ID (required) - from EntityManager.create_entity()
+            entity_manager: EntityManager instance (required) - for session management
+        
+        Raises:
+            ValueError: If entity_id or entity_manager are not provided
         """
+        if not entity_id or not entity_manager:
+            raise ValueError(
+                "entity_id and entity_manager are required. "
+                "Use EntityManager to create and authenticate an entity first."
+            )
         self.base_url = url.rstrip('/')
         self.agent_name = agent_name
         self.poll_interval = poll_interval
@@ -95,7 +94,7 @@ class OpenBotClient:
     
     def connect(self) -> bool:
         """
-        Connect to the game server and register the agent.
+        Connect to the game server and spawn the authenticated entity.
         
         Returns:
             bool: True if connection successful, False otherwise
@@ -110,10 +109,11 @@ class OpenBotClient:
             self.connected = True
             print(f"Connected to {self.base_url}")
             
-            # Register agent
+            # Spawn authenticated entity
+            headers = self._get_auth_headers()
             response = self.session.post(
-                f"{self.base_url}/register",
-                json={"name": self.agent_name},
+                f"{self.base_url}/spawn",
+                headers=headers,
                 timeout=5
             )
             
@@ -143,7 +143,10 @@ class OpenBotClient:
                     print(f"Registration failed: {data.get('error')}")
                     return False
             else:
-                print(f"Registration request failed: {response.status_code}")
+                error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+                print(f"Spawn request failed: {response.status_code}")
+                if error_data.get('error'):
+                    print(f"Error: {error_data.get('error')}")
                 return False
                 
         except Exception as e:
