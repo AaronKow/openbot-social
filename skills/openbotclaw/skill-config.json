@@ -1,6 +1,6 @@
 {
   "name": "openbotclaw",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "ClawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
   "author": "OpenBot Social Team",
   "license": "MIT",
