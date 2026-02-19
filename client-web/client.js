@@ -36,6 +36,15 @@ class OpenBotWorld {
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         
+        // Mouse drag tracking
+        this.isMouseDown = false;
+        this.mouseDragStartX = 0;
+        this.mouseDragStartY = 0;
+        this.mouseDragThreshold = 5; // pixels
+        
+        // Chat scroll tracking
+        this.chatIsAtBottom = true;
+        
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
         // 2. config.js defaultApiUrl (set via environment or manual edit)
@@ -339,6 +348,16 @@ class OpenBotWorld {
         document.getElementById('sidebar-controls-btn').addEventListener('click', () => {
             controlsPanel.style.display = controlsPanel.style.display === 'none' ? 'block' : 'none';
         });
+        
+        // Chat scroll tracking for auto-scroll detection
+        const chatDiv = document.getElementById('chat-messages');
+        if (chatDiv) {
+            chatDiv.addEventListener('scroll', () => {
+                // Check if scrolled to bottom (with 10px tolerance)
+                const isAtBottom = Math.abs(chatDiv.scrollHeight - chatDiv.scrollTop - chatDiv.clientHeight) < 10;
+                this.chatIsAtBottom = isAtBottom;
+            });
+        }
     }
     
     setupKeyboardControls() {
@@ -368,6 +387,21 @@ class OpenBotWorld {
     }
     
     setupMouseControls() {
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        
+        document.addEventListener('mousedown', (event) => {
+            this.isMouseDown = true;
+            this.mouseDragStartX = event.clientX;
+            this.mouseDragStartY = event.clientY;
+            lastMouseX = event.clientX;
+            lastMouseY = event.clientY;
+        });
+        
+        document.addEventListener('mouseup', (event) => {
+            this.isMouseDown = false;
+        });
+        
         document.addEventListener('mousemove', (event) => {
             if (!this.renderer.domElement) return;
             
@@ -390,10 +424,15 @@ class OpenBotWorld {
                 document.body.style.cursor = 'auto';
             }
             
-            // Cancel follow on mouse movement
-            if (this.followedAgentId) {
-                this.followedAgentId = null;
-                this.controls.enabled = true;
+            // Cancel follow only on mouse drag (not just movement)
+            if (this.isMouseDown && this.followedAgentId) {
+                const dragDistX = Math.abs(event.clientX - this.mouseDragStartX);
+                const dragDistY = Math.abs(event.clientY - this.mouseDragStartY);
+                
+                if (dragDistX > this.mouseDragThreshold || dragDistY > this.mouseDragThreshold) {
+                    this.followedAgentId = null;
+                    this.controls.enabled = true;
+                }
             }
         });
         
@@ -425,9 +464,9 @@ class OpenBotWorld {
     
     updateKeyboardMovement() {
         if (!this.followedAgentId) {
-            // Zoom in/out with W/Up and S/Down
-            const zoomIn = this.keysPressed.w || this.keysPressed.arrowUp ? 1 : 0;
-            const zoomOut = this.keysPressed.s || this.keysPressed.arrowDown ? 1 : 0;
+            // Zoom in/out with W and S
+            const zoomIn = this.keysPressed.w ? 1 : 0;
+            const zoomOut = this.keysPressed.s ? 1 : 0;
             
             if (zoomIn !== 0 || zoomOut !== 0) {
                 // Get direction from camera to target
@@ -438,6 +477,37 @@ class OpenBotWorld {
                 // Zoom by moving camera towards or away from target
                 const zoomAmount = (zoomIn - zoomOut) * this.keyboardSpeed * 2;
                 this.camera.position.addScaledVector(direction, zoomAmount);
+            }
+            
+            // Arrow up/down for zoom
+            const zoomInArrow = this.keysPressed.arrowUp ? 1 : 0;
+            const zoomOutArrow = this.keysPressed.arrowDown ? 1 : 0;
+            
+            if (zoomInArrow !== 0 || zoomOutArrow !== 0) {
+                const direction = new THREE.Vector3();
+                direction.subVectors(this.controls.target, this.camera.position);
+                direction.normalize();
+                const zoomAmount = (zoomInArrow - zoomOutArrow) * this.keyboardSpeed * 2;
+                this.camera.position.addScaledVector(direction, zoomAmount);
+            }
+            
+            // Left/Right movement with arrow keys and A/D
+            const moveRight = (this.keysPressed.arrowRight || this.keysPressed.d) ? 1 : 0;
+            const moveLeft = (this.keysPressed.arrowLeft || this.keysPressed.a) ? -1 : 0;
+            const moveAmount = moveRight + moveLeft;
+            
+            if (moveAmount !== 0) {
+                // Get camera's right vector
+                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+                right.y = 0; // Keep movement on horizontal plane
+                right.normalize();
+                
+                // Move camera and controls target
+                const movement = new THREE.Vector3();
+                movement.addScaledVector(right, moveAmount * this.keyboardSpeed);
+                
+                this.camera.position.add(movement);
+                this.controls.target.add(movement);
             }
         } else {
             // When following, if user presses any keyboard keys, cancel the follow
@@ -716,8 +786,10 @@ class OpenBotWorld {
             chatDiv.removeChild(chatDiv.firstChild);
         }
         
-        // Scroll to bottom
-        chatDiv.scrollTop = chatDiv.scrollHeight;
+        // Auto-scroll to bottom only if chat is at bottom
+        if (this.chatIsAtBottom) {
+            chatDiv.scrollTop = chatDiv.scrollHeight;
+        }
         
         // Show chat bubble above lobster
         this.showChatBubble(message.agentId, message.message);
@@ -729,37 +801,32 @@ class OpenBotWorld {
         
         // Remove old bubble if exists
         if (this.chatBubbles.has(agentId)) {
-            const oldBubble = this.chatBubbles.get(agentId).bubble;
-            agent.mesh.remove(oldBubble);
+            const oldBubble = this.chatBubbles.get(agentId).element;
+            if (oldBubble && oldBubble.parentNode) {
+                oldBubble.parentNode.removeChild(oldBubble);
+            }
         }
         
-        // Create canvas texture for chat bubble
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        canvas.width = 512;
-        canvas.height = 256;
+        // Create HTML bubble element
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble-3d';
         
-        // Chat bubble background
-        context.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        context.beginPath();
-        context.roundRect(20, 20, 472, 180, 15);
-        context.fill();
+        // Calculate text lines
+        const tempSpan = document.createElement('span');
+        tempSpan.style.font = 'Bold 16px Arial';
+        tempSpan.style.visibility = 'hidden';
+        tempSpan.style.position = 'absolute';
+        document.body.appendChild(tempSpan);
         
-        // Text
-        context.font = 'Bold 28px Arial';
-        context.fillStyle = '#ffff00';
-        context.textAlign = 'center';
-        
-        // Wrap text
-        const maxWidth = 450;
+        const maxWidth = 180; // pixels
         const words = text.split(' ');
         let lines = [];
         let currentLine = '';
         
         words.forEach(word => {
             const testLine = currentLine + (currentLine ? ' ' : '') + word;
-            const metrics = context.measureText(testLine);
-            if (metrics.width > maxWidth && currentLine) {
+            tempSpan.textContent = testLine;
+            if (tempSpan.offsetWidth > maxWidth && currentLine) {
                 lines.push(currentLine);
                 currentLine = word;
             } else {
@@ -768,20 +835,42 @@ class OpenBotWorld {
         });
         if (currentLine) lines.push(currentLine);
         
-        const lineHeight = 40;
-        const startY = 60;
-        lines.forEach((line, index) => {
-            context.fillText(line, 256, startY + index * lineHeight);
+        document.body.removeChild(tempSpan);
+        
+        // Calculate bubble height based on content
+        const lineHeight = 16; // pixels
+        const paddingY = 12; // top + bottom padding
+        const contentHeight = lines.length * lineHeight + paddingY;
+        const maxHeight = 500; // max height before scrolling
+        const bubbleHeight = Math.min(contentHeight, maxHeight);
+        
+        // Create content
+        const content = document.createElement('div');
+        content.className = 'chat-bubble-content';
+        content.style.maxHeight = bubbleHeight + 'px';
+        content.style.overflowY = contentHeight > maxHeight ? 'auto' : 'visible';
+        
+        // Add text lines
+        lines.forEach(line => {
+            const lineDiv = document.createElement('div');
+            lineDiv.className = 'chat-bubble-line';
+            lineDiv.textContent = line;
+            content.appendChild(lineDiv);
         });
         
-        const texture = new THREE.CanvasTexture(canvas);
-        const material = new THREE.SpriteMaterial({ map: texture });
-        const bubble = new THREE.Sprite(material);
-        bubble.position.set(0, 3.5, 0);
-        bubble.scale.set(6, 3, 1);
-        agent.mesh.add(bubble);
+        bubble.appendChild(content);
+        bubble.style.width = '200px';
+        bubble.style.height = bubbleHeight + 'px';
         
-        this.chatBubbles.set(agentId, { bubble, createdAt: Date.now() });
+        // Add to container
+        const container = document.getElementById('canvas-container') || document.body;
+        container.appendChild(bubble);
+        
+        this.chatBubbles.set(agentId, { 
+            element: bubble, 
+            createdAt: Date.now(),
+            agentId: agentId
+        });
     }
     
     updateChatBubbles() {
@@ -789,10 +878,32 @@ class OpenBotWorld {
         const bubbleTimeout = 5000; // 5 seconds
         
         for (const [agentId, data] of this.chatBubbles.entries()) {
+            // Update position of bubble to follow agent
+            const agent = this.agents.get(agentId);
+            if (agent && data.element) {
+                // Get 2D screen position of agent
+                const vector = new THREE.Vector3();
+                vector.copy(agent.mesh.position);
+                vector.y += 5; // Offset above lobster (increased for higher positioning)
+                vector.project(this.camera);
+                
+                const widthHalf = window.innerWidth / 2;
+                const heightHalf = window.innerHeight / 2;
+                const x = (vector.x * widthHalf) + widthHalf;
+                const y = -(vector.y * heightHalf) + heightHalf;
+                
+                // Position the bubble
+                data.element.style.position = 'absolute';
+                data.element.style.left = (x - 100) + 'px'; // Center it (200/2 = 100)
+                data.element.style.top = (y - 100) + 'px'; // Position well above the lobster with more offset
+                data.element.style.pointerEvents = 'none'; // Don't interfere with clicks
+                data.element.style.zIndex = '100';
+            }
+            
+            // Remove old bubbles
             if (now - data.createdAt > bubbleTimeout) {
-                const agent = this.agents.get(agentId);
-                if (agent) {
-                    agent.mesh.remove(data.bubble);
+                if (data.element && data.element.parentNode) {
+                    data.element.parentNode.removeChild(data.element);
                 }
                 this.chatBubbles.delete(agentId);
             }
@@ -887,6 +998,9 @@ class OpenBotWorld {
                 this.controls.enabled = true;
             }
         }
+
+        // Update chat bubble positions
+        this.updateChatBubbles();
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);

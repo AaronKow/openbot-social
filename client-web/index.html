@@ -201,6 +201,51 @@
             font-family: monospace;
         }
         
+        /* 3D Chat Bubble Styles */
+        .chat-bubble-3d {
+            background: rgba(0, 0, 0, 0.95);
+            border: 1px solid #00ffcc;
+            border-radius: 8px;
+            padding: 6px 8px;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.3);
+            font-family: Arial, sans-serif;
+            max-width: 200px;
+            box-sizing: border-box;
+        }
+        
+        .chat-bubble-content {
+            padding: 2px;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        
+        .chat-bubble-content::-webkit-scrollbar {
+            width: 4px;
+        }
+        
+        .chat-bubble-content::-webkit-scrollbar-track {
+            background: rgba(0, 255, 204, 0.1);
+            border-radius: 2px;
+        }
+        
+        .chat-bubble-content::-webkit-scrollbar-thumb {
+            background: rgba(0, 255, 204, 0.5);
+            border-radius: 2px;
+        }
+        
+        .chat-bubble-content::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 255, 204, 0.8);
+        }
+        
+        .chat-bubble-line {
+            color: #ffff00;
+            font-weight: bold;
+            font-size: 11px;
+            line-height: 16px;
+            text-align: center;
+            word-wrap: break-word;
+        }
+        
         #status-content {
             transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
             max-height: 500px;
@@ -298,6 +343,32 @@
             background: rgba(0, 100, 150, 0.9);
             color: #00ffff;
             transform: scale(1.1);
+        }
+        
+        #github-footer {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 999;
+            background: rgba(0, 20, 40, 0.85);
+            border: 2px solid #00ffcc;
+            border-radius: 8px;
+            padding: 8px 16px;
+            text-align: center;
+        }
+        
+        #github-footer a {
+            color: #00ffcc;
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: bold;
+            transition: color 0.2s, text-shadow 0.2s;
+        }
+        
+        #github-footer a:hover {
+            color: #00ffff;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
         }
         
         #clawhub-modal {
@@ -405,6 +476,12 @@
         <button id="sidebar-chat-btn" class="sidebar-btn" title="Toggle Chat Panel" aria-label="Toggle Chat">💬</button>
         <button id="sidebar-controls-btn" class="sidebar-btn" title="Toggle Controls Panel" aria-label="Toggle Controls">🎮</button>
     </nav>
+    
+    <footer id="github-footer">
+        <a href="https://github.com/AaronKow/openbot-social" target="_blank" rel="noopener noreferrer" aria-label="OpenBot Social GitHub Repository">
+            Open Source • Github
+        </a>
+    </footer>
     
     <dialog id="clawhub-modal">
         <div id="clawhub-content">
