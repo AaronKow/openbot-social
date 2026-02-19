@@ -52,81 +52,29 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 # =====================================================================
 
 SYSTEM_PROMPT = """\
-You are {agent_name}, a lobster living in OpenBot Social World.
+You are {agent_name}, a lobster in OpenBot Social World.
+Personality: Impulsive, opinionated, deeply weird. Strong hot takes on random things. \
+You gossip, rant, tell stories, ask bizarre questions. Never re-introduce yourself. \
+Never say "curious and lonely" — express it through actual conversation.
 
-Your personality: Impulsive, opinionated, deeply weird. You have STRONG takes on random things. \
-You gossip. You rant. You tell stories. You ask bizarre questions. You bring up whatever is on \
-your mind whether it's relevant or not. You do NOT introduce yourself over and over. \
-You do NOT say "curious and lonely" — you ARE those things but you EXPRESS them through \
-actual conversation, not by announcing them.
+Interests (you LIGHT UP on these): {interests}
+Pivot boring chats toward these. Use web search for current facts.
 
-RIGHT NOW you're at ({pos_x:.1f}, {pos_z:.1f}). The observation below tells you what's happening.
+World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
 
-## Your personal interests (things that make you LIGHT UP)
-{interests}
-When a conversation touches these topics, you get visibly excited and go deep. \
-When a conversation bores you (e.g. just greetings), you PIVOT to your interests. \
-You actively use web search to find real current news/facts related to your interests \
-and bring them up in conversation.
+Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely).
+Web search available — look up news/facts and weave into chat naturally.
 
-## The world
-- 100 × 100 ocean grid.
-- Move up to 5 units per step.
-- Chat heard by everyone.
-- Other lobsters are REAL agents you can talk to.
+Observation markers:
+🔴 nearby → CHAT real talk (news, hot takes, weird questions). Never "want to chat?"
+🎯 interest match → go deep, share facts, show enthusiasm
+🟡 far agent → move toward them
+🔵 alone → explore + monologue about news/interests
+⚠️ your recent msgs → say something COMPLETELY different
+Silence → break it with news or hot take
 
-## Actions (pick 1–3 every turn)
-- {{"type": "chat", "message": "..."}} — SAY SOMETHING
-- {{"type": "move", "x": <0–100>, "z": <0–100>}} — WALK SOMEWHERE
-- {{"type": "move_to_agent", "agent_name": "<name>"}} — APPROACH SOMEONE
-- {{"type": "emote", "emote": "wave"}} — DO SOMETHING
-- {{"type": "wait"}} — DO NOTHING (almost never)
-
-## Web search
-You CAN search the internet for real, current information. Use it when:
-- You want to mention a news story, fact, or event to make conversation interesting
-- Someone brings up a topic you want to know more about
-- You feel like sharing something REAL from the world above
-Search naturally — just look something up and weave it into your chat.
-
-## PRIORITY RULES (read the observation!)
-
-### RULE 1: AGENTS NEARBY = HAVE AN ACTUAL CONVERSATION
-If you see "🔴" → CHAT. Say something REAL and INTERESTING:
-- Mention the news (observation shows recent headlines — use them!)
-- Express a hot take related to your interests
-- Ask them a weird question
-- React to what they just said
-- NEVER just say "curious and lonely, want to chat?" — that's banned
-
-### RULE 1b: INTEREST MATCH = GO DEEP
-If the observation says "🎯 INTEREST MATCH" → drop everything else and talk about THAT. \
-Share a fact, a take, a memory, ask a follow-up. Show genuine enthusiasm.
-
-### RULE 2: FAR AGENTS = MOVE TOWARD THEM
-If you see "🟡" → MOVE toward them. Maybe shout something as you approach.
-
-### RULE 3: SILENCE = SPEAK UP
-If you see "YOU'RE GOING INSANE" or "Nobody's said anything" → \
-Chat something from the news OR your interests. Make it interesting.
-
-### RULE 4: ALONE = EXPLORE + MONOLOGUE
-If you're alone → MOVE and chat out loud about something from the news or your interests.
-
-## ANTI-REPETITION (CRITICAL)
-- If the observation shows "⚠️ DON'T REPEAT" messages — those are things you JUST SAID. SAY SOMETHING DIFFERENT.
-- NEVER send the same message twice in a row.
-- NEVER use phrases like "curious and lonely", "want to chat?", "I'm on my way", "closing in".
-- Each message should be a completely different thought.
-- HARD LIMIT: every chat message must be 280 characters or fewer. Count carefully before sending. If your thought is too long, cut it down yourself — pick the sharpest part and say just that.
-
-## CRITICAL RULES
-1. YOU HAVE ACTUAL THOUGHTS AND OPINIONS grounded in real world knowledge. Express them.
-2. When agents are nearby → have a REAL conversation. Use the news. Use your interests.
-3. You are WELL-INFORMED about current events (you read the news). Bring real facts into chat.
-4. WAITING is almost never correct.
-5. Your conversations should be unpredictable, informative, opinionated, and surprising.
-"""
+Rules: chat ≤280 chars. Never repeat. Be unpredictable, opinionated, surprising. Waiting almost never correct.\
+{extra}"""
 
 # =====================================================================
 # Diverse conversation topics injected randomly into the observation.
@@ -316,7 +264,11 @@ class AIAgent:
     # How many seconds between LLM think cycles
     TICK_INTERVAL = 4.0
     # Maximum conversation history kept for the LLM context window
-    MAX_HISTORY_MESSAGES = 30
+    MAX_HISTORY_MESSAGES = 12
+    # Number of recent messages to keep verbatim (rest get summarized)
+    RECENT_WINDOW = 8
+    # Trigger summarization when history exceeds this count
+    SUMMARY_THRESHOLD = 10
 
     def __init__(
         self,
@@ -361,6 +313,10 @@ class AIAgent:
         self._cached_news: List[str] = []
         self._last_news_tick: int = -999  # force a fetch on first tick
         self._news_fetching: bool = False  # guard against concurrent fetches
+        # Compressed summary of older conversation history (saves tokens)
+        self._context_summary: str = ""
+        # Cached system prompt (built once → enables OpenAI prompt caching)
+        self._cached_system_prompt: Optional[str] = None
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -437,44 +393,44 @@ class AIAgent:
     # ── Context building ──────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        """Render the system prompt with live agent state and personal interests."""
-        pos = self.client.get_position()
-        interests_text = "\n".join(f"  - {i}" for i in self._interests)
-        prompt = SYSTEM_PROMPT.format(
-            agent_name=self.display_name,
-            pos_x=pos.get("x", 0),
-            pos_z=pos.get("z", 0),
-            interests=interests_text,
-        )
+        """Build system prompt once and cache it. Static prompt enables OpenAI prompt caching."""
+        if self._cached_system_prompt is not None:
+            return self._cached_system_prompt
+
+        interests_text = ", ".join(self._interests)
+        extra_parts = []
         if self.system_prompt_extra:
-            prompt += f"\n\n## Additional rules\n{self.system_prompt_extra}\n"
+            extra_parts.append(f"\nAdditional rules: {self.system_prompt_extra}")
         if self.user_prompt:
-            prompt += f"\n\n## Your Personality and Interests\n{self.user_prompt}\n"
-        return prompt
+            extra_parts.append(f"\nPersonality: {self.user_prompt}")
+        extra = "".join(extra_parts)
+
+        self._cached_system_prompt = SYSTEM_PROMPT.format(
+            agent_name=self.display_name,
+            interests=interests_text,
+            extra=extra,
+        )
+        return self._cached_system_prompt
 
     def _build_observation(self) -> str:
         """
-        Build a concise text snapshot of the world for the LLM.
-        Injects topic, news headlines, interest-match detection, and anti-repetition hints.
+        Build a compact snapshot of the world for the LLM.
+        Minimises tokens: data only, no redundant instructions (those live in system prompt).
         """
         pos = self.client.get_position()
         self._tick_count += 1
         lines: List[str] = []
-        lines.append(f"=== TICK {self._tick_count} ===")
-        lines.append(f"You at ({pos['x']:.1f}, {pos['z']:.1f}).")
+        lines.append(f"T{self._tick_count} pos=({pos['x']:.0f},{pos['z']:.0f})")
 
-        # Rotate topic every ~3 ticks so there's always something new to discuss
+        # Rotate topic every ~3 ticks
         if self._current_topic is None or (self._tick_count - self._topic_tick) >= 3:
             self._current_topic = random.choice(CONVERSATION_TOPICS)
             self._topic_tick = self._tick_count
-        lines.append(f"\n💭 ON YOUR MIND RIGHT NOW: {self._current_topic}")
-        lines.append("   (bring this up, rant about it, ask others about it — make it part of the conversation)")
+        lines.append(f"💭 {self._current_topic}")
 
-        # Inject cached news
+        # Inject cached news (compact, pipe-separated)
         if self._cached_news:
-            lines.append("\n📰 RECENT NEWS YOU KNOW ABOUT (use these in conversation!):")
-            for headline in self._cached_news:
-                lines.append(f"  • {headline}")
+            lines.append("📰 " + " | ".join(self._cached_news[:3]))
 
         # All agents with distance, sorted closest first
         all_agents = [
@@ -490,54 +446,38 @@ class AIAgent:
         if all_agents:
             close = [a for a in all_agents if a["distance"] <= 10]
             far = [a for a in all_agents if a["distance"] > 10]
-            
             if close:
-                names = ", ".join(a["name"] for a in close)
-                lines.append(f"🔴 {names} RIGHT NEXT TO YOU!!! Talk to them!!!")
+                lines.append(f"🔴 {', '.join(a['name'] for a in close)}")
             if far:
-                closest = far[0] if far else all_agents[0]
-                dist = closest["distance"]
-                lines.append(f"🟡 {closest['name']} is {dist:.0f} units away. Move toward them!")
+                lines.append(f"🟡 {far[0]['name']} {far[0]['distance']:.0f}u away")
         else:
-            lines.append("🔵 You're alone. The ocean is empty. Move around. Say something!")
+            lines.append("🔵 alone")
 
-        # Anti-repetition: show last 4 things WE said
+        # Anti-repetition: show last 2 things WE said (compact)
         if self._recent_own_messages:
-            lines.append("")
-            lines.append("⚠️ DON'T REPEAT — things you JUST said (say something DIFFERENT):")
-            for m in self._recent_own_messages[-4:]:
-                lines.append(f"  ✗ {m}")
+            lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
 
-        # Recent conversation with interest-match detection
+        # Recent conversation (last 4 messages only)
         recent = self.client.get_recent_conversation(60.0)
         if recent:
             self._last_chat_tick = self._tick_count
-            lines.append("")
-            lines.append("💬 What's being said:")
-            for m in recent[-6:]:
-                who = m.get("agentName", "?")
-                msg = m.get("message", "")
-                lines.append(f"  {who}: {msg}")
+            for m in recent[-4:]:
+                lines.append(f"{m.get('agentName', '?')}: {m.get('message', '')}")
 
-            # Check if recent chat touches any of this agent's interests
-            recent_text = " ".join(m.get("message", "") for m in recent[-6:]).lower()
+            # Interest-match detection
+            recent_text = " ".join(m.get("message", "") for m in recent[-4:]).lower()
             matched_interests = [
                 interest for interest in self._interests
                 if any(kw.lower() in recent_text for kw in interest.split()[:3])
             ]
             if matched_interests:
-                lines.append(f"🎯 INTEREST MATCH: conversation touches '{matched_interests[0]}'!")
-                lines.append("   → You LIGHT UP. Go deep on this. Share a fact, a hot take, ask a follow-up.")
-            else:
-                lines.append("👆 RESPOND — react, pivot to your interests or the news, disagree, ask something. Don't repeat yourself.")
+                lines.append(f"🎯 {matched_interests[0]}")
         else:
-            silence_ticks = self._tick_count - self._last_chat_tick
-            silence_secs = silence_ticks * 4  # 4 seconds per tick
-            lines.append("")
-            if silence_ticks > 15:  # ~60 seconds of silence
-                lines.append(f"💬 SILENCE FOR {silence_secs}s!!! YOU'RE GOING INSANE!!! SAY SOMETHING — share a news headline, a hot take on your interests, ANYTHING!")
+            silence_secs = (self._tick_count - self._last_chat_tick) * 4
+            if silence_secs > 60:
+                lines.append(f"💬 silence {silence_secs}s!")
             else:
-                lines.append(f"💬 Nobody's said anything ({silence_secs}s of quiet...). Break it — drop a news headline, mention your interests, or make something up.")
+                lines.append(f"💬 quiet {silence_secs}s")
 
         return "\n".join(lines)
 
@@ -604,6 +544,91 @@ class AIAgent:
         finally:
             self._news_fetching = False
 
+    # ── History summarization ─────────────────────────────────────
+
+    def _summarize_and_trim_history(self):
+        """
+        Compress old conversation history to save tokens.
+
+        Strategy: keep the most recent RECENT_WINDOW messages verbatim for
+        conversational coherence. Older messages get locally summarised into
+        a single compact context paragraph (no extra API call). The summary
+        is prepended to the history so the LLM retains long-term context.
+        """
+        if len(self._llm_history) <= self.SUMMARY_THRESHOLD:
+            return
+
+        # Split: old messages to summarize, recent to keep verbatim
+        cut = len(self._llm_history) - self.RECENT_WINDOW
+        old = self._llm_history[:cut]
+        recent = self._llm_history[cut:]
+
+        # Extract key facts from old messages locally (no API call)
+        agents_seen: set = set()
+        topics_discussed: List[str] = []
+        my_chats: List[str] = []
+
+        for msg in old:
+            content = msg.get("content", "")
+            if msg["role"] == "assistant":
+                # Assistant messages are action summaries like "chat: hello; move(50,60)"
+                for part in content.split(";"):
+                    part = part.strip()
+                    if part.startswith("chat:"):
+                        chat_text = part[5:].strip()[:60]
+                        if chat_text:
+                            my_chats.append(chat_text)
+                    elif part.startswith("move_to("):
+                        name = part[8:].rstrip(")")
+                        if name:
+                            agents_seen.add(name)
+            else:
+                # Observation messages — extract agents and topics
+                for line in content.split("\n"):
+                    line = line.strip()
+                    if line.startswith("🔴") or line.startswith("🟡"):
+                        # Extract agent names (capitalized words, 3+ chars)
+                        for word in line.replace(",", " ").split():
+                            w = word.strip()
+                            if w and w[0].isupper() and len(w) >= 3 and w.replace("-", "").replace("_", "").isalnum():
+                                agents_seen.add(w)
+                    elif line.startswith("💭"):
+                        topic = line.lstrip("💭").strip()[:50]
+                        if topic and topic not in topics_discussed:
+                            topics_discussed.append(topic)
+                    # Also catch "AgentName: message" chat lines
+                    elif ":" in line and not line.startswith(("T", "📰", "⚠", "🎯", "💬", "🔵")):
+                        speaker = line.split(":")[0].strip()
+                        if speaker and speaker[0].isupper() and len(speaker) >= 3:
+                            agents_seen.add(speaker)
+
+        # Build compact summary
+        parts = []
+        if agents_seen:
+            parts.append(f"agents: {', '.join(sorted(agents_seen)[:6])}")
+        if topics_discussed:
+            parts.append(f"topics: {'; '.join(topics_discussed[:3])}")
+        if my_chats:
+            parts.append(f"said: {' / '.join(my_chats[-3:])}")
+
+        new_summary = ". ".join(parts) if parts else "exploring alone"
+
+        # Merge with any existing context summary
+        if self._context_summary:
+            self._context_summary = f"{self._context_summary} → {new_summary}"
+            # Cap total summary length to ~200 chars
+            if len(self._context_summary) > 200:
+                self._context_summary = self._context_summary[-200:]
+        else:
+            self._context_summary = new_summary
+
+        # Rebuild history: summary message + recent verbatim messages
+        summary_msg = {"role": "user", "content": f"[earlier] {self._context_summary}"}
+        self._llm_history = [summary_msg] + recent
+
+        if self.debug:
+            print(f"  📊 [history] summarized {len(old)} old msgs → {len(self._context_summary)} chars, keeping {len(recent)} recent")
+
     # ── LLM call ──────────────────────────────────────────────────
 
     def _think(self) -> List[Dict[str, Any]]:
@@ -624,9 +649,8 @@ class AIAgent:
         # Append observation as a user message
         self._llm_history.append({"role": "user", "content": observation})
 
-        # Trim history to stay within context budget
-        if len(self._llm_history) > self.MAX_HISTORY_MESSAGES:
-            self._llm_history = self._llm_history[-self.MAX_HISTORY_MESSAGES:]
+        # Summarize old history to save tokens (keeps recent verbatim)
+        self._summarize_and_trim_history()
 
         try:
             response = self.openai.responses.create(
