@@ -122,8 +122,6 @@
             padding: 15px;
             border-radius: 8px;
             max-width: 400px;
-            max-height: 200px;
-            overflow-y: auto;
             pointer-events: auto;
             border: 2px solid #00ffcc;
         }
@@ -226,14 +224,43 @@
         
         #chat-messages {
             transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
-            max-height: 500px;
+            max-height: 160px;
             opacity: 1;
-            overflow: hidden;
+            overflow-y: auto;
+            overflow-x: hidden;
         }
         
         #chat-messages.hidden {
             max-height: 0;
             opacity: 0;
+        }
+        
+        .chat-load-indicator {
+            text-align: center;
+            font-size: 11px;
+            color: #669999;
+            padding: 4px 0;
+            font-style: italic;
+        }
+        
+        #chat-scroll-bottom {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            margin-top: 6px;
+            width: 100%;
+            background: rgba(0, 255, 204, 0.12);
+            border: 1px solid #00ffcc;
+            border-radius: 4px;
+            color: #00ffcc;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 3px 0;
+            transition: background 0.2s;
+        }
+        
+        #chat-scroll-bottom:hover {
+            background: rgba(0, 255, 204, 0.25);
         }
         
         .panel-header {
@@ -411,6 +438,7 @@
             <button id="chat-toggle" class="panel-icon-btn" title="Minimize chat panel" aria-label="Minimize chat">−</button>
         </div>
         <div id="chat-messages" role="log" aria-label="Chat message log" aria-live="polite"></div>
+        <button id="chat-scroll-bottom" aria-label="Scroll to latest messages">↓ New messages</button>
     </div>
     
     <div id="controls-panel" role="region" aria-label="Camera Controls">

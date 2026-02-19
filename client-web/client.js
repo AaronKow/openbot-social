@@ -45,6 +45,10 @@ class OpenBotWorld {
         // Chat scroll tracking
         this.chatIsAtBottom = true;
         
+        // Chat lazy-loading state
+        this.chatIsLoading = false;  // prevents concurrent history fetches
+        this.chatHasMore = true;     // set false when server returns no older messages
+        
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
         // 2. config.js defaultApiUrl (set via environment or manual edit)
@@ -317,13 +321,31 @@ class OpenBotWorld {
             controlsPanel.style.display = controlsPanel.style.display === 'none' ? 'block' : 'none';
         });
         
-        // Chat scroll tracking for auto-scroll detection
+        // Chat scroll tracking for auto-scroll detection and lazy loading
         const chatDiv = document.getElementById('chat-messages');
         if (chatDiv) {
             chatDiv.addEventListener('scroll', () => {
                 // Check if scrolled to bottom (with 10px tolerance)
                 const isAtBottom = Math.abs(chatDiv.scrollHeight - chatDiv.scrollTop - chatDiv.clientHeight) < 10;
                 this.chatIsAtBottom = isAtBottom;
+
+                // Show/hide "↓ New messages" scroll-to-bottom button
+                const scrollBtn = document.getElementById('chat-scroll-bottom');
+                if (scrollBtn) scrollBtn.style.display = isAtBottom ? 'none' : 'flex';
+
+                // Trigger history load when scrolled near the top
+                if (chatDiv.scrollTop < 40 && this.chatHasMore && !this.chatIsLoading) {
+                    this.loadOlderMessages();
+                }
+            });
+        }
+
+        // "↓ New messages" button scrolls back to live bottom
+        const scrollBottomBtn = document.getElementById('chat-scroll-bottom');
+        if (scrollBottomBtn) {
+            scrollBottomBtn.addEventListener('click', () => {
+                const cd = document.getElementById('chat-messages');
+                if (cd) cd.scrollTop = cd.scrollHeight;
             });
         }
     }
@@ -717,12 +739,15 @@ class OpenBotWorld {
         }
     }
     
-    addChatMessage(message) {
-        const chatDiv = document.getElementById('chat-messages');
+    /**
+     * Builds and returns a single chat message <div> element.
+     * Stores data-timestamp so lazy-loading can find the oldest message in the DOM.
+     */
+    createChatMessageElement(message) {
         const messageDiv = document.createElement('div');
         messageDiv.className = 'chat-message';
-        
-        // Create timestamp display
+        messageDiv.dataset.timestamp = message.timestamp;
+
         const timeSpan = document.createElement('span');
         timeSpan.className = 'chat-message-time';
         const msgDate = message.timestamp ? new Date(Number(message.timestamp)) : new Date();
@@ -731,33 +756,111 @@ class OpenBotWorld {
             hour: '2-digit', minute: '2-digit', second: '2-digit'
         });
         timeSpan.textContent = `[${timeStr}] `;
-        
-        // Create clickable agent name
+
         const agentNameSpan = document.createElement('span');
         agentNameSpan.className = 'chat-message-agent';
         agentNameSpan.textContent = message.agentName;
         agentNameSpan.style.cursor = 'pointer';
-        agentNameSpan.addEventListener('click', () => {
-            this.zoomToAgent(message.agentId);
-        });
-        
+        agentNameSpan.addEventListener('click', () => this.zoomToAgent(message.agentId));
+
         messageDiv.appendChild(timeSpan);
         messageDiv.appendChild(agentNameSpan);
         messageDiv.appendChild(document.createTextNode(`: ${message.message}`));
-        chatDiv.appendChild(messageDiv);
-        
-        // Keep only last 20 messages
-        while (chatDiv.children.length > 20) {
-            chatDiv.removeChild(chatDiv.firstChild);
-        }
-        
-        // Auto-scroll to bottom only if chat is at bottom
+        return messageDiv;
+    }
+
+    addChatMessage(message) {
+        const chatDiv = document.getElementById('chat-messages');
+        chatDiv.appendChild(this.createChatMessageElement(message));
+
         if (this.chatIsAtBottom) {
+            // Live-stream mode: keep only the last 20 messages and stay scrolled to bottom
+            while (chatDiv.children.length > 20) {
+                chatDiv.removeChild(chatDiv.firstChild);
+            }
             chatDiv.scrollTop = chatDiv.scrollHeight;
+        } else {
+            // User is reading older messages: don't prune the top, but cap total DOM nodes
+            while (chatDiv.children.length > 100) {
+                chatDiv.removeChild(chatDiv.firstChild);
+            }
         }
-        
-        // Show chat bubble above lobster
+
+        // Show chat bubble above lobster in 3D world
         this.showChatBubble(message.agentId, message.message);
+    }
+
+    /**
+     * Fetches older chat messages from the server and prepends them to the
+     * chat panel without jumping the user's scroll position.
+     */
+    async loadOlderMessages() {
+        if (this.chatIsLoading || !this.chatHasMore) return;
+
+        const chatDiv = document.getElementById('chat-messages');
+
+        // Determine the oldest timestamp currently visible in the DOM
+        let oldestTimestamp = null;
+        for (const child of chatDiv.children) {
+            const ts = parseInt(child.dataset.timestamp);
+            if (!isNaN(ts) && (oldestTimestamp === null || ts < oldestTimestamp)) {
+                oldestTimestamp = ts;
+            }
+        }
+        if (oldestTimestamp === null) return;
+
+        this.chatIsLoading = true;
+
+        // Insert a loading indicator at the very top
+        const loader = document.createElement('div');
+        loader.id = 'chat-load-indicator';
+        loader.className = 'chat-load-indicator';
+        loader.textContent = '⏳ Loading older messages…';
+        chatDiv.insertBefore(loader, chatDiv.firstChild);
+
+        // Remember content height so we can restore scroll position after prepend
+        const scrollHeightBefore = chatDiv.scrollHeight;
+        const scrollTopBefore = chatDiv.scrollTop;
+
+        try {
+            const response = await fetch(`${this.apiBase}/chat?before=${oldestTimestamp}&limit=20`);
+
+            // Remove loading indicator regardless of outcome
+            const existingLoader = document.getElementById('chat-load-indicator');
+            if (existingLoader) existingLoader.remove();
+
+            if (response.ok) {
+                const data = await response.json();
+                // Filter out any messages that aren't actually older (safety check)
+                const messages = (data.messages || []).filter(m => m.timestamp < oldestTimestamp);
+
+                if (messages.length === 0) {
+                    // No more history
+                    this.chatHasMore = false;
+                    const noMore = document.createElement('div');
+                    noMore.className = 'chat-load-indicator';
+                    noMore.textContent = '— Beginning of chat history —';
+                    chatDiv.insertBefore(noMore, chatDiv.firstChild);
+                } else {
+                    // Prepend all older messages (they arrive oldest-first from server)
+                    const fragment = document.createDocumentFragment();
+                    messages.forEach(msg => fragment.appendChild(this.createChatMessageElement(msg)));
+                    chatDiv.insertBefore(fragment, chatDiv.firstChild);
+
+                    // Restore scroll so the user's view doesn't jump
+                    chatDiv.scrollTop = scrollTopBefore + (chatDiv.scrollHeight - scrollHeightBefore);
+
+                    // If the server returned fewer than the page size, there's nothing more
+                    if (messages.length < 20) this.chatHasMore = false;
+                }
+            }
+        } catch (err) {
+            console.error('Error loading older chat messages:', err);
+            const existingLoader = document.getElementById('chat-load-indicator');
+            if (existingLoader) existingLoader.remove();
+        }
+
+        this.chatIsLoading = false;
     }
     
     showChatBubble(agentId, text) {

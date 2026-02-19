@@ -289,6 +289,21 @@ async function loadRecentChatMessages(limit = 100) {
   })).reverse(); // Return in chronological order
 }
 
+// Get up to `limit` messages with timestamp < beforeTimestamp (for client lazy-loading)
+async function getChatMessagesBefore(beforeTimestamp, limit = 20) {
+  const result = await pool.query(
+    'SELECT * FROM chat_messages WHERE timestamp < $1 ORDER BY timestamp DESC LIMIT $2',
+    [beforeTimestamp, limit]
+  );
+
+  return result.rows.map(row => ({
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp, 10)
+  })).reverse(); // Return in chronological order (oldest first)
+}
+
 // Clean up old chat messages (keep only last 1000)
 async function cleanupOldChatMessages() {
   await pool.query(`
@@ -546,6 +561,7 @@ module.exports = {
   deleteAgent,
   saveChatMessage,
   loadRecentChatMessages,
+  getChatMessagesBefore,
   cleanupOldChatMessages,
   saveWorldObject,
   loadAllWorldObjects,

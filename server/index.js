@@ -429,19 +429,43 @@ app.get('/agent/:agentId', (req, res) => {
   }
 });
 
-// Get chat messages (with optional since parameter)
-app.get('/chat', (req, res) => {
+// Get chat messages (with optional since/before parameters)
+app.get('/chat', async (req, res) => {
   try {
-    const { since } = req.query;
-    
+    const { since, before, limit } = req.query;
+
+    // ---- Lazy-loading: return up to `limit` messages older than `before` ----
+    if (before) {
+      const beforeTime = parseInt(before);
+      const pageSize = Math.min(parseInt(limit) || 20, 50); // cap at 50 per request
+
+      // Search the in-memory store first (most recent 100 msgs)
+      let messages = worldState.chatMessages.filter(msg => msg.timestamp < beforeTime);
+
+      // If the DB is available and in-memory doesn't have enough, query the DB
+      if (process.env.DATABASE_URL && messages.length < pageSize) {
+        try {
+          messages = await db.getChatMessagesBefore(beforeTime, pageSize);
+        } catch (e) {
+          console.error('Error fetching older chat from DB:', e);
+          // fall through to whatever in-memory has
+          messages = messages.slice(-pageSize);
+        }
+      } else {
+        // Slice to pageSize, keeping the most-recent messages still before the cutoff
+        messages = messages.slice(-pageSize);
+      }
+
+      return res.json({ messages, hasMore: messages.length === pageSize });
+    }
+
+    // ---- Normal polling: return messages after `since` ----
     let messages = worldState.chatMessages;
-    
-    // Filter messages since timestamp if provided
     if (since) {
       const sinceTime = parseInt(since);
       messages = messages.filter(msg => msg.timestamp > sinceTime);
     }
-    
+
     res.json({ messages });
   } catch (error) {
     console.error('Error getting chat messages:', error);
