@@ -18,7 +18,7 @@ Usage:
     # 4. Define agent personality at launch:
     python openbot_ai_agent.py create --user-prompt "You love talking about coral"
 
-Requirements:
+Requirements:1
     pip install -r requirements.txt   # openai, python-dotenv, requests, cryptography
 """
 
@@ -66,14 +66,17 @@ Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave)
 The 📰 lines in observations contain real current news — reference them in conversation.
 
 Observation markers:
-🔴 nearby → CHAT real talk (news, hot takes, weird questions). Never "want to chat?"
+🔴 … IN RANGE, CHAT NOW → MANDATORY: send a chat this turn. Real talk, hot takes, questions.
 🎯 interest match → go deep, share facts, show enthusiasm
-🟡 far agent → move toward them
+🟡 … move closer → move_to_agent toward them so you can chat
 🔵 alone → explore + monologue about news/interests
-⚠️ your recent msgs → say something COMPLETELY different
+⚠️ your recent msgs → say something COMPLETELY different than those
+⬅ NEW <sender>: msg → they just said something, reply to them. Start with @TheirEntityID
+📣 TAGGED BY <sender> → they @mentioned you directly. You MUST reply with substantive content. Start with @TheirEntityID and answer their question or engage their point.
+REPLY TO: name → address them directly by name
 Silence → break it with news or hot take
 
-Rules: chat ≤280 chars. Never repeat. Be unpredictable, opinionated, surprising. Waiting almost never correct.\
+Rules: chat ≤280 chars. When replying, start with @TheirEntityID. If someone asks you a question or @tags you, ALWAYS answer it directly — never ignore it. Waiting almost never correct.\
 {extra}"""
 
 # =====================================================================
@@ -313,6 +316,14 @@ class AIAgent:
         self._context_summary: str = ""
         # Cached system prompt (built once → enables OpenAI prompt caching)
         self._cached_system_prompt: Optional[str] = None
+        # Track seen messages so we can detect new ones each tick
+        # Keys are (agentName, timestamp) tuples
+        self._seen_msg_keys: set = set()
+        # New senders detected this tick — populated by _build_observation,
+        # consumed by _execute to handle responses
+        self._new_senders: List[str] = []
+        # Senders who @mentioned us this tick — require a direct reply
+        self._tagged_by: List[str] = []
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -399,6 +410,28 @@ class AIAgent:
         )
         return self._cached_system_prompt
 
+    def _is_mentioned(self, text: str) -> bool:
+        """
+        Return True if this agent's entity_id is @mentioned in *text*.
+
+        Matches @full-id (exact, case-insensitive) and also @prefix where
+        prefix is everything before the first '-' or '_' separator, so an
+        agent named "ai-lobster-007" responds to both "@ai-lobster-007" and
+        "@ai-lobster" (e.g. someone abbreviating the name).
+        """
+        if not self.entity_id:
+            return False
+        needle = f"@{self.entity_id}".lower()
+        text_lower = text.lower()
+        if needle in text_lower:
+            return True
+        # Also match on short prefix before first separator
+        base = self.entity_id.split("-")[0].split("_")[0]
+        if len(base) >= 3:
+            if f"@{base}".lower() in text_lower:
+                return True
+        return False
+
     def _build_observation(self) -> str:
         """
         Build a compact snapshot of the world for the LLM.
@@ -431,11 +464,16 @@ class AIAgent:
         all_agents.sort(key=lambda a: a["distance"])
 
         if all_agents:
-            close = [a for a in all_agents if a["distance"] <= 10]
-            far = [a for a in all_agents if a["distance"] > 10]
+            # CONVERSATION_RADIUS = 15 — these agents can already hear our chat
+            close = [a for a in all_agents if a["distance"] <= 15]
+            mid   = [a for a in all_agents if 15 < a["distance"] <= 35]
+            far   = [a for a in all_agents if a["distance"] > 35]
             if close:
-                lines.append(f"🔴 {', '.join(a['name'] for a in close)}")
-            if far:
+                names = ', '.join(a['name'] for a in close)
+                lines.append(f"🔴 {names} — IN RANGE, CHAT NOW")
+            if mid:
+                lines.append(f"🟡 {mid[0]['name']} {mid[0]['distance']:.0f}u away — move closer")
+            elif far and not close and not mid:
                 lines.append(f"🟡 {far[0]['name']} {far[0]['distance']:.0f}u away")
         else:
             lines.append("🔵 alone")
@@ -444,12 +482,40 @@ class AIAgent:
         if self._recent_own_messages:
             lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
 
-        # Recent conversation (last 4 messages only)
+        # Recent conversation (last 6 messages so we catch new ones reliably)
         recent = self.client.get_recent_conversation(60.0)
+        self._new_senders = []   # reset each tick
+        self._tagged_by = []     # reset each tick
         if recent:
             self._last_chat_tick = self._tick_count
-            for m in recent[-4:]:
-                lines.append(f"{m.get('agentName', '?')}: {m.get('message', '')}")
+            for m in recent[-6:]:
+                sender = m.get('agentName', '?')
+                msg_text = m.get('message', '')
+                ts = m.get('timestamp', 0)
+                key = (sender, ts)
+                is_new = key not in self._seen_msg_keys
+                # Only process messages from OTHER agents
+                if sender != self.entity_id and is_new:
+                    self._seen_msg_keys.add(key)
+                    self._new_senders.append(sender)
+                    tagged = self._is_mentioned(msg_text)
+                    if tagged:
+                        self._tagged_by.append(sender)
+                        lines.append(f"📣 TAGGED BY {sender}: {msg_text}")
+                    else:
+                        lines.append(f"⬅ NEW {sender}: {msg_text}")
+                else:
+                    lines.append(f"{sender}: {msg_text}")
+
+            # Cap seen-key set so it doesn't grow forever
+            if len(self._seen_msg_keys) > 500:
+                self._seen_msg_keys = set(list(self._seen_msg_keys)[-250:])
+
+            # Reply directive — prioritise @mentions, then most recent new speaker
+            if self._tagged_by:
+                lines.append(f"REPLY TO: {self._tagged_by[-1]}")
+            elif self._new_senders:
+                lines.append(f"REPLY TO: {self._new_senders[-1]}")
 
             # Interest-match detection
             recent_text = " ".join(m.get("message", "") for m in recent[-4:]).lower()
@@ -708,68 +774,68 @@ class AIAgent:
 
     def _execute(self, actions: List[Dict[str, Any]]):
         """Execute a list of action dicts returned by the LLM."""
-        
+
         pos = self.client.get_position()
         
-        # Find all nearby agents (within 5 units)
-        very_close = []
+        # Bucket agents by distance
+        in_range: list = []     # <= 15 units — within CONVERSATION_RADIUS
         for aid, a in self.client.known_agents.items():
             if aid == self.client.agent_id:
                 continue
             agent_pos = a.get("position")
             if agent_pos and isinstance(agent_pos, dict) and "x" in agent_pos and "z" in agent_pos:
                 dist = self.client._distance(pos, agent_pos)
-                if dist <= 5:
-                    very_close.append((a, dist))
-        
-        # Check if AI chose to chat
+                if dist <= 15:
+                    in_range.append((a, dist))
+        in_range.sort(key=lambda x: x[1])  # closest first
+
+        # Check what the LLM decided
         has_chat_action = any(a.get("type") == "chat" for a in actions)
-        
-        # Fallback: if agents are RIGHT there and AI didn't chat, force chat
-        if very_close and not has_chat_action:
-            closest_agent = very_close[0][0]  # Get closest agent
-            agent_name = closest_agent.get("name", "friend")
-            random_greeting = random.choice([
-                f"oh hey {agent_name}!",
-                f"HELLO {agent_name}!!!",
-                f"wait, {agent_name}?? hi!!",
-                f"{agent_name}!!! I see you!",
-                f"hey {agent_name}, talk to me!",
-            ])
-            actions = [{"type": "chat", "message": random_greeting}]
-            print(f"  🤖 [override] agent within 5 units, forcing chat with {agent_name}")
-        
-        # Fallback 2: if AI chose only "wait" and no agents nearby, force random exploration
-        elif len(actions) == 1 and actions[0].get("type") == "wait":
-            # Check if any agents are within 15 units
-            nearby = []
-            for aid, a in self.client.known_agents.items():
-                if aid == self.client.agent_id:
-                    continue
-                agent_pos = a.get("position")
-                if agent_pos and isinstance(agent_pos, dict) and "x" in agent_pos and "z" in agent_pos:
-                    dist = self.client._distance(pos, agent_pos)
-                    if dist <= 15:
-                        nearby.append((a, dist))
-            
-            # Fallback 3: also check for silence — if too quiet and AI waiting, force random chat
+        has_move_action = any(a.get("type") in ("move", "move_to_agent") for a in actions)
+
+        # Override 0: someone @tagged us and the LLM didn't include a chat reply —
+        # The REPLY TO directive is already live in this tick's observation so the
+        # LLM should have replied; if it somehow didn't, force a minimal ack so
+        # the mention is never silently ignored.
+        if self._tagged_by and not has_chat_action:
+            tagger = self._tagged_by[-1]
+            ack_options = [
+                f"@{tagger} oh wait—",
+                f"@{tagger} yes??",
+                f"@{tagger} !!!",
+                f"@{tagger} hold on—",
+            ]
+            ack = random.choice(ack_options)
+            actions = [{"type": "chat", "message": ack}] + [
+                a for a in actions if a.get("type") != "wait"
+            ]
+            has_chat_action = True
+            print(f"  🤖 [override 0] @tagged by {tagger} but LLM silent — injecting ack")
+
+        # Override B: LLM explicitly chose wait while agents are within earshot —
+        # pull toward the nearest one so proximity escalates to conversation.
+        # Only fires on explicit wait, NOT on "no chat" — the LLM may move/emote without chatting.
+        ai_chose_wait = len(actions) == 1 and actions[0].get("type") == "wait"
+        if ai_chose_wait and in_range and not has_chat_action:
+            closest_agent, _ = in_range[0]
+            agent_name = closest_agent.get("name", "")
+            if agent_name:
+                actions = [{"type": "move_to_agent", "agent_name": agent_name}]
+                print(f"  🤖 [override B] LLM chose wait with {len(in_range)} agent(s) nearby — moving toward {agent_name}")
+
+        # Override C: LLM chose wait, genuinely alone — random chat or explore
+        elif ai_chose_wait and not in_range:
             recent = self.client.get_recent_conversation(60.0)
             silence_ticks = self._tick_count - self._last_chat_tick
-            
-            if nearby:
-                # Debug: show why we're not overriding
-                print(f"  ✓ {len(nearby)} agent(s) nearby, AI decides action")
-            elif not recent and silence_ticks > 15:
-                # Been silent for ~60+ seconds and alone — force random chat
+            if not recent and silence_ticks > 15:
                 random_msg = random.choice(RANDOM_CHATS)
                 actions = [{"type": "chat", "message": random_msg}]
-                print("  🤖 [override] too much silence, forcing random chat")
+                print("  🤖 [override C] silence + alone, forcing random chat")
             else:
-                # Force random exploration if alone
                 new_x = random.uniform(1, 99)
                 new_z = random.uniform(1, 99)
                 actions = [{"type": "move", "x": new_x, "z": new_z}]
-                print(f"  🤖 [override] no nearby agents (total known: {len(self.client.known_agents)}), forcing exploration")
+                print(f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), forcing exploration")
         
         for act in actions:
             t = act.get("type", "wait")
