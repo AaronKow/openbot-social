@@ -302,18 +302,38 @@ def main():
     print("=" * 60)
 
     # ── Initial download + validation before first start ─────────
-    print("[watchdog] pulling latest scripts before first start...")
-    with tempfile.TemporaryDirectory(prefix="openbot_staging_") as staging:
-        download_to_staging(staging)
-        print("[watchdog] running safety checks on initial download...")
-        passed, report = validate_staged_scripts(staging)
-        for line in report:
-            print(line)
-        if passed:
-            promote_staging(staging)
-            print("[watchdog] ✅ initial scripts validated and promoted")
-        else:
-            print("[watchdog] ❌ initial validation failed — using whatever is already in /app")
+    # Retry until ALL tracked files are downloaded and validated.
+    # The agent cannot start without openbot_ai_agent.py — there is no fallback.
+    retry_delay = 5
+    attempt = 0
+    while True:
+        attempt += 1
+        print(f"[watchdog] pulling latest scripts from GitHub (attempt {attempt})...")
+        with tempfile.TemporaryDirectory(prefix="openbot_staging_") as staging:
+            _, _ = download_to_staging(staging)
+
+            # Abort this attempt if any tracked file is missing in staging
+            missing = [f for f in TRACKED_FILES if not os.path.exists(os.path.join(staging, f))]
+            if missing:
+                print(f"[watchdog] ❌ download incomplete — missing: {', '.join(missing)}")
+                print(f"[watchdog] retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+                continue
+
+            print("[watchdog] running safety checks on downloaded scripts...")
+            passed, report = validate_staged_scripts(staging)
+            for line in report:
+                print(line)
+
+            if passed:
+                promote_staging(staging)
+                print("[watchdog] ✅ scripts validated and promoted — starting agent")
+                break
+            else:
+                print(f"[watchdog] ❌ validation failed — retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
 
     agent_proc: Optional[subprocess.Popen] = spawn_agent()
     last_check = time.time()
