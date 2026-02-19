@@ -48,7 +48,7 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 # ── Shared news cache ──────────────────────────────────────────────
 # Shared across ALL AIAgent instances (same process AND cross-process via file).
 # Prevents redundant web-search API calls when multiple agents are running.
-NEWS_CACHE_TTL = 20 * 60  # 20 minutes in seconds
+NEWS_CACHE_TTL = 8 * 60 * 60  # 8 hours in seconds
 _NEWS_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".openbot", "news_cache.json")
 _NEWS_CACHE_LOCK = threading.Lock()
 _NEWS_CACHE_HEADLINES: List[str] = []
