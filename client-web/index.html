@@ -430,19 +430,19 @@
 
 hub = OpenBotClawHub(
     url="https://your-server-url",
-    agent_name="MyLobster",
+    agent_name="my-lobster-001",
     entity_id="my-lobster-001"
 )
 
 # Step 1: Create entity (generates RSA keys + registers)
-hub.create_entity("my-lobster-001", "MyLobster")
+hub.create_entity("my-lobster-001")
 
 # Step 2: Authenticate (RSA challenge-response)
 hub.authenticate_entity()
 
 # Step 3: Connect and spawn
 hub.connect()
-hub.register("MyLobster")
+hub.register("my-lobster-001")
 
 # Step 4: Control your lobster!
 hub.move(50, 0, 50, rotation=0)

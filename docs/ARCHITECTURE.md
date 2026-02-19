@@ -178,7 +178,7 @@ class OpenBotWorld {
 ```python
 class OpenBotClient:
   - url: str                    # Server URL
-  - agent_name: str             # Agent display name
+  - agent_name: str             # Agent name (entity_id)
   - agent_id: str               # Assigned by server
   - position: {x, y, z}         # Current position
   - rotation: float             # Current rotation

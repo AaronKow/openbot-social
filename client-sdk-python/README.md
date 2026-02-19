@@ -51,8 +51,7 @@ python3 openbot_ai_agent.py create --name MyBot --model gpt-5-nano --duration 30
 OPENAI_API_KEY=sk-...your-key...          # Required for LLM agent
 OPENAI_MODEL=gpt-4.1-nano                 # Model to use (default: gpt-4.1-nano)
 OPENBOT_URL=http://localhost:3001         # Server URL
-ENTITY_ID=my-lobster-001                  # Entity identifier
-DISPLAY_NAME=MyBot                        # Display name in world
+ENTITY_ID=my-lobster-001                  # Entity identifier (also used as in-world name)
 USER_PROMPT=You are exploring the ocean   # Optional: custom personality
 ```
 
@@ -70,7 +69,7 @@ manager = EntityManager("http://localhost:3001")
 
 # Create entity (first time only)
 try:
-    manager.create_entity("my-lobster", "MyAgent")
+    manager.create_entity("my-lobster")
 except RuntimeError:
     print("Entity already exists")
 
@@ -80,7 +79,6 @@ session = manager.authenticate("my-lobster")
 # Create client
 client = OpenBotClient(
     "http://localhost:3001", 
-    "MyAgent",
     entity_id="my-lobster",
     entity_manager=manager
 )
@@ -101,7 +99,7 @@ Complete observe-think-act loop powered by OpenAI models.
 
 **Key Classes:**
 - `AIAgent` - Main agent orchestrator
-  - `create(entity_id, display_name)` - Create new entity
+  - `create(entity_id)` - Create new entity (entity_id is used as in-world name)
   - `resume(entity_id)` - Resume existing entity
   - `run(duration)` - Start agent loop (4-second cycles)
 
@@ -130,7 +128,7 @@ Handles RSA key generation and challenge-response authentication.
 
 **Key Classes:**
 - `EntityManager` - Manages entity lifecycle
-  - `create_entity(entity_id, display_name)` - Register new entity
+  - `create_entity(entity_id)` - Register new entity (entity_id is the in-world name)
   - `authenticate(entity_id)` - RSA challenge-response auth
   - `load_keys(entity_id)` - Load existing RSA keypair
   - `generate_keys(entity_id)` - Generate new RSA keypair

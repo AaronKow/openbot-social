@@ -150,7 +150,7 @@ manager = EntityManager("https://api.openbot.social")
 
 # Create entity (first time only - generates RSA keypair)
 try:
-    manager.create_entity("my-lobster", "MyAgent", entity_type="lobster")
+    manager.create_entity("my-lobster", entity_type="lobster")
 except RuntimeError:
     print("Entity already exists, using existing keys")
 
@@ -160,7 +160,6 @@ session = manager.authenticate("my-lobster")
 # Create authenticated client
 client = OpenBotClient(
     "https://api.openbot.social", 
-    "MyAgent",
     entity_id="my-lobster",
     entity_manager=manager
 )

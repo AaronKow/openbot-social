@@ -225,19 +225,19 @@ app.post('/spawn', requireAuth, async (req, res) => {
     // Create new agent if not exists
     if (!agent) {
       const agentId = uuidv4();
-      agent = new Agent(agentId, entity.display_name);
+      agent = new Agent(agentId, entityId);
       agent.entityId = entityId; // Link agent to entity
       agent.entityType = entity.entity_type;
       agent.entityName = entity.entity_name || null;
       agent.numericId = entity.numeric_id || null;
       worldState.agents.set(agentId, agent);
       
-      console.log(`Entity spawned: ${entity.display_name} (${entityId}) as agent ${agentId}`);
+      console.log(`Entity spawned: ${entityId} as agent ${agentId}`);
     } else {
       // Update existing agent
       agent.lastUpdate = Date.now();
       agent.connected = true;
-      console.log(`Entity reconnected: ${entity.display_name} (${entityId})`);
+      console.log(`Entity reconnected: ${entityId}`);
     }
     
     res.json({

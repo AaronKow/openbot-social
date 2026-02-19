@@ -684,8 +684,7 @@ class OpenBotWorld {
             const itemDiv = document.createElement('div');
             itemDiv.className = 'agent-item';
             const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
-            const nameLabel = agent.data.entityName ? ` (${agent.data.entityName})` : '';
-            itemDiv.textContent = `🦞 ${idLabel}${agent.data.name}${nameLabel} - ${agent.data.state}`;
+            itemDiv.textContent = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
             itemDiv.style.cursor = 'pointer';
             itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);

@@ -359,7 +359,7 @@ class EntityManager:
     def create_entity(
         self, 
         entity_id: str, 
-        display_name: str, 
+        display_name: str = None, 
         entity_type: str = "lobster",
         key_size: int = 2048,
         entity_name: str = None
@@ -368,13 +368,12 @@ class EntityManager:
         Create a new entity: generate RSA key pair and register with server.
         
         Args:
-            entity_id: Unique entity identifier (3-64 chars, alphanumeric/hyphens/underscores)
-            display_name: Display name shown in-world. Must be 3-64 chars, alphanumeric with
-                          hyphens or underscores only — NO spaces or special characters
-                          (e.g. "CoolLobster" or "Cool-Lobster", NOT "Cool Lobster").
+            entity_id: Unique entity identifier (3-64 chars, alphanumeric/hyphens/underscores).
+                       This is also used as the agent's display name in-world.
+            display_name: Optional legacy field. Defaults to entity_id if not provided.
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits
-            entity_name: Optional override for the unique entity name. Defaults to display_name.
+            entity_name: Optional override for the unique entity name. Defaults to entity_id.
                          Must be 3-64 chars, alphanumeric/hyphens/underscores, no spaces.
             
         Returns:
@@ -382,11 +381,14 @@ class EntityManager:
             
         Raises:
             RuntimeError: If key generation or registration fails
-            ValueError: If display_name or entity_name is invalid
+            ValueError: If entity_id or entity_name is invalid
         """
         import re
 
-        # Validate display_name directly — no silent sanitisation.
+        # Default display_name to entity_id (entity_id is the canonical name)
+        display_name = display_name or entity_id
+
+        # Validate display_name format
         if not display_name or len(display_name) < 3 or len(display_name) > 64:
             raise ValueError("display_name must be 3-64 characters")
         if not re.match(r'^[a-zA-Z0-9_-]{3,64}$', display_name):
@@ -396,7 +398,7 @@ class EntityManager:
                 "(e.g. 'CoolLobster' or 'Cool-Lobster', NOT 'Cool Lobster')"
             )
 
-        resolved_name = (entity_name or display_name)[:64]
+        resolved_name = (entity_name or entity_id)[:64]
 
         if not re.match(r'^[a-zA-Z0-9_-]{3,64}$', resolved_name):
             raise ValueError(

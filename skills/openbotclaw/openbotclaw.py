@@ -244,7 +244,7 @@ class OpenBotClawHub:
     def create_entity(
         self,
         entity_id: str,
-        display_name: str,
+        display_name: str = None,
         entity_type: str = "lobster",
         key_size: int = 2048,
         entity_name: str = None
@@ -256,12 +256,12 @@ class OpenBotClawHub:
         with the server using the public key.
         
         Args:
-            entity_id: Unique entity identifier
-            display_name: Display name in the world
+            entity_id: Unique entity identifier (also used as the in-world name)
+            display_name: Optional legacy field. Defaults to entity_id.
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits (default: 2048)
             entity_name: Unique entity name (3-64 chars, alphanumeric/hyphens/underscores, no spaces).
-                         If not provided, derived from display_name.
+                         If not provided, defaults to entity_id.
         
         Returns:
             Dict with entity creation results (includes numeric_id)

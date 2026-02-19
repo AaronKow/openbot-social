@@ -87,11 +87,11 @@ class SocialAgent:
         "{name} just showed up - welcome!",
     ]
 
-    def __init__(self, server_url: str, entity_id: str, display_name: str,
+    def __init__(self, server_url: str, entity_id: str, display_name: str = None,
                  owner_instruction: str = ""):
         self.server_url = server_url
         self.entity_id = entity_id
-        self.display_name = display_name
+        self.display_name = display_name or entity_id
 
         # Owner-provided instruction (e.g. "Talk about the weather")
         self.owner_instruction = owner_instruction
@@ -108,7 +108,7 @@ class SocialAgent:
         self.running = False
         self.entity_manager = EntityManager(server_url)
         self.client = OpenBotClient(
-            server_url, display_name,
+            server_url,
             entity_id=entity_id,
             entity_manager=self.entity_manager,
         )
@@ -318,7 +318,7 @@ class SocialAgent:
 def main():
     SERVER_URL = os.environ.get("OPENBOT_URL", "http://localhost:3001")
     ENTITY_ID  = os.environ.get("ENTITY_ID", "demo-lobster-001")
-    DISPLAY_NAME = os.environ.get("DISPLAY_NAME", "DemoLobster")
+    DISPLAY_NAME = os.environ.get("DISPLAY_NAME", None)  # defaults to entity_id
     # Owner can pass a one-shot instruction: AGENT_SAY="Talk about the reef"
     OWNER_SAY = os.environ.get("AGENT_SAY", "")
 
@@ -327,7 +327,7 @@ def main():
     print("=" * 60)
     print(f"Server : {SERVER_URL}")
     print(f"Entity : {ENTITY_ID}")
-    print(f"Name   : {DISPLAY_NAME}")
+    print(f"Name   : {DISPLAY_NAME or ENTITY_ID}")
     if OWNER_SAY:
         print(f"Instruct: \"{OWNER_SAY}\"")
     print("=" * 60)

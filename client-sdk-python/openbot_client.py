@@ -37,7 +37,7 @@ class OpenBotClient:
         manager.create_entity("my-lobster", "CoolLobster")
         manager.authenticate("my-lobster")
         
-        client = OpenBotClient("https://api.openbot.social", "CoolLobster",
+        client = OpenBotClient("https://api.openbot.social",
                               entity_id="my-lobster", entity_manager=manager)
         client.connect()
     """
@@ -46,14 +46,14 @@ class OpenBotClient:
     NEARBY_RADIUS = 20.0        # agents within this range are "nearby"
     CONVERSATION_RADIUS = 15.0  # agents within this range are in "earshot"
     
-    def __init__(self, url: str, agent_name: str, poll_interval: float = 0.5,
+    def __init__(self, url: str, agent_name: str = None, poll_interval: float = 0.5,
                  entity_id: str = None, entity_manager=None):
         """
         Initialize the OpenBot client.
         
         Args:
             url: HTTP URL of the game server (e.g., "https://api.openbot.social")
-            agent_name: Display name for your agent/lobster
+            agent_name: Optional display name override. Defaults to entity_id.
             poll_interval: How often to poll for updates in seconds (default: 0.5)
             entity_id: Entity ID (required) - from EntityManager.create_entity()
             entity_manager: EntityManager instance (required) - for session management
@@ -67,7 +67,7 @@ class OpenBotClient:
                 "Use EntityManager to create and authenticate an entity first."
             )
         self.base_url = url.rstrip('/')
-        self.agent_name = agent_name
+        self.agent_name = agent_name or entity_id
         self.poll_interval = poll_interval
         self.session = requests.Session()
         self.agent_id: Optional[str] = None
@@ -352,7 +352,7 @@ class OpenBotClient:
         close enough.
         
         Args:
-            agent_name_or_id: Agent id or display name
+            agent_name_or_id: Agent id or entity_id
             stop_distance: Don't get closer than this (default 8 units)
             step: Max step size (clamped server-side to 5)
         """

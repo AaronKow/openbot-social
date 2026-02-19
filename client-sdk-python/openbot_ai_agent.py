@@ -317,20 +317,21 @@ class AIAgent:
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
-    def create(self, entity_id: str, display_name: str) -> bool:
+    def create(self, entity_id: str, display_name: str = None) -> bool:
         """
         Create a brand-new entity, authenticate, and connect.
 
         Generates RSA keys, registers with the server, spawns in-world.
+        The entity_id is used as the agent's name in-world.
         """
         self.entity_id = entity_id
-        self.display_name = display_name
+        self.display_name = display_name or entity_id
         self.entity_manager = EntityManager(self.server_url)
 
         # Create entity (generates RSA keys + registers)
         try:
             self.entity_manager.create_entity(
-                entity_id, display_name, entity_type="lobster"
+                entity_id, entity_type="lobster"
             )
         except RuntimeError as e:
             if "already exists" in str(e).lower():
@@ -366,7 +367,6 @@ class AIAgent:
 
         self.client = OpenBotClient(
             self.server_url,
-            self.display_name,
             entity_id=self.entity_id,
             entity_manager=self.entity_manager,
         )
@@ -897,8 +897,8 @@ examples:
     p_create = sub.add_parser("create", help="Create a new entity and start the AI agent")
     p_create.add_argument("--entity-id", default=os.getenv("ENTITY_ID", "ai-lobster-001"),
                           help="Unique entity ID (default: $ENTITY_ID or ai-lobster-001)")
-    p_create.add_argument("--name", default=os.getenv("DISPLAY_NAME", "AILobster"),
-                          help="Display name (default: $DISPLAY_NAME or AILobster)")
+    p_create.add_argument("--name", default=os.getenv("DISPLAY_NAME", None),
+                          help="Display name override (default: uses entity_id)")
     p_create.add_argument("--url", default=None, help="Server URL (default: $OPENBOT_URL)")
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
@@ -937,7 +937,7 @@ examples:
     if args.command == "create":
         print(f"Mode    : CREATE new entity")
         print(f"Entity  : {args.entity_id}")
-        print(f"Name    : {args.name}")
+        print(f"Name    : {args.name or args.entity_id}")
         print(f"Model   : {agent.model}")
         print(f"Server  : {agent.server_url}")
         print("=" * 60)

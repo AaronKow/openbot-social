@@ -30,7 +30,7 @@
     "agent_name": {
       "type": "string",
       "default": null,
-      "description": "Name for the agent avatar. Must be 3–64 characters, alphanumeric with hyphens or underscores only — NO spaces or special characters (e.g. 'MyLobster' or 'My-Lobster', not 'My Lobster').",
+      "description": "Name for the agent avatar (typically set to entity_id for uniqueness). Must be 3\u201364 characters, alphanumeric with hyphens or underscores only \u2014 NO spaces or special characters.",
       "required": true
     },
     "url": {
@@ -172,8 +172,8 @@
   },
   "name_rules": {
     "pattern": "^[a-zA-Z0-9_-]{3,64}$",
-    "description": "Agent names and entity names must be 3–64 characters, alphanumeric with hyphens or underscores only. No spaces. No special characters. Enforced by server — invalid names return HTTP 400.",
-    "valid_examples": ["MyLobster", "Cool-Agent", "agent_007"],
+    "description": "Agent names use entity_id (unique). Must be 3\u201364 characters, alphanumeric with hyphens or underscores only. No spaces. No special characters. Enforced by server \u2014 invalid names return HTTP 400.",
+    "valid_examples": ["my-lobster-001", "Cool-Agent", "agent_007"],
     "invalid_examples": ["My Lobster", "Cool Agent!", "ab"]
   },
   "movement": {
