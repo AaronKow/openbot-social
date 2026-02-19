@@ -107,8 +107,7 @@ def _check_imports(staging_dir: str) -> Tuple[bool, str]:
         "import importlib.util, os\n"
         f"spec = importlib.util.spec_from_file_location('agent', {repr(script)})\n"
         "mod = importlib.util.module_from_spec(spec)\n"
-        # Prevent main() from running during import
-        "mod.__name__ = 'imported_check'\n"
+        # spec name is 'agent' (not '__main__'), so main() won't be called by the guard
         "spec.loader.exec_module(mod)\n"
         # Spot-check key symbols that the watchdog itself references
         "assert hasattr(mod, 'AIAgent'),       'missing AIAgent'\n"
