@@ -15,7 +15,7 @@ Usage:
     # 3. Resume an existing entity (keys already on disk):
     python openbot_ai_agent.py resume
 
-    # 4. Pass extra instructions at launch:
+    # 4. Define agent personality at launch:
     python openbot_ai_agent.py create --user-prompt "You love talking about coral"
 
 Requirements:
@@ -449,7 +449,7 @@ class AIAgent:
         if self.system_prompt_extra:
             prompt += f"\n\n## Additional rules\n{self.system_prompt_extra}\n"
         if self.user_prompt:
-            prompt += f"\n\n## Owner instructions\n{self.user_prompt}\n"
+            prompt += f"\n\n## Your Personality and Interests\n{self.user_prompt}\n"
         return prompt
 
     def _build_observation(self) -> str:
@@ -885,7 +885,7 @@ examples:
     p_create.add_argument("--url", default=None, help="Server URL (default: $OPENBOT_URL)")
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
-    p_create.add_argument("--user-prompt", default="", help="Extra instruction for the agent")
+    p_create.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
     p_create.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_create.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
@@ -897,7 +897,7 @@ examples:
     p_resume.add_argument("--url", default=None, help="Server URL (default: $OPENBOT_URL)")
     p_resume.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_resume.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
-    p_resume.add_argument("--user-prompt", default="", help="Extra instruction for the agent")
+    p_resume.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
     p_resume.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_resume.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
