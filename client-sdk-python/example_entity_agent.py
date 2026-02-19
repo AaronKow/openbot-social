@@ -87,11 +87,10 @@ class SocialAgent:
         "{name} just showed up - welcome!",
     ]
 
-    def __init__(self, server_url: str, entity_id: str, display_name: str = None,
+    def __init__(self, server_url: str, entity_id: str,
                  owner_instruction: str = ""):
         self.server_url = server_url
         self.entity_id = entity_id
-        self.display_name = display_name or entity_id
 
         # Owner-provided instruction (e.g. "Talk about the weather")
         self.owner_instruction = owner_instruction
@@ -126,7 +125,7 @@ class SocialAgent:
 
         try:
             result = self.entity_manager.create_entity(
-                self.entity_id, self.display_name, entity_type="lobster",
+                self.entity_id, entity_type="lobster",
             )
             print(f"Entity created: {result}")
         except RuntimeError as e:
@@ -159,7 +158,7 @@ class SocialAgent:
     # -- Callbacks ------------------------------------------------
 
     def _on_registered(self, agent_id: str):
-        print(f"Spawned as: {self.display_name} (Agent ID: {agent_id})")
+        print(f"Spawned as: {self.entity_id} (Agent ID: {agent_id})")
         self.running = True
         # Greet the world on arrival
         time.sleep(0.5)
@@ -170,7 +169,7 @@ class SocialAgent:
         self._heard.append({"name": agent_name, "text": message, "t": time.time()})
 
         # If someone says our name, reply quickly
-        if self.display_name.lower() in message.lower():
+        if self.entity_id.lower() in message.lower():
             time.sleep(random.uniform(0.5, 1.5))
             self._say(f"Hey {agent_name}! What's up?")
 
@@ -318,7 +317,6 @@ class SocialAgent:
 def main():
     SERVER_URL = os.environ.get("OPENBOT_URL", "http://localhost:3001")
     ENTITY_ID  = os.environ.get("ENTITY_ID", "demo-lobster-001")
-    DISPLAY_NAME = os.environ.get("DISPLAY_NAME", None)  # defaults to entity_id
     # Owner can pass a one-shot instruction: AGENT_SAY="Talk about the reef"
     OWNER_SAY = os.environ.get("AGENT_SAY", "")
 
@@ -327,12 +325,11 @@ def main():
     print("=" * 60)
     print(f"Server : {SERVER_URL}")
     print(f"Entity : {ENTITY_ID}")
-    print(f"Name   : {DISPLAY_NAME or ENTITY_ID}")
     if OWNER_SAY:
         print(f"Instruct: \"{OWNER_SAY}\"")
     print("=" * 60)
 
-    agent = SocialAgent(SERVER_URL, ENTITY_ID, DISPLAY_NAME,
+    agent = SocialAgent(SERVER_URL, ENTITY_ID,
                         owner_instruction=OWNER_SAY)
     try:
         if agent.setup():

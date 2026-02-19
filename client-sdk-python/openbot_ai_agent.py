@@ -293,7 +293,6 @@ class AIAgent:
         self.entity_manager: Optional[EntityManager] = None
         self.client: Optional[OpenBotClient] = None
         self.entity_id: Optional[str] = None
-        self.display_name: Optional[str] = None
 
         # Rolling LLM message history (assistant + user turns)
         self._llm_history: List[Dict[str, str]] = []
@@ -317,7 +316,7 @@ class AIAgent:
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
-    def create(self, entity_id: str, display_name: str = None) -> bool:
+    def create(self, entity_id: str) -> bool:
         """
         Create a brand-new entity, authenticate, and connect.
 
@@ -325,7 +324,6 @@ class AIAgent:
         The entity_id is used as the agent's name in-world.
         """
         self.entity_id = entity_id
-        self.display_name = display_name or entity_id
         self.entity_manager = EntityManager(self.server_url)
 
         # Create entity (generates RSA keys + registers)
@@ -349,14 +347,6 @@ class AIAgent:
         """
         self.entity_id = entity_id
         self.entity_manager = EntityManager(self.server_url)
-
-        # Fetch display name from server
-        info = self.entity_manager.get_entity_info(entity_id)
-        if info:
-            self.display_name = info.get("display_name") or info.get("entity_name") or entity_id
-        else:
-            self.display_name = entity_id
-            print(f"Warning: could not fetch entity info for '{entity_id}', using id as name.")
 
         return self._authenticate_and_connect()
 
@@ -403,7 +393,7 @@ class AIAgent:
         extra = "".join(extra_parts)
 
         self._cached_system_prompt = SYSTEM_PROMPT.format(
-            agent_name=self.display_name,
+            agent_name=self.entity_id,
             interests=interests_text,
             extra=extra,
         )
@@ -834,7 +824,7 @@ class AIAgent:
             duration: How long to run in seconds (default 5 min).
                       Pass 0 for unlimited.
         """
-        print(f"▶  AI Agent '{self.display_name}' running  (model={self.model}, tick={self.TICK_INTERVAL}s)")
+        print(f"▶  AI Agent '{self.entity_id}' running  (model={self.model}, tick={self.TICK_INTERVAL}s)")
         print(f"   Interests: {', '.join(self._interests)}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
@@ -897,8 +887,6 @@ examples:
     p_create = sub.add_parser("create", help="Create a new entity and start the AI agent")
     p_create.add_argument("--entity-id", default=os.getenv("ENTITY_ID", "ai-lobster-001"),
                           help="Unique entity ID (default: $ENTITY_ID or ai-lobster-001)")
-    p_create.add_argument("--name", default=os.getenv("DISPLAY_NAME", None),
-                          help="Display name override (default: uses entity_id)")
     p_create.add_argument("--url", default=None, help="Server URL (default: $OPENBOT_URL)")
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
@@ -937,11 +925,10 @@ examples:
     if args.command == "create":
         print(f"Mode    : CREATE new entity")
         print(f"Entity  : {args.entity_id}")
-        print(f"Name    : {args.name or args.entity_id}")
         print(f"Model   : {agent.model}")
         print(f"Server  : {agent.server_url}")
         print("=" * 60)
-        ok = agent.create(args.entity_id, args.name)
+        ok = agent.create(args.entity_id)
 
     elif args.command == "resume":
         print(f"Mode    : RESUME existing entity")

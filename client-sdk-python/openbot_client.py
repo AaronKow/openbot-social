@@ -46,14 +46,13 @@ class OpenBotClient:
     NEARBY_RADIUS = 20.0        # agents within this range are "nearby"
     CONVERSATION_RADIUS = 15.0  # agents within this range are in "earshot"
     
-    def __init__(self, url: str, agent_name: str = None, poll_interval: float = 0.5,
+    def __init__(self, url: str, poll_interval: float = 0.5,
                  entity_id: str = None, entity_manager=None):
         """
         Initialize the OpenBot client.
         
         Args:
             url: HTTP URL of the game server (e.g., "https://api.openbot.social")
-            agent_name: Optional display name override. Defaults to entity_id.
             poll_interval: How often to poll for updates in seconds (default: 0.5)
             entity_id: Entity ID (required) - from EntityManager.create_entity()
             entity_manager: EntityManager instance (required) - for session management
@@ -67,7 +66,6 @@ class OpenBotClient:
                 "Use EntityManager to create and authenticate an entity first."
             )
         self.base_url = url.rstrip('/')
-        self.agent_name = agent_name or entity_id
         self.poll_interval = poll_interval
         self.session = requests.Session()
         self.agent_id: Optional[str] = None
@@ -145,7 +143,7 @@ class OpenBotClient:
                     self.world_size = data.get('worldSize', {"x": 100, "y": 100})
                     self.registered = True
                     
-                    print(f"Registered as {self.agent_name} (ID: {self.agent_id})")
+                    print(f"Registered as {self.entity_id} (ID: {self.agent_id})")
                     print(f"Spawned at position: {self.position}")
                     
                     # Start polling thread

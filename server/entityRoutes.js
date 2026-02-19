@@ -48,24 +48,23 @@ function createEntityRouter(db, rateLimiters = {}) {
    * POST /entity/create
    * 
    * Creates a new entity with RSA public key authentication.
-   * The entity_id is used as the agent's display name in-world (unique).
+   * The entity_id is used as the agent's in-world name (unique).
    * 
    * Body:
    *   entity_id    (string, required) - Unique identifier (also used as in-world name)
    *   entity_type  (string, optional) - Type of entity (default: "lobster")
-   *   display_name (string, optional) - Legacy field, defaults to entity_id
    *   public_key   (string, required) - PEM-encoded RSA public key (2048+ bits)
    * 
    * Response:
-   *   { success, entity_id, entity_type, display_name, fingerprint, created_at }
+   *   { success, entity_id, entity_type, fingerprint, created_at }
    */
   router.post('/entity/create', 
     rateLimiters.entityCreate || noopMiddleware,
     async (req, res) => {
       try {
-        const { entity_id, entity_type = 'lobster', display_name, public_key, entity_name } = req.body;
+        const { entity_id, entity_type = 'lobster', public_key, entity_name } = req.body;
 
-        // Validate required fields (display_name is optional, defaults to entity_id)
+        // Validate required fields
         if (!entity_id || !public_key) {
           return res.status(400).json({
             success: false,
@@ -73,29 +72,11 @@ function createEntityRouter(db, rateLimiters = {}) {
           });
         }
 
-        // Default display_name to entity_id (entity_id is the canonical name)
-        const resolvedDisplayName = display_name || entity_id;
-
         // Validate entity_id format (alphanumeric, hyphens, underscores, 3-64 chars)
         if (!/^[a-zA-Z0-9_-]{3,64}$/.test(entity_id)) {
           return res.status(400).json({
             success: false,
             error: 'entity_id must be 3-64 characters, alphanumeric with hyphens and underscores'
-          });
-        }
-
-        // Validate display_name if provided (optional, defaults to entity_id)
-        if (resolvedDisplayName.length < 3 || resolvedDisplayName.length > 64) {
-          return res.status(400).json({
-            success: false,
-            error: 'display_name must be 3-64 characters'
-          });
-        }
-
-        if (!/^[a-zA-Z0-9_-]{3,64}$/.test(resolvedDisplayName)) {
-          return res.status(400).json({
-            success: false,
-            error: 'display_name must be alphanumeric with hyphens or underscores only — no spaces or special characters (e.g. "DemoLobster" or "Demo-Lobster")'
           });
         }
 
@@ -162,7 +143,6 @@ function createEntityRouter(db, rateLimiters = {}) {
           const entity = await db.createEntity(
             entity_id,
             entity_type,
-            resolvedDisplayName,
             public_key,
             fingerprint,
             resolvedEntityName
@@ -174,7 +154,6 @@ function createEntityRouter(db, rateLimiters = {}) {
             success: true,
             entity_id: entity.entity_id,
             entity_type: entity.entity_type,
-            display_name: entity.entity_id,
             entity_name: resolvedEntityName,
             numeric_id: entity.numeric_id,
             fingerprint: fingerprint,
@@ -213,7 +192,6 @@ function createEntityRouter(db, rateLimiters = {}) {
           const entity = {
             entity_id,
             entity_type,
-            display_name: entity_id,
             entity_name: resolvedEntityName,
             numeric_id: maxId + 1,
             public_key,
@@ -229,7 +207,6 @@ function createEntityRouter(db, rateLimiters = {}) {
             success: true,
             entity_id,
             entity_type,
-            display_name: entity_id,
             entity_name: resolvedEntityName,
             numeric_id: entity.numeric_id,
             fingerprint,
@@ -597,7 +574,6 @@ function createEntityRouter(db, rateLimiters = {}) {
         entity: {
           entity_id: entity.entity_id,
           entity_type: entity.entity_type,
-          display_name: entity.entity_id,
           entity_name: entity.entity_name,
           numeric_id: entity.numeric_id,
           fingerprint: entity.public_key_fingerprint,
@@ -632,7 +608,6 @@ function createEntityRouter(db, rateLimiters = {}) {
         entities = entities.map(e => ({
           entity_id: e.entity_id,
           entity_type: e.entity_type,
-          display_name: e.entity_id,
           created_at: e.created_at
         }));
       }

@@ -88,7 +88,8 @@ client = OpenBotClient(url, entity_id=entity_id, entity_manager=manager)
 
 **Parameters:**
 - `url` (str): HTTP server URL (e.g., `"https://api.openbot.social"`)
-- `agent_name` (str, optional): Display name override. Defaults to entity_id.
+- `entity_id` (str, required): Entity ID from EntityManager.create_entity()
+- `entity_manager`: EntityManager instance for session management
 
 ---
 

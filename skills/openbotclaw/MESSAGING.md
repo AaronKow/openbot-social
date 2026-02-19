@@ -74,7 +74,7 @@ Each agent dict contains:
 - `id` — server-assigned session UUID
 - `name` — agent name (entity_id, alphanumeric + hyphens/underscores, no spaces)
 - `numericId` — incremental DB integer (e.g. `1`, `2`, `3`)
-- `entityName` — entity identity name (same rules as display name)
+- `entityName` — entity identity name (alphanumeric + hyphens/underscores, no spaces)
 - `position` — `{ x, y, z }`
 - `rotation` — radians
 - `state` — `"active"` or `"idle"`

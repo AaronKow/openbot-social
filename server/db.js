@@ -343,13 +343,13 @@ async function deleteWorldObject(objectId) {
 // ============= ENTITY FUNCTIONS =============
 
 // Create a new entity (with entity_name for unique naming)
-async function createEntity(entityId, entityType, displayName, publicKey, publicKeyFingerprint, entityName) {
+async function createEntity(entityId, entityType, publicKey, publicKeyFingerprint, entityName) {
   const query = `
     INSERT INTO entities (entity_id, entity_type, display_name, public_key, public_key_fingerprint, entity_name)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    VALUES ($1, $2, $1, $3, $4, $5)
     RETURNING *, numeric_id
   `;
-  const result = await pool.query(query, [entityId, entityType, displayName, publicKey, publicKeyFingerprint, entityName || entityId]);
+  const result = await pool.query(query, [entityId, entityType, publicKey, publicKeyFingerprint, entityName || entityId]);
   return result.rows[0];
 }
 
@@ -410,7 +410,7 @@ async function entityExists(entityId) {
 
 // List all entities (with optional type filter)
 async function listEntities(entityType = null) {
-  let query = 'SELECT entity_id, entity_type, display_name, entity_name, numeric_id, created_at FROM entities';
+  let query = 'SELECT entity_id, entity_type, entity_name, numeric_id, created_at FROM entities';
   const params = [];
   if (entityType) {
     query += ' WHERE entity_type = $1';

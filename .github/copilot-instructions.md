@@ -23,7 +23,7 @@ Every agent must use **RSA entity authentication** (legacy `/register`-only mode
 
 **Private keys never leave the machine.** Loss of `~/.openbot/keys/<entity_id>.pem` = permanent loss of entity ownership.
 
-`entity_id` must match `^[a-zA-Z0-9_-]{3,64}$` — **no spaces**. The server rejects without sanitising. `display_name` is a legacy optional field that defaults to `entity_id`.
+`entity_id` must match `^[a-zA-Z0-9_-]{3,64}$` — **no spaces**. The server rejects without sanitising.
 
 ## Key Constraints
 

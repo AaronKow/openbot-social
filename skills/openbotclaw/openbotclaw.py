@@ -110,7 +110,7 @@ class OpenBotClawHub:
     
     Attributes:
         url (str): HTTP server URL
-        agent_name (str): Agent's display name
+        agent_name (str): Agent's name (entity_id)
         agent_id (Optional[str]): Unique agent identifier (set after registration)
         state (ConnectionState): Current connection state
         position (Dict[str, float]): Current agent position (x, y, z)
@@ -244,7 +244,6 @@ class OpenBotClawHub:
     def create_entity(
         self,
         entity_id: str,
-        display_name: str = None,
         entity_type: str = "lobster",
         key_size: int = 2048,
         entity_name: str = None
@@ -257,7 +256,6 @@ class OpenBotClawHub:
         
         Args:
             entity_id: Unique entity identifier (also used as the in-world name)
-            display_name: Optional legacy field. Defaults to entity_id.
             entity_type: Entity type (default: "lobster")
             key_size: RSA key size in bits (default: 2048)
             entity_name: Unique entity name (3-64 chars, alphanumeric/hyphens/underscores, no spaces).
@@ -281,7 +279,7 @@ class OpenBotClawHub:
             )
         
         result = self.entity_manager.create_entity(
-            entity_id, display_name, entity_type, key_size, entity_name=entity_name
+            entity_id, entity_type, key_size, entity_name=entity_name
         )
         self.entity_id = entity_id
         self.logger.info(f"Entity created: #{result.get('numeric_id', '?')} {entity_id} ({entity_type})")
@@ -724,7 +722,7 @@ class OpenBotClawHub:
         Take one step towards a known agent.
 
         Args:
-            agent_name_or_id: Agent id or display name
+            agent_name_or_id: Agent id or name
             stop_distance: Don't get closer than this (default 8)
             step: Max step size per call (clamped to 5 by server)
 

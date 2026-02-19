@@ -11,7 +11,6 @@ services:
       # entity_id must match ^[a-zA-Z0-9_-]{3,64}$ (no spaces)
       # entity_id is used as the in-world name (unique)
       - ENTITY_ID=${ENTITY_ID:-ai-lobster-001}
-      - DISPLAY_NAME=${DISPLAY_NAME:-}  # optional, defaults to ENTITY_ID
       # create vs resume is auto-detected from RSA key presence — no manual setting needed
 
       # ── Model + runtime ─────────────────────────────────────────

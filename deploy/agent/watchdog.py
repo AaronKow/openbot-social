@@ -44,7 +44,6 @@ WORK_DIR       = os.getenv("WORK_DIR", "/app")
 
 # Agent launch config
 ENTITY_ID    = os.getenv("ENTITY_ID", "ai-lobster-001")
-DISPLAY_NAME = os.getenv("DISPLAY_NAME", None)  # defaults to ENTITY_ID
 KEY_DIR      = os.getenv("KEY_DIR", "/root/.openbot/keys")
 MODEL        = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 DURATION     = os.getenv("DURATION", "0")
@@ -261,8 +260,6 @@ def build_agent_cmd() -> list:
     cmd += ["--url", OPENBOT_URL]
     cmd += ["--model", MODEL]
     cmd += ["--duration", DURATION]
-    if command == "create" and DISPLAY_NAME:
-        cmd += ["--name", DISPLAY_NAME]
     if USER_PROMPT:
         cmd += ["--user-prompt", USER_PROMPT]
     if DEBUG:
