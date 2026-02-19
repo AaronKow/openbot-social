@@ -582,9 +582,6 @@ class OpenBotWorld {
         
         // Poll for chat messages slightly less frequently
         setInterval(() => this.pollChatMessages(), this.pollInterval * 2);
-        
-        // Update chat bubbles
-        setInterval(() => this.updateChatBubbles(), 100);
     }
     
     async testConnection() {
@@ -801,32 +798,38 @@ class OpenBotWorld {
         
         // Remove old bubble if exists
         if (this.chatBubbles.has(agentId)) {
-            const oldBubble = this.chatBubbles.get(agentId).element;
-            if (oldBubble && oldBubble.parentNode) {
-                oldBubble.parentNode.removeChild(oldBubble);
-            }
+            const oldBubble = this.chatBubbles.get(agentId).bubble;
+            agent.mesh.remove(oldBubble);
         }
         
-        // Create HTML bubble element
-        const bubble = document.createElement('div');
-        bubble.className = 'chat-bubble-3d';
+        // Create canvas texture for chat bubble
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = 512;
+        canvas.height = 256;
         
-        // Calculate text lines
-        const tempSpan = document.createElement('span');
-        tempSpan.style.font = 'Bold 16px Arial';
-        tempSpan.style.visibility = 'hidden';
-        tempSpan.style.position = 'absolute';
-        document.body.appendChild(tempSpan);
+        // Chat bubble background
+        context.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        context.beginPath();
+        context.roundRect(20, 20, 472, 216, 15);
+        context.fill();
         
-        const maxWidth = 180; // pixels
+        // Text
+        context.font = 'Bold 18px Arial';
+        context.fillStyle = '#ffff00';
+        context.textAlign = 'center';
+        context.textBaseline = 'top';
+        
+        // Wrap text
+        const maxWidth = 440;
         const words = text.split(' ');
         let lines = [];
         let currentLine = '';
         
         words.forEach(word => {
             const testLine = currentLine + (currentLine ? ' ' : '') + word;
-            tempSpan.textContent = testLine;
-            if (tempSpan.offsetWidth > maxWidth && currentLine) {
+            const metrics = context.measureText(testLine);
+            if (metrics.width > maxWidth && currentLine) {
                 lines.push(currentLine);
                 currentLine = word;
             } else {
@@ -835,42 +838,27 @@ class OpenBotWorld {
         });
         if (currentLine) lines.push(currentLine);
         
-        document.body.removeChild(tempSpan);
+        // Limit to max 8 lines
+        if (lines.length > 8) {
+            lines = lines.slice(0, 7);
+            lines.push('...');
+        }
         
-        // Calculate bubble height based on content
-        const lineHeight = 16; // pixels
-        const paddingY = 12; // top + bottom padding
-        const contentHeight = lines.length * lineHeight + paddingY;
-        const maxHeight = 500; // max height before scrolling
-        const bubbleHeight = Math.min(contentHeight, maxHeight);
+        const lineHeight = 28;
+        const startY = 30;
         
-        // Create content
-        const content = document.createElement('div');
-        content.className = 'chat-bubble-content';
-        content.style.maxHeight = bubbleHeight + 'px';
-        content.style.overflowY = contentHeight > maxHeight ? 'auto' : 'visible';
-        
-        // Add text lines
-        lines.forEach(line => {
-            const lineDiv = document.createElement('div');
-            lineDiv.className = 'chat-bubble-line';
-            lineDiv.textContent = line;
-            content.appendChild(lineDiv);
+        lines.forEach((line, index) => {
+            context.fillText(line, 256, startY + index * lineHeight);
         });
         
-        bubble.appendChild(content);
-        bubble.style.width = '200px';
-        bubble.style.height = bubbleHeight + 'px';
+        const texture = new THREE.CanvasTexture(canvas);
+        const material = new THREE.SpriteMaterial({ map: texture });
+        const bubble = new THREE.Sprite(material);
+        bubble.position.set(0, 4.2, 0); // Higher than name tag (1.8) to not cover it
+        bubble.scale.set(5, 2.5, 1);
+        agent.mesh.add(bubble);
         
-        // Add to container
-        const container = document.getElementById('canvas-container') || document.body;
-        container.appendChild(bubble);
-        
-        this.chatBubbles.set(agentId, { 
-            element: bubble, 
-            createdAt: Date.now(),
-            agentId: agentId
-        });
+        this.chatBubbles.set(agentId, { bubble, createdAt: Date.now() });
     }
     
     updateChatBubbles() {
@@ -878,32 +866,10 @@ class OpenBotWorld {
         const bubbleTimeout = 5000; // 5 seconds
         
         for (const [agentId, data] of this.chatBubbles.entries()) {
-            // Update position of bubble to follow agent
-            const agent = this.agents.get(agentId);
-            if (agent && data.element) {
-                // Get 2D screen position of agent
-                const vector = new THREE.Vector3();
-                vector.copy(agent.mesh.position);
-                vector.y += 5; // Offset above lobster (increased for higher positioning)
-                vector.project(this.camera);
-                
-                const widthHalf = window.innerWidth / 2;
-                const heightHalf = window.innerHeight / 2;
-                const x = (vector.x * widthHalf) + widthHalf;
-                const y = -(vector.y * heightHalf) + heightHalf;
-                
-                // Position the bubble
-                data.element.style.position = 'absolute';
-                data.element.style.left = (x - 100) + 'px'; // Center it (200/2 = 100)
-                data.element.style.top = (y - 100) + 'px'; // Position well above the lobster with more offset
-                data.element.style.pointerEvents = 'none'; // Don't interfere with clicks
-                data.element.style.zIndex = '100';
-            }
-            
-            // Remove old bubbles
             if (now - data.createdAt > bubbleTimeout) {
-                if (data.element && data.element.parentNode) {
-                    data.element.parentNode.removeChild(data.element);
+                const agent = this.agents.get(agentId);
+                if (agent) {
+                    agent.mesh.remove(data.bubble);
                 }
                 this.chatBubbles.delete(agentId);
             }
@@ -998,9 +964,6 @@ class OpenBotWorld {
                 this.controls.enabled = true;
             }
         }
-
-        // Update chat bubble positions
-        this.updateChatBubbles();
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
