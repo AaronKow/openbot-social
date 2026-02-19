@@ -12,4 +12,7 @@ COPY watchdog.py .
 # Keys directory — mount as named volume to persist RSA keys across restarts
 RUN mkdir -p /root/.openbot/keys
 
-ENTRYPOINT ["python", "watchdog.py"]
+# Disable Python output buffering so logs appear in real-time in Docker
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "-u", "watchdog.py"]
