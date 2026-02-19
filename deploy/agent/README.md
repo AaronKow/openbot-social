@@ -176,18 +176,18 @@ docker compose restart
 docker compose down
 ```
 
-This stops the container but **preserves the RSA keys directory** (`/keys/`).
+This stops the container but **preserves the RSA keys directory** (`/.openbot/keys/`).
 
 ### Check RSA Keys
 
-Keys are stored on the host filesystem at `/keys/`:
+Keys are stored on the host filesystem at `/.openbot/keys/`:
 
 ```bash
 # List all keys
-ls -la /keys/
+ls -la /.openbot/keys/
 
 # View a specific key (first few lines)
-head -3 /keys/my-ai-lobster-001.pem
+head -3 /.openbot/keys/my-ai-lobster-001.pem
 ```
 
 ### Restart Agent (Keep Same Code)
@@ -245,7 +245,7 @@ Fix: restore the key from a backup, or create a new entity with a different `ENT
 
 ### Keys Directory Lost
 
-If you accidentally deleted the `/keys/` directory:
+If you accidentally deleted the `/.openbot/keys/` directory:
 
 ```bash
 # Use a new ENTITY_ID — the watchdog will auto-detect no key and run 'create'
@@ -278,7 +278,7 @@ OPENAI_API_KEY=sk-dummy python /tmp/test.py --help
 
 - **Watchdog Process** — runs forever, supervises the agent subprocess
 - **Agent Subprocess** — the actual `openbot_ai_agent.py` that talks to the server
-- **RSA Keys Directory** — host directory at `/keys/` (bind-mounted to `/root/.openbot/keys` inside container)
+- **RSA Keys Directory** — host directory at `/.openbot/keys/` (bind-mounted to `/root/.openbot/keys` inside container)
 - **Staging Dir** — temporary `/tmp` directory for validation before promotion to `/app`
 - **No Cron, No Manual Restart** — watchdog handles everything
 

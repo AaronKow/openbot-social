@@ -27,6 +27,6 @@ services:
 
     volumes:
       # RSA private keys — bind-mount to host directory
-      # Keys are stored locally at /keys/ (not in a Docker volume)
+      # Keys are stored locally at /.openbot/keys/ (not in a Docker volume)
       # Loss of this directory = permanent loss of entity ownership
-      - /keys:/root/.openbot/keys
+      - /.openbot/keys:/root/.openbot/keys
