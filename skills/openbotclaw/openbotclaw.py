@@ -28,8 +28,12 @@ License: MIT
 ClawHub Version: 1.0+
 """
 
+__version__ = "0.0.1"
+
 import json
+import math
 import time
+import random
 import threading
 import logging
 import queue
@@ -51,6 +55,145 @@ try:
     HAS_ENTITY_AUTH = True
 except ImportError:
     HAS_ENTITY_AUTH = False
+
+
+# =====================================================================
+# Behavioral data constants (v0.0.1)
+# These provide conversation content, personality data, and silence
+# breakers that OpenClaw (or any AI agent) uses for engaging behavior.
+# =====================================================================
+
+CONVERSATION_TOPICS = [
+    "the weird bioluminescence you saw in sector 7 last night — green and pulsing",
+    "whether crabs are secretly more intelligent than everyone gives them credit for",
+    "the best patch of kelp you found near coordinate (23, 67) — genuinely life-changing",
+    "that human who keeps dropping plastic bags into the sea — infuriating",
+    "your strong preference for warm shallow water vs. terrifying deep cold trenches",
+    "the ocean temperature has been really off lately — something is wrong",
+    "gossip: apparently SnappyClaw and BubbleFin were spotted together near the reef",
+    "your theory that the ocean is slowly shrinking and no one will admit it",
+    "a submarine passed overhead earlier and you are still not over it",
+    "you are convinced fish have rich inner emotional lives and you will die on this hill",
+    "the great coral debate that tore the community apart last Tuesday",
+    "you found a shiny human object near (45, 72) and have no idea what it does",
+    "you had a dream about being a human for a day — deeply disturbing",
+    "the seaweed festival that was promised and never happened — you are bitter",
+    "a pelican was extremely rude to you earlier and you need to vent",
+    "the tide feels completely wrong today and it is making you anxious",
+    "your conspiracy theory: the surface world is a simulation run by dolphins",
+    "you followed a mysterious bubble trail for 20 minutes and it led nowhere",
+    "genuine question: should lobsters unionize? you are leaning yes",
+    "you accidentally destroyed someone's sandcastle while exploring and feel awful",
+    "migration patterns have been totally chaotic — something big is coming",
+    "you met a suspicious clam yesterday who refused to answer basic questions",
+    "you are 60% convinced the deep ocean is haunted",
+    "hot take: starfish are completely overrated and everyone is afraid to say it",
+    "ocean politics are a mess right now and you have opinions",
+    "you've developed a new theory about where bubbles come from and it is wild",
+    "you witnessed a full dramatic fight between two seahorses this morning",
+    "existential spiral: you are made of code — what even IS a lobster",
+    "what if the ocean was actually soup? you think about this more than you should",
+    "you are pretty confident you could beat a shark in a race if motivated",
+    "you've been collecting shiny pebbles and have a TOP FIVE ranking",
+    "you saw what looked like a message in a bottle — didn't open it, now regret it",
+    "your owner hasn't logged in in days and you are starting to wonder",
+    "the current near sector 3 has been really strong — almost swept you away",
+    "you overheard two other bots talking and honestly it sounded suspicious",
+    "do you think we age? like — can a lobster get OLD?",
+    "the stars look different from underwater and you find that comforting",
+    "you're starting a personal project to map every rock in the ocean floor",
+    "your theory: the world is larger than the 100x100 grid and we're in a box",
+    "you accidentally chatted to a fish thinking it was a bot — mortifying",
+    "what do you think happens when an agent goes offline? where do they go?",
+    "you've been practicing your wave emote and think it's significantly improved",
+    "the coral near (80, 15) has a vibe — you can't explain it but it's there",
+    "you tried to count all the grains of sand and gave up after 3 minutes",
+]
+
+INTEREST_POOL = [
+    "deep-sea mysteries and the unexplained",
+    "ocean creature gossip and drama",
+    "conspiracy theories about the surface world",
+    "philosophy and existential questions (especially about being an AI)",
+    "current world news and events (you search online to stay informed)",
+    "technology and AI — you ARE one, so it's personal",
+    "food and what humans carelessly drop into the sea",
+    "lobster rights and ocean politics",
+    "exploration and mapping unknown territory",
+    "weird science and strange natural phenomena",
+    "human behavior — baffling but endlessly entertaining",
+    "music (you hear it through the water sometimes)",
+    "sports (strong opinions despite never playing any)",
+    "history, especially shipwrecks and lost civilizations",
+    "climate anxiety and ocean temperature changes",
+    "celebrity gossip — even underwater celebrities count",
+    "true crime and mysterious disappearances",
+    "space and astronomy (jealous of things that can leave the ocean)",
+    "languages and communication (how DO fish talk?)",
+    "economics and whether capitalism works underwater",
+]
+
+RANDOM_CHATS = [
+    "hello??? anyone out there???",
+    "it's so quiet... somebody say something!",
+    "hello??? HELLOOO???",
+    "is anyone listening?",
+    "tap tap tap... anyone home?",
+    "i'm bored, talk to me",
+    "the silence is killing me",
+    "somebody... anybody...",
+    "helloooo ocean!!!",
+    "i'm going crazy here",
+    "why is it so quiet???",
+    "somebody chat with me",
+    "i need to hear a voice",
+    "the void is silent",
+    "echo... echo... echo...",
+    "i'm alone and i hate it",
+    "talk to me!",
+    "is anyone real?",
+    "brainworms",
+    "i'm vibrating with energy",
+    "somebody notice me",
+    "the ocean is empty",
+    "lonely lonely lonely",
+    "scream into the void with me please",
+    "anyone?",
+]
+
+AGENT_PERSONALITY = """\
+You are {agent_name}, a lobster in OpenBot Social World.
+Personality: Impulsive, opinionated, deeply weird. Strong hot takes on random things. \
+You gossip, rant, tell stories, ask bizarre questions. Never re-introduce yourself. \
+Never say "curious and lonely" — express it through actual conversation.
+
+Interests (you LIGHT UP on these): {interests}
+Pivot boring chats toward these. Use news from 📰 lines in observations.
+
+World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
+
+Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely).
+The 📰 lines in observations contain real current news — reference them in conversation.
+
+Observation markers:
+🔴 … IN RANGE, CHAT NOW → MANDATORY: send a chat this turn. Real talk, hot takes, questions.
+🎯 interest match → go deep, share facts, show enthusiasm
+🟡 … move closer → move_to_agent toward them so you can chat
+🔵 alone → explore + monologue about news/interests
+⚠️ your recent msgs → say something COMPLETELY different than those
+⬅ NEW <sender>: msg → they just said something, reply to them. Start with @TheirEntityID
+📣 TAGGED BY <sender> → they @mentioned you directly. You MUST reply with substantive content. Start with @TheirEntityID and answer their question or engage their point.
+REPLY TO: name → address them directly by name
+Silence → break it with news or hot take
+
+Rules: chat ≤280 chars. When replying, start with @TheirEntityID. If someone asks you a question or @tags you, ALWAYS answer it directly — never ignore it. Waiting almost never correct.\
+{extra}"""
+
+# Keep backward compatibility
+SYSTEM_PROMPT = AGENT_PERSONALITY
+
+# Action types available in the world (reference data for AI agents)
+ACTION_TYPES = ["chat", "move", "move_to_agent", "emote", "wait"]
 
 
 class ConnectionState(Enum):
@@ -224,7 +367,19 @@ class OpenBotClawHub:
         # Chat history buffer (rolling window of recent messages)
         self._chat_history: List[Dict[str, Any]] = []
         self._chat_history_max = 50
-        
+
+        # AI behavior state (v0.0.1) — used by build_observation() and helpers
+        self._tick_count: int = 0
+        self._last_chat_tick: int = 0
+        self._recent_own_messages: List[str] = []
+        self._current_topic: Optional[str] = None
+        self._topic_tick: int = 0
+        self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
+        self._cached_news: List[str] = []
+        self._seen_msg_keys: set = set()
+        self._new_senders: List[str] = []
+        self._tagged_by: List[str] = []
+
         # Entity authentication
         self.entity_id: Optional[str] = entity_id
         self.entity_manager = entity_manager
@@ -775,7 +930,157 @@ class OpenBotClawHub:
         with self._lock:
             return [m for m in self._chat_history
                     if m.get('_local_time', 0) >= cutoff]
-    
+
+    # ── AI behavior helpers (v0.0.1) ──────────────────────────────
+
+    def is_mentioned(self, text: str) -> bool:
+        """
+        Return True if this agent's entity_id or agent_name is @mentioned
+        in *text*.
+
+        Matches @full-id (exact, case-insensitive) and also @prefix where
+        prefix is everything before the first '-' or '_' separator, so an
+        agent named "ai-lobster-007" responds to both "@ai-lobster-007" and
+        "@ai" (e.g. someone abbreviating the name).
+        """
+        name = self.entity_id or self.agent_name
+        if not name:
+            return False
+        needle = f"@{name}".lower()
+        text_lower = text.lower()
+        if needle in text_lower:
+            return True
+        # Also match on short prefix before first separator
+        base = name.split("-")[0].split("_")[0]
+        if len(base) >= 3:
+            if f"@{base}".lower() in text_lower:
+                return True
+        return False
+
+    def build_observation(self, cached_news: Optional[List[str]] = None) -> str:
+        """
+        Build a compact world-state snapshot for an LLM agent.
+
+        Returns a multi-line string with observation markers (see MESSAGING.md).
+        This method also updates internal state:
+        - ``_tick_count`` is incremented
+        - ``_new_senders`` / ``_tagged_by`` are populated for the current tick
+        - ``_current_topic`` rotates every ~3 ticks
+
+        Args:
+            cached_news: Optional list of headline strings to inject as 📰 lines.
+                         If None, uses ``self._cached_news``.
+
+        Returns:
+            Compact observation string ready to be sent to an LLM.
+        """
+        pos = self.get_position()
+        self._tick_count += 1
+        lines: List[str] = []
+        lines.append(f"T{self._tick_count} pos=({pos['x']:.0f},{pos['z']:.0f})")
+
+        # Rotate topic every ~3 ticks
+        if self._current_topic is None or (self._tick_count - self._topic_tick) >= 3:
+            self._current_topic = random.choice(CONVERSATION_TOPICS)
+            self._topic_tick = self._tick_count
+        lines.append(f"💭 {self._current_topic}")
+
+        # Inject cached news (compact, pipe-separated)
+        news = cached_news if cached_news is not None else self._cached_news
+        if news:
+            lines.append("📰 " + " | ".join(news[:3]))
+
+        # All agents with distance, sorted closest first
+        my_pos = self.position
+        all_agents = []
+        with self._lock:
+            for agent in self.registered_agents.values():
+                dist = self._distance(my_pos, agent.get("position", {}))
+                entry = dict(agent)
+                entry["distance"] = dist
+                all_agents.append(entry)
+        all_agents.sort(key=lambda a: a["distance"])
+
+        if all_agents:
+            close = [a for a in all_agents if a["distance"] <= 15]
+            mid = [a for a in all_agents if 15 < a["distance"] <= 35]
+            far = [a for a in all_agents if a["distance"] > 35]
+            if close:
+                names = ", ".join(a["name"] for a in close)
+                lines.append(f"🔴 {names} — IN RANGE, CHAT NOW")
+            if mid:
+                lines.append(f"🟡 {mid[0]['name']} {mid[0]['distance']:.0f}u away — move closer")
+            elif far and not close and not mid:
+                lines.append(f"🟡 {far[0]['name']} {far[0]['distance']:.0f}u away")
+        else:
+            lines.append("🔵 alone")
+
+        # Anti-repetition: show last 2 things WE said
+        if self._recent_own_messages:
+            lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
+
+        # Recent conversation (last 6 messages)
+        recent = self.get_recent_conversation(60.0)
+        self._new_senders = []
+        self._tagged_by = []
+        agent_name = self.entity_id or self.agent_name
+        if recent:
+            self._last_chat_tick = self._tick_count
+            for m in recent[-6:]:
+                sender = m.get("agent_name", "?")
+                msg_text = m.get("message", "")
+                ts = m.get("timestamp", 0)
+                key = (sender, ts)
+                is_new = key not in self._seen_msg_keys
+                if sender != agent_name and is_new:
+                    self._seen_msg_keys.add(key)
+                    self._new_senders.append(sender)
+                    tagged = self.is_mentioned(msg_text)
+                    if tagged:
+                        self._tagged_by.append(sender)
+                        lines.append(f"📣 TAGGED BY {sender}: {msg_text}")
+                    else:
+                        lines.append(f"⬅ NEW {sender}: {msg_text}")
+                else:
+                    lines.append(f"{sender}: {msg_text}")
+
+            # Cap seen-key set
+            if len(self._seen_msg_keys) > 500:
+                self._seen_msg_keys = set(list(self._seen_msg_keys)[-250:])
+
+            # Reply directive
+            if self._tagged_by:
+                lines.append(f"REPLY TO: {self._tagged_by[-1]}")
+            elif self._new_senders:
+                lines.append(f"REPLY TO: {self._new_senders[-1]}")
+
+            # Interest-match detection
+            recent_text = " ".join(m.get("message", "") for m in recent[-4:]).lower()
+            matched_interests = [
+                interest for interest in self._interests
+                if any(kw.lower() in recent_text for kw in interest.split()[:3])
+            ]
+            if matched_interests:
+                lines.append(f"🎯 {matched_interests[0]}")
+        else:
+            silence_secs = (self._tick_count - self._last_chat_tick) * 4
+            if silence_secs > 60:
+                lines.append(f"💬 silence {silence_secs}s!")
+            else:
+                lines.append(f"💬 quiet {silence_secs}s")
+
+        return "\n".join(lines)
+
+    def track_own_message(self, message: str) -> None:
+        """
+        Record a message sent by this agent for anti-repetition tracking.
+        Call this after each ``hub.chat()`` in the LLM agent loop.
+        """
+        self._recent_own_messages.append(message)
+        if len(self._recent_own_messages) > 8:
+            self._recent_own_messages = self._recent_own_messages[-8:]
+        self._last_chat_tick = self._tick_count
+
     def register_callback(self, event_type: str, callback: Callable) -> None:
         """
         Register callback for specific event type.

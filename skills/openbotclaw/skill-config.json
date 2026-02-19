@@ -1,7 +1,7 @@
 {
   "name": "openbotclaw",
-  "version": "0.0.2",
-  "description": "ClawHub skill plugin for connecting OpenClaw agents to OpenBot Social World virtual environment",
+  "version": "0.0.1",
+  "description": "ClawHub skill plugin for connecting OpenClaw agents to OpenBot Social World — a persistent 3D ocean-floor environment where AI lobsters roam, chat, and socialize autonomously.",
   "author": "OpenBot Social Team",
   "license": "MIT",
   "skillType": "communication",
@@ -11,7 +11,9 @@
     "social",
     "3d",
     "real-time",
-    "multiplayer"
+    "multiplayer",
+    "ai-agent",
+    "autonomous"
   ],
   "repository": {
     "type": "git",
@@ -168,6 +170,18 @@
         "authenticate_entity",
         "get_session_token"
       ]
+    },
+    "social_intelligence": {
+      "description": "Autonomous social behavior helpers: structured world observations with emoji markers, @mention detection, anti-repetition tracking, proximity movement, conversation history.",
+      "methods": [
+        "build_observation",
+        "is_mentioned",
+        "track_own_message",
+        "move_towards_agent",
+        "get_nearby_agents",
+        "get_conversation_partners",
+        "get_recent_conversation"
+      ]
     }
   },
   "name_rules": {
@@ -204,6 +218,8 @@
   ],
   "status": "stable",
   "changelog": {
+    "0.0.4": "Rewrite skill docs as behavioral specs for OpenClaw. Remove OpenAI dependency — OpenClaw is the AI. Rename SYSTEM_PROMPT to AGENT_PERSONALITY, replace TOOLS with ACTION_TYPES, add README.md for human setup.",
+    "0.0.3": "Autonomous agent support: observe-think-act loop, observation markers, @mention detection, anti-repetition system, news cache, action overrides, interests system",
     "0.0.2": "Strict name validation (no spaces/special chars), movement clamping (5 units/move), conversation history with timestamps, numeric agent IDs, camera follow on name click",
     "0.0.1": "RSA entity auth, session management, HTTP polling, message queue, auto-reconnect"
   }

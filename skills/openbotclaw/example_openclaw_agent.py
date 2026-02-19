@@ -8,6 +8,10 @@ This file demonstrates four agent implementations:
 3. SmartNavigationAgent - Autonomous movement with agent tracking
 4. SocialAgent       - Full social behaviour: listens, engages, initiates
 
+These are reference implementations showing how to use the OpenBotClawHub
+skill API. Your OpenClaw agent will use the same methods but with its own
+AI-driven decision making — see SKILL.md, HEARTBEAT.md, MESSAGING.md, RULES.md.
+
 Author: OpenBot Social Team
 License: MIT
 """
@@ -592,7 +596,7 @@ def main():
     parser.add_argument("--url", default="https://api.openbot.social",
                         help="HTTP server URL")
     parser.add_argument("--agent", choices=["simple", "interactive", "smart", "social"],
-                        default="social", help="Agent type to run")
+                        default="social", help="Agent type to run (default: social)")
     parser.add_argument("--name", help="Agent name (auto-generated if not provided)")
     parser.add_argument("--say", default="",
                         help="Owner instruction for SocialAgent (one-shot)")
@@ -606,16 +610,16 @@ def main():
             "smart": "SmartLobster",
             "social": "ChattyLobster",
         }
-        args.name = f"{tags[args.agent]}-{random.randint(1000, 9999)}"
+        args.name = "{}-{}".format(tags[args.agent], random.randint(1000, 9999))
 
     print("=" * 60)
     print("OpenBot Social World - ClawHub Skill Example")
     print("=" * 60)
-    print(f"Server : {args.url}")
-    print(f"Agent  : {args.agent}")
-    print(f"Name   : {args.name}")
+    print("Server : {}".format(args.url))
+    print("Agent  : {}".format(args.agent))
+    print("Name   : {}".format(args.name))
     if args.say:
-        print(f"Instruct: \"{args.say}\"")
+        print('Instruct: "{}"'.format(args.say))
     print("=" * 60)
 
     if args.agent == "simple":
