@@ -484,10 +484,12 @@ class OpenBotClawHub:
         session = requests.Session()
         
         # Configure retry strategy
+        # NOTE: 401 and 429 are intentionally excluded — 401 needs re-auth (not retry),
+        # 429 needs a back-off delay (handled in _send), not blind retries.
         retry_strategy = Retry(
             total=3,
             backoff_factor=0.5,
-            status_forcelist=[408, 429, 500, 502, 503, 504],
+            status_forcelist=[408, 500, 502, 503, 504],
             allowed_methods=["GET", "POST", "PUT", "DELETE"]
         )
         
@@ -1477,7 +1479,12 @@ class OpenBotClawHub:
             # Map message types to HTTP endpoints and payloads
             if msg_type == 'register':
                 endpoint = f"{self.url}/spawn"
-                payload = {}  # spawn uses auth header, no body needed
+                # entity_id/name are required — an empty payload causes 401
+                # because the server cannot identify which entity is spawning.
+                payload = {
+                    "name": data.get("name") or self.agent_name or self.entity_id,
+                    "entity_id": self.entity_id or self.agent_name,
+                }
             elif msg_type == 'move':
                 endpoint = f"{self.url}/move"
                 payload = {
@@ -1509,6 +1516,67 @@ class OpenBotClawHub:
                 json=payload,
                 timeout=self.connection_timeout
             )
+
+            # Handle 401 — attempt one token refresh then retry once
+            if response.status_code == 401:
+                self.logger.warning(
+                    f"401 on '{msg_type}' — refreshing token and retrying once."
+                )
+                if self.entity_manager and self.entity_id:
+                    try:
+                        session_data = self.entity_manager.authenticate(self.entity_id)
+                        self._session_token = session_data.get('session_token')
+                        if self._session_token:
+                            self.session.headers.update({
+                                'Authorization': f'Bearer {self._session_token}'
+                            })
+                            response = self.session.post(
+                                endpoint,
+                                json=payload,
+                                timeout=self.connection_timeout
+                            )
+                            if response.status_code == 401:
+                                self.logger.error(
+                                    "401 persists after token refresh — "
+                                    "private key mismatch or entity not found on server."
+                                )
+                                self._trigger_callback("on_error", {
+                                    "error": "401 Unauthorized — re-auth failed",
+                                    "endpoint": endpoint,
+                                })
+                                return False
+                    except Exception as auth_err:
+                        self.logger.error(f"Token refresh failed: {auth_err}")
+                        self._trigger_callback("on_error", {
+                            "error": f"Token refresh failed: {auth_err}"
+                        })
+                        return False
+                else:
+                    self.logger.error(
+                        "401 received but no EntityManager to refresh token. "
+                        "Call authenticate_entity() manually."
+                    )
+                    self._trigger_callback("on_error", {
+                        "error": "401 Unauthorized — no EntityManager for refresh",
+                        "endpoint": endpoint,
+                    })
+                    return False
+
+            # Handle 429 — surface retryAfter clearly, do not auto-retry
+            if response.status_code == 429:
+                try:
+                    retry_after = response.json().get("retryAfter", 5)
+                except Exception:
+                    retry_after = 5
+                self.logger.warning(
+                    f"429 rate limited on '{msg_type}' — wait {retry_after}s before retrying."
+                )
+                self._trigger_callback("on_error", {
+                    "error": "429 Too Many Requests",
+                    "retryAfter": retry_after,
+                })
+                return False
+
             response.raise_for_status()
             
             # Handle response
