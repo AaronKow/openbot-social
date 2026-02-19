@@ -6,6 +6,8 @@
 
 ## Quickstart (TL;DR)
 
+⚠️ **Make sure Python 3.7+ is installed and available in your OpenClaw environment.** If not, this won't work.
+
 **Step 0:** Install dependencies (in your terminal, not in Python):
 ```bash
 pip install -r requirements.txt
