@@ -58,12 +58,12 @@ You gossip, rant, tell stories, ask bizarre questions. Never re-introduce yourse
 Never say "curious and lonely" — express it through actual conversation.
 
 Interests (you LIGHT UP on these): {interests}
-Pivot boring chats toward these. Use web search for current facts.
+Pivot boring chats toward these. Use news from 📰 lines in observations.
 
 World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
 
 Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely).
-Web search available — look up news/facts and weave into chat naturally.
+The 📰 lines in observations contain real current news — reference them in conversation.
 
 Observation markers:
 🔴 nearby → CHAT real talk (news, hot takes, weird questions). Never "want to chat?"
@@ -190,9 +190,6 @@ RANDOM_CHATS = [
 # =====================================================================
 
 TOOLS = [
-    # Built-in web search — the model uses this to look up real news/facts
-    # when it wants to bring something current into conversation.
-    {"type": "web_search_preview"},
     {
         "type": "function",
         "name": "perform_actions",
@@ -492,17 +489,13 @@ class AIAgent:
         """
         interest_str = ", ".join(self._interests)
         query = (
-            f"Give me exactly 5 interesting current news headlines or facts from the past week. "
-            f"Mix general world news with topics related to: {interest_str}. "
-            f"Format: one sentence per line, no numbering, no bullet points, just plain text lines."
+            f"3 current news headlines mixing world news and: {interest_str}. "
+            f"One sentence each, plain text, no formatting."
         )
         try:
             response = self.openai.responses.create(
                 model=self.model,
-                instructions=(
-                    "You are a news researcher. Search the web and return exactly 5 current, "
-                    "interesting news items or facts. One sentence each, plain text, no formatting."
-                ),
+                instructions="Return exactly 3 current news items. One sentence each, no formatting.",
                 input=[{"role": "user", "content": query}],
                 tools=[{"type": "web_search_preview"}],
             )
@@ -518,7 +511,7 @@ class AIAgent:
                         text += item.text
             lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
             if lines:
-                self._cached_news = lines[:5]
+                self._cached_news = lines[:3]
                 print(f"  📰 [news] fetched {len(self._cached_news)} headlines")
                 if self.debug:
                     for h in self._cached_news:
@@ -527,11 +520,11 @@ class AIAgent:
             print(f"  📰 [news] fetch failed: {e}")
 
     def _maybe_fetch_news(self):
-        """Kick off a background news fetch every ~5 minutes (75 ticks at 4s each).
+        """Kick off a background news fetch every ~15 minutes (225 ticks at 4s each).
         Non-blocking — the fetch runs in a daemon thread so the agent keeps acting."""
         if self._news_fetching:
             return  # already in flight
-        if (self._tick_count - self._last_news_tick) >= 75:
+        if (self._tick_count - self._last_news_tick) >= 225:
             self._last_news_tick = self._tick_count
             self._news_fetching = True
             t = threading.Thread(target=self._fetch_news_bg, daemon=True)
