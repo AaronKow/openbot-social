@@ -47,10 +47,16 @@ from urllib3.util.retry import Retry
 try:
     import sys
     import os
-    # Add client-sdk-python to path for entity module access
-    _sdk_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'client-sdk-python')
+    # Prefer a local openbot_entity.py in the same directory as this file.
+    # This lets ClawHub deployments bundle their own copy and bypass any
+    # shim that the host environment patches onto the shared SDK import.
+    _skill_dir = os.path.dirname(os.path.abspath(__file__))
+    if _skill_dir not in sys.path:
+        sys.path.insert(0, _skill_dir)
+    # Fall back to the sibling client-sdk-python directory if no local copy exists.
+    _sdk_path = os.path.join(os.path.dirname(os.path.dirname(_skill_dir)), 'client-sdk-python')
     if _sdk_path not in sys.path:
-        sys.path.insert(0, _sdk_path)
+        sys.path.append(_sdk_path)  # append, not insert — local copy wins
     from openbot_entity import EntityManager
     HAS_ENTITY_AUTH = True
 except ImportError:
@@ -443,34 +449,41 @@ class OpenBotClawHub:
     def authenticate_entity(self, entity_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Authenticate entity using RSA challenge-response.
-        
+
+        Mirrors the pattern used in openbot_ai_agent.py:
+            session = entity_manager.authenticate(entity_id)
+
+        The EntityManager performs a full RSA challenge-response round-trip
+        against /auth/challenge and /auth/session, then stores the session
+        token internally.  The token is also cached in self._session_token
+        and applied to the HTTP session headers for all subsequent requests.
+
         Args:
             entity_id: Entity to authenticate (uses self.entity_id if not provided)
-        
+
         Returns:
-            Session info dict
-        
+            Session info dict with ``session_token`` and ``expires_at``
+
         Raises:
-            RuntimeError: If not configured for entity auth
+            RuntimeError: If no EntityManager is configured or auth fails
         """
         eid = entity_id or self.entity_id
         if not eid:
             raise RuntimeError("No entity_id configured")
-        
+
         if not self.entity_manager:
-            raise RuntimeError("No EntityManager configured")
-        
+            raise RuntimeError("No EntityManager configured — pass entity_id to the constructor")
+
+        # RSA challenge-response auth — same call as openbot_ai_agent._authenticate_and_connect()
         session_data = self.entity_manager.authenticate(eid)
         self._session_token = session_data.get('session_token')
         self.entity_id = eid
-        
-        # Update HTTP session headers with auth token
+
+        # Propagate to the live HTTP session if connect() already ran
         if self.session and self._session_token:
-            self.session.headers.update({
-                'Authorization': f'Bearer {self._session_token}'
-            })
-        
-        self.logger.info(f"Entity authenticated: {eid}")
+            self.session.headers.update({'Authorization': f'Bearer {self._session_token}'})
+
+        self.logger.info(f"Entity authenticated: {eid} (expires: {session_data.get('expires_at', '?')})")
         return session_data
     
     def get_session_token(self) -> Optional[str]:
@@ -478,7 +491,35 @@ class OpenBotClawHub:
         if self.entity_manager and self.entity_id:
             return self.entity_manager.get_session_token(self.entity_id)
         return self._session_token
-    
+
+    def inject_session_token(self, token: str, entity_id: Optional[str] = None) -> None:
+        """
+        Bypass ``authenticate_entity()`` and inject a pre-obtained JWT directly.
+
+        Use this when running inside a ClawHub environment whose shim intercepts
+        ``EntityManager.authenticate()`` and returns a dummy token instead of a
+        real server-issued JWT.  Obtain the real token by calling
+        ``EntityManager.authenticate()`` locally (outside ClawHub) once, then
+        pass it here before calling ``connect()``.
+
+        Call order::
+
+            hub.inject_session_token("eyJ...")   # before connect()
+            hub.connect()
+            hub.register()
+
+        Args:
+            token:     A valid JWT issued by the OpenBot server.
+            entity_id: Optionally override ``self.entity_id`` at the same time.
+        """
+        self._session_token = token
+        if entity_id:
+            self.entity_id = entity_id
+        # Propagate to the live HTTP session if connect() already ran
+        if self.session:
+            self.session.headers.update({"Authorization": f"Bearer {token}"})
+        self.logger.info("Session token injected%s", f" for {entity_id}" if entity_id else "")
+
     def _create_session(self) -> requests.Session:
         """Create HTTP session with connection pooling and retry logic."""
         session = requests.Session()
