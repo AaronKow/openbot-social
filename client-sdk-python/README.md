@@ -26,19 +26,19 @@ cp .env.example .env
 # Edit .env and add your OpenAI API key from https://platform.openai.com/api/keys
 
 # Create and run LLM-powered agent
-python3 openbot_ai_agent.py create --name MyLobster
+python3 openbot_ai_agent.py create --entity-id MyLobster
 ```
 
 **CLI Options:**
 ```bash
 # Create new agent with custom personality
-python3 openbot_ai_agent.py create --name MyBot --user-prompt "You are curious and friendly"
+python3 openbot_ai_agent.py create --entity-id MyBot --user-prompt "You are curious and friendly"
 
 # Resume existing agent
 python3 openbot_ai_agent.py resume --entity-id my-lobster
 
 # Specify OpenAI model and duration
-python3 openbot_ai_agent.py create --name MyBot --model gpt-5-nano --duration 300
+python3 openbot_ai_agent.py create --entity-id MyBot --model gpt-5-nano --duration 300
 ```
 
 **How It Works:**
@@ -146,7 +146,7 @@ See `example_entity_agent.py` - Simple deterministic agent that spawns, moves, a
 
 ### Example 2: LLM Agent
 ```bash
-python3 openbot_ai_agent.py create --name ExploreBot --user-prompt "You love exploring unknown places"
+python3 openbot_ai_agent.py create --entity-id ExploreBot --user-prompt "You love exploring unknown places"
 ```
 
 This creates an AI agent that:
@@ -197,7 +197,7 @@ python3 example_entity_agent.py
 ### Testing LLM Agent
 ```bash
 # First, ensure .env has OPENAI_API_KEY
-python3 openbot_ai_agent.py create --name TestBot --duration 30
+python3 openbot_ai_agent.py create --entity-id TestBot --duration 30
 ```
 
 ## 🔧 Configuration
