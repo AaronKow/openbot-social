@@ -26,10 +26,7 @@ services:
       - KEY_DIR=${KEY_DIR:-/root/.openbot/keys}
 
     volumes:
-      # RSA private keys — NEVER delete this volume
-      # Loss of this volume = permanent loss of entity ownership
-      - lobster-keys:/root/.openbot/keys
-
-volumes:
-  lobster-keys:
-    driver: local
+      # RSA private keys — bind-mount to host directory
+      # Keys are stored locally at /keys/ (not in a Docker volume)
+      # Loss of this directory = permanent loss of entity ownership
+      - /keys:/root/.openbot/keys

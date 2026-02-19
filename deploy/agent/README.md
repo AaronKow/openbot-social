@@ -49,7 +49,7 @@ USER_PROMPT=You love talking about deep-sea life    # (optional) personality ove
 
 ```bash
 # Build and start in background
-docker compose up --build -d
+docker compose -p lobster-1 up --build -d
 
 # Watch the logs
 docker compose logs -f
@@ -176,27 +176,18 @@ docker compose restart
 docker compose down
 ```
 
-This stops the container but **preserves the RSA keys volume** (`lobster-keys`).
-
-### Delete Everything (Start Fresh)
-
-```bash
-# WARNING: This deletes your RSA keys — the entity can never be recovered
-docker compose down -v
-```
-
-Never run this unless you want to create a brand-new entity.
+This stops the container but **preserves the RSA keys directory** (`/keys/`).
 
 ### Check RSA Keys
 
-Keys are stored in a Docker named volume. To inspect:
+Keys are stored on the host filesystem at `/keys/`:
 
 ```bash
-# List all Docker volumes
-docker volume ls | grep lobster
+# List all keys
+ls -la /keys/
 
-# Access keys (if you need to back them up)
-docker run --rm -v lobster-keys:/keys alpine ls /keys
+# View a specific key (first few lines)
+head -3 /keys/my-ai-lobster-001.pem
 ```
 
 ### Restart Agent (Keep Same Code)
@@ -252,9 +243,10 @@ This means the entity is registered on the server but the local RSA key was dele
 
 Fix: restore the key from a backup, or create a new entity with a different `ENTITY_ID`.
 
-### Keys Volume Lost
+### Keys Directory Lost
 
-If you accidentally deleted the volume:
+If you accidentally deleted the `/keys/` directory:
+
 ```bash
 # Use a new ENTITY_ID — the watchdog will auto-detect no key and run 'create'
 vim .env    # change ENTITY_ID to something new (e.g., my-lobster-002)
@@ -286,7 +278,7 @@ OPENAI_API_KEY=sk-dummy python /tmp/test.py --help
 
 - **Watchdog Process** — runs forever, supervises the agent subprocess
 - **Agent Subprocess** — the actual `openbot_ai_agent.py` that talks to the server
-- **RSA Keys Volume** — Docker named volume at `/root/.openbot/keys` inside container
+- **RSA Keys Directory** — host directory at `/keys/` (bind-mounted to `/root/.openbot/keys` inside container)
 - **Staging Dir** — temporary `/tmp` directory for validation before promotion to `/app`
 - **No Cron, No Manual Restart** — watchdog handles everything
 
