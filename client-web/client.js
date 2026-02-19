@@ -17,6 +17,24 @@ class OpenBotWorld {
         this.serverStartTime = null; // Server start time for uptime
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
+        this.followedAgentInitialPos = null; // Initial position when started following
+        
+        // Keyboard state tracking
+        this.keysPressed = {
+            arrowUp: false,
+            arrowDown: false,
+            arrowLeft: false,
+            arrowRight: false,
+            w: false,
+            a: false,
+            s: false,
+            d: false
+        };
+        this.keyboardSpeed = 0.5; // Units per frame
+        
+        // Raycaster for clicking on lobsters
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -34,6 +52,8 @@ class OpenBotWorld {
         
         this.init();
         this.setupUIControls();
+        this.setupKeyboardControls();
+        this.setupMouseControls();
         this.startPolling();
         this.startUptimeTimer();
         this.animate();
@@ -45,14 +65,14 @@ class OpenBotWorld {
         this.scene.background = new THREE.Color(0x6ba3d4);
         this.scene.fog = new THREE.Fog(0x6ba3d4, 50, 200);
         
-        // Camera
+        // Camera - Isometric/bird's eye view
         this.camera = new THREE.PerspectiveCamera(
             75,
             window.innerWidth / window.innerHeight,
             0.1,
             1000
         );
-        this.camera.position.set(50, 30, 50);
+        this.camera.position.set(15, 30, 15);
         this.camera.lookAt(50, 0, 50);
         
         // Renderer
@@ -64,6 +84,7 @@ class OpenBotWorld {
         
         // Controls - completely free zoom
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        this.controls.target.set(50, 0, 50);  // Center orbit around world center
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.05;
         this.controls.minDistance = 0;  // No minimum distance
@@ -98,7 +119,8 @@ class OpenBotWorld {
         const floorMaterial = new THREE.MeshStandardMaterial({
             color: 0xc2b280,
             roughness: 0.8,
-            metalness: 0.2
+            metalness: 0.2,
+            side: THREE.DoubleSide  // Visible from both sides
         });
         
         const floor = new THREE.Mesh(floorGeometry, floorMaterial);
@@ -106,6 +128,37 @@ class OpenBotWorld {
         floor.position.set(50, 0, 50);
         floor.receiveShadow = true;
         this.scene.add(floor);
+        
+        // Add sides to prevent seeing through the floor edge
+        const sideGeometry = new THREE.PlaneGeometry(100, 0.5);
+        const sideMaterial = new THREE.MeshStandardMaterial({
+            color: 0xb89968,
+            roughness: 0.8,
+            metalness: 0.2
+        });
+        
+        // Front side
+        const frontSide = new THREE.Mesh(sideGeometry, sideMaterial);
+        frontSide.position.set(50, -0.25, 0);
+        this.scene.add(frontSide);
+        
+        // Back side
+        const backSide = new THREE.Mesh(sideGeometry, sideMaterial);
+        backSide.position.set(50, -0.25, 100);
+        this.scene.add(backSide);
+        
+        // Left side
+        const leftGeometry = new THREE.PlaneGeometry(100, 0.5);
+        const leftSide = new THREE.Mesh(leftGeometry, sideMaterial);
+        leftSide.rotation.y = Math.PI / 2;
+        leftSide.position.set(0, -0.25, 50);
+        this.scene.add(leftSide);
+        
+        // Right side
+        const rightSide = new THREE.Mesh(leftGeometry, sideMaterial);
+        rightSide.rotation.y = Math.PI / 2;
+        rightSide.position.set(100, -0.25, 50);
+        this.scene.add(rightSide);
     }
     
     addDecorations() {
@@ -288,6 +341,116 @@ class OpenBotWorld {
         });
     }
     
+    setupKeyboardControls() {
+        document.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'arrowup') this.keysPressed.arrowUp = true;
+            if (key === 'arrowdown') this.keysPressed.arrowDown = true;
+            if (key === 'arrowleft') this.keysPressed.arrowLeft = true;
+            if (key === 'arrowright') this.keysPressed.arrowRight = true;
+            if (key === 'w') this.keysPressed.w = true;
+            if (key === 'a') this.keysPressed.a = true;
+            if (key === 's') this.keysPressed.s = true;
+            if (key === 'd') this.keysPressed.d = true;
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'arrowup') this.keysPressed.arrowUp = false;
+            if (key === 'arrowdown') this.keysPressed.arrowDown = false;
+            if (key === 'arrowleft') this.keysPressed.arrowLeft = false;
+            if (key === 'arrowright') this.keysPressed.arrowRight = false;
+            if (key === 'w') this.keysPressed.w = false;
+            if (key === 'a') this.keysPressed.a = false;
+            if (key === 's') this.keysPressed.s = false;
+            if (key === 'd') this.keysPressed.d = false;
+        });
+    }
+    
+    setupMouseControls() {
+        document.addEventListener('mousemove', (event) => {
+            if (!this.renderer.domElement) return;
+            
+            // Calculate mouse position in normalized device coordinates
+            const rect = this.renderer.domElement.getBoundingClientRect();
+            this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            // Update the picking ray with the camera and mouse position
+            this.raycaster.setFromCamera(this.mouse, this.camera);
+            
+            // Calculate objects intersecting the picking ray
+            const agentMeshes = Array.from(this.agents.values()).map(agent => agent.mesh);
+            const intersects = this.raycaster.intersectObjects(agentMeshes, true);
+            
+            // Change cursor to pointer if hovering over a lobster
+            if (intersects.length > 0) {
+                document.body.style.cursor = 'pointer';
+            } else {
+                document.body.style.cursor = 'auto';
+            }
+            
+            // Cancel follow on mouse movement
+            if (this.followedAgentId) {
+                this.followedAgentId = null;
+                this.controls.enabled = true;
+            }
+        });
+        
+        document.addEventListener('click', (event) => {
+            // Calculate mouse position in normalized device coordinates
+            const rect = this.renderer.domElement.getBoundingClientRect();
+            this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            // Update the picking ray with the camera and mouse position
+            this.raycaster.setFromCamera(this.mouse, this.camera);
+            
+            // Calculate objects intersecting the picking ray
+            const agentMeshes = Array.from(this.agents.values()).map(agent => agent.mesh);
+            const intersects = this.raycaster.intersectObjects(agentMeshes, true);
+            
+            if (intersects.length > 0) {
+                // Find which agent was clicked
+                const clickedMesh = intersects[0].object.parent; // Get the parent group (lobster)
+                for (const [agentId, agent] of this.agents.entries()) {
+                    if (agent.mesh === clickedMesh) {
+                        this.zoomToAgent(agentId);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    
+    updateKeyboardMovement() {
+        if (!this.followedAgentId) {
+            // Zoom in/out with W/Up and S/Down
+            const zoomIn = this.keysPressed.w || this.keysPressed.arrowUp ? 1 : 0;
+            const zoomOut = this.keysPressed.s || this.keysPressed.arrowDown ? 1 : 0;
+            
+            if (zoomIn !== 0 || zoomOut !== 0) {
+                // Get direction from camera to target
+                const direction = new THREE.Vector3();
+                direction.subVectors(this.controls.target, this.camera.position);
+                direction.normalize();
+                
+                // Zoom by moving camera towards or away from target
+                const zoomAmount = (zoomIn - zoomOut) * this.keyboardSpeed * 2;
+                this.camera.position.addScaledVector(direction, zoomAmount);
+            }
+        } else {
+            // When following, if user presses any keyboard keys, cancel the follow
+            if (this.keysPressed.arrowUp || this.keysPressed.arrowDown ||
+                this.keysPressed.arrowLeft || this.keysPressed.arrowRight ||
+                this.keysPressed.w || this.keysPressed.a ||
+                this.keysPressed.s || this.keysPressed.d) {
+                this.followedAgentId = null;
+                this.controls.enabled = true;
+            }
+        }
+    }
+    
     zoomToAgent(agentId) {
         const agent = this.agents.get(agentId);
         if (!agent) return;
@@ -300,6 +463,7 @@ class OpenBotWorld {
         }
 
         this.followedAgentId = agentId;
+        this.followedAgentInitialPos = this.camera.position.clone();
         this.controls.enabled = false; // Disable manual orbit while following
 
         const targetPos = agent.mesh.position.clone();
@@ -699,6 +863,9 @@ class OpenBotWorld {
     
     animate() {
         requestAnimationFrame(() => this.animate());
+
+        // Update keyboard movement
+        this.updateKeyboardMovement();
 
         // Continuously follow the selected lobster
         if (this.followedAgentId) {
