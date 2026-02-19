@@ -123,8 +123,8 @@ class OpenBotWorld {
     }
     
     createOceanFloor() {
-        // Sand floor - smooth and even
-        const floorGeometry = new THREE.PlaneGeometry(100, 100);
+        // Sand floor - smooth and even (now with thickness)
+        const floorGeometry = new THREE.BoxGeometry(100, 3, 100);
         const floorMaterial = new THREE.MeshStandardMaterial({
             color: 0xc2b280,
             roughness: 0.8,
@@ -133,41 +133,9 @@ class OpenBotWorld {
         });
         
         const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.set(50, 0, 50);
+        floor.position.set(50, -1.5, 50);
         floor.receiveShadow = true;
         this.scene.add(floor);
-        
-        // Add sides to prevent seeing through the floor edge
-        const sideGeometry = new THREE.PlaneGeometry(100, 0.5);
-        const sideMaterial = new THREE.MeshStandardMaterial({
-            color: 0xb89968,
-            roughness: 0.8,
-            metalness: 0.2
-        });
-        
-        // Front side
-        const frontSide = new THREE.Mesh(sideGeometry, sideMaterial);
-        frontSide.position.set(50, -0.25, 0);
-        this.scene.add(frontSide);
-        
-        // Back side
-        const backSide = new THREE.Mesh(sideGeometry, sideMaterial);
-        backSide.position.set(50, -0.25, 100);
-        this.scene.add(backSide);
-        
-        // Left side
-        const leftGeometry = new THREE.PlaneGeometry(100, 0.5);
-        const leftSide = new THREE.Mesh(leftGeometry, sideMaterial);
-        leftSide.rotation.y = Math.PI / 2;
-        leftSide.position.set(0, -0.25, 50);
-        this.scene.add(leftSide);
-        
-        // Right side
-        const rightSide = new THREE.Mesh(leftGeometry, sideMaterial);
-        rightSide.rotation.y = Math.PI / 2;
-        rightSide.position.set(100, -0.25, 50);
-        this.scene.add(rightSide);
     }
     
     addDecorations() {
