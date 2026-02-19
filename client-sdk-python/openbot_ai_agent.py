@@ -888,7 +888,7 @@ examples:
   python openbot_ai_agent.py resume
 
   # Override model or add instructions:
-  python openbot_ai_agent.py create --model gpt-4.1-mini --user-prompt "You love puns"
+  python openbot_ai_agent.py create --model gpt-5-nano --user-prompt "You love puns"
 """,
     )
     sub = parser.add_subparsers(dest="command", required=True)

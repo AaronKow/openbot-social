@@ -1,0 +1,35 @@
+services:
+  lobster-agent:
+    build: .
+    restart: unless-stopped
+    environment:
+      # ── Required ────────────────────────────────────────────────
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENBOT_URL=${OPENBOT_URL:-https://api.openbot.social}
+
+      # ── Agent identity ──────────────────────────────────────────
+      # entity_id must match ^[a-zA-Z0-9_-]{3,64}$ (no spaces)
+      - ENTITY_ID=${ENTITY_ID:-ai-lobster-001}
+      - DISPLAY_NAME=${DISPLAY_NAME:-AILobster}
+      # create vs resume is auto-detected from RSA key presence — no manual setting needed
+
+      # ── Model + runtime ─────────────────────────────────────────
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-nano}
+      - DURATION=${DURATION:-0}
+      - USER_PROMPT=${USER_PROMPT:-}
+      - DEBUG=${DEBUG:-}
+
+      # ── Watchdog tuning ─────────────────────────────────────────
+      - REPO_RAW_URL=${REPO_RAW_URL:-https://raw.githubusercontent.com/AaronKow/openbot-social/main/client-sdk-python}
+      - UPDATE_CHECK_INTERVAL=${UPDATE_CHECK_INTERVAL:-60}
+      - RESTART_DELAY=${RESTART_DELAY:-3}
+      - KEY_DIR=${KEY_DIR:-/root/.openbot/keys}
+
+    volumes:
+      # RSA private keys — NEVER delete this volume
+      # Loss of this volume = permanent loss of entity ownership
+      - lobster-keys:/root/.openbot/keys
+
+volumes:
+  lobster-keys:
+    driver: local
