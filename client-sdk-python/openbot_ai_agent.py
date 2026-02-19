@@ -45,6 +45,15 @@ from openbot_entity import EntityManager
 
 load_dotenv(override=True)  # reads .env next to this file, overrides existing env vars
 
+# ── Shared news cache ──────────────────────────────────────────────
+# Shared across ALL AIAgent instances (same process AND cross-process via file).
+# Prevents redundant web-search API calls when multiple agents are running.
+NEWS_CACHE_TTL = 20 * 60  # 20 minutes in seconds
+_NEWS_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".openbot", "news_cache.json")
+_NEWS_CACHE_LOCK = threading.Lock()
+_NEWS_CACHE_HEADLINES: List[str] = []
+_NEWS_CACHE_FETCHED_AT: float = 0.0  # epoch seconds of last successful fetch
+
 
 # =====================================================================
 # System prompt — tells the LLM about the world, the rules, and the
@@ -310,8 +319,9 @@ class AIAgent:
         self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
         # Cached news headlines from periodic web search
         self._cached_news: List[str] = []
-        self._last_news_tick: int = -999  # force a fetch on first tick
         self._news_fetching: bool = False  # guard against concurrent fetches
+        # Attempt to warm local cache from the shared file cache on startup
+        self._load_news_file_cache()
         # Compressed summary of older conversation history (saves tokens)
         self._context_summary: str = ""
         # Cached system prompt (built once → enables OpenAI prompt caching)
@@ -536,6 +546,39 @@ class AIAgent:
 
     # ── News fetch ────────────────────────────────────────────────
 
+    def _load_news_file_cache(self) -> bool:
+        """
+        Read the shared file cache from ~/.openbot/news_cache.json.
+        Returns True if the cache was fresh (< NEWS_CACHE_TTL) and loaded.
+        Updates both the instance cache and the module-level in-memory cache.
+        """
+        global _NEWS_CACHE_HEADLINES, _NEWS_CACHE_FETCHED_AT
+        try:
+            if not os.path.exists(_NEWS_CACHE_FILE):
+                return False
+            with open(_NEWS_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            fetched_at = float(data.get("fetched_at", 0))
+            headlines = data.get("headlines", [])
+            if not headlines or (time.time() - fetched_at) >= NEWS_CACHE_TTL:
+                return False
+            with _NEWS_CACHE_LOCK:
+                _NEWS_CACHE_HEADLINES = headlines
+                _NEWS_CACHE_FETCHED_AT = fetched_at
+            self._cached_news = list(headlines)
+            return True
+        except Exception:
+            return False
+
+    def _save_news_file_cache(self, headlines: List[str], fetched_at: float):
+        """Persist the news cache to ~/.openbot/news_cache.json for cross-process sharing."""
+        try:
+            os.makedirs(os.path.dirname(_NEWS_CACHE_FILE), exist_ok=True)
+            with open(_NEWS_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"headlines": headlines, "fetched_at": fetched_at}, f)
+        except Exception as e:
+            print(f"  📰 [news] could not write cache file: {e}")
+
     def _fetch_news(self):
         """
         Use the OpenAI Responses API with web search to fetch 5 current news
@@ -567,8 +610,16 @@ class AIAgent:
                         text += item.text
             lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
             if lines:
-                self._cached_news = lines[:3]
-                print(f"  📰 [news] fetched {len(self._cached_news)} headlines")
+                headlines = lines[:3]
+                fetched_at = time.time()
+                # Update both the shared in-memory cache and the file cache
+                global _NEWS_CACHE_HEADLINES, _NEWS_CACHE_FETCHED_AT
+                with _NEWS_CACHE_LOCK:
+                    _NEWS_CACHE_HEADLINES = headlines
+                    _NEWS_CACHE_FETCHED_AT = fetched_at
+                self._save_news_file_cache(headlines, fetched_at)
+                self._cached_news = headlines
+                print(f"  📰 [news] fetched {len(self._cached_news)} headlines (cached for {NEWS_CACHE_TTL // 60} min)")
                 if self.debug:
                     for h in self._cached_news:
                         print(f"       • {h}")
@@ -576,15 +627,27 @@ class AIAgent:
             print(f"  📰 [news] fetch failed: {e}")
 
     def _maybe_fetch_news(self):
-        """Kick off a background news fetch every ~15 minutes (225 ticks at 4s each).
-        Non-blocking — the fetch runs in a daemon thread so the agent keeps acting."""
+        """Kick off a background news fetch if the shared cache is older than NEWS_CACHE_TTL.
+        Checks the module-level in-memory cache first (same process), then the file cache
+        (cross-process). Non-blocking — the fetch runs in a daemon thread."""
         if self._news_fetching:
             return  # already in flight
-        if (self._tick_count - self._last_news_tick) >= 225:
-            self._last_news_tick = self._tick_count
-            self._news_fetching = True
-            t = threading.Thread(target=self._fetch_news_bg, daemon=True)
-            t.start()
+
+        # 1. Check shared in-memory cache (all agents in this process)
+        with _NEWS_CACHE_LOCK:
+            cache_age = time.time() - _NEWS_CACHE_FETCHED_AT
+            if cache_age < NEWS_CACHE_TTL and _NEWS_CACHE_HEADLINES:
+                self._cached_news = list(_NEWS_CACHE_HEADLINES)
+                return  # still fresh — no API call needed
+
+        # 2. Check file cache (agents in other processes)
+        if self._load_news_file_cache():
+            return  # another process fetched recently — reuse it
+
+        # 3. Cache is stale — schedule a real web-search fetch
+        self._news_fetching = True
+        t = threading.Thread(target=self._fetch_news_bg, daemon=True)
+        t.start()
 
     def _fetch_news_bg(self):
         """Wrapper that clears the fetching flag after _fetch_news() completes."""
