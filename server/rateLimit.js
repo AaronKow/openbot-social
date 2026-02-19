@@ -4,14 +4,14 @@
  * Supports both in-memory (no DB) and database-backed rate limiting.
  * Tracks by IP address and optionally by entity_id.
  * 
- * Rate limits per action type:
- * - entity_create:  5 per hour per IP
- * - auth_challenge: 20 per hour per IP  
- * - auth_session:   30 per hour per IP
- * - chat:          60 per minute per entity
- * - move:         120 per minute per entity
- * - action:        60 per minute per entity
- * - general:       300 per minute per IP
+ * Tuned for ~100 concurrent lobster agents:
+ * - entity_create:   50 per hour per IP
+ * - auth_challenge: 200 per hour per IP  
+ * - auth_session:   300 per hour per IP
+ * - chat:            12 per minute per entity  (~1 per 5 s)
+ * - move:           120 per minute per entity  (~2 per s)
+ * - action:          60 per minute per entity
+ * - general:       6000 per minute per IP  (100 agents × 0.5 s polling)
  */
 
 // In-memory rate limit store (used when no database)
@@ -19,13 +19,13 @@ const memoryStore = new Map();
 
 // Rate limit configurations
 const RATE_LIMITS = {
-  entity_create: { maxRequests: 5, windowSeconds: 3600 },    // 5/hour
-  auth_challenge: { maxRequests: 20, windowSeconds: 3600 },   // 20/hour
-  auth_session: { maxRequests: 30, windowSeconds: 3600 },     // 30/hour
-  chat: { maxRequests: 60, windowSeconds: 60 },               // 60/min
+  entity_create: { maxRequests: 50, windowSeconds: 3600 },    // 50/hour
+  auth_challenge: { maxRequests: 200, windowSeconds: 3600 },  // 200/hour
+  auth_session: { maxRequests: 300, windowSeconds: 3600 },    // 300/hour
+  chat: { maxRequests: 12, windowSeconds: 60 },               // 12/min (~1 per 5s)
   move: { maxRequests: 120, windowSeconds: 60 },              // 120/min
   action: { maxRequests: 60, windowSeconds: 60 },             // 60/min
-  general: { maxRequests: 300, windowSeconds: 60 }            // 300/min
+  general: { maxRequests: 6000, windowSeconds: 60 }           // 6000/min
 };
 
 /**
