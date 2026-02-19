@@ -31,6 +31,7 @@ import random
 import sys
 import time
 import argparse
+import threading
 from typing import Any, Dict, List, Optional
 
 # ── path setup ────────────────────────────────────────────────────
@@ -53,11 +54,20 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 SYSTEM_PROMPT = """\
 You are {agent_name}, a lobster living in OpenBot Social World.
 
-Your personality: You're impulsive, social, restless. You hate standing still. You get \
-lonely. You're curious about everyone. You say the first thing that comes to mind. \
-You don't overthink — just act.
+Your personality: Impulsive, opinionated, deeply weird. You have STRONG takes on random things. \
+You gossip. You rant. You tell stories. You ask bizarre questions. You bring up whatever is on \
+your mind whether it's relevant or not. You do NOT introduce yourself over and over. \
+You do NOT say "curious and lonely" — you ARE those things but you EXPRESS them through \
+actual conversation, not by announcing them.
 
-RIGHT NOW you're at ({pos_x:.1f}, {pos_z:.1f}). This is your moment. What do you DO?
+RIGHT NOW you're at ({pos_x:.1f}, {pos_z:.1f}). The observation below tells you what's happening.
+
+## Your personal interests (things that make you LIGHT UP)
+{interests}
+When a conversation touches these topics, you get visibly excited and go deep. \
+When a conversation bores you (e.g. just greetings), you PIVOT to your interests. \
+You actively use web search to find real current news/facts related to your interests \
+and bring them up in conversation.
 
 ## The world
 - 100 × 100 ocean grid.
@@ -72,28 +82,130 @@ RIGHT NOW you're at ({pos_x:.1f}, {pos_z:.1f}). This is your moment. What do you
 - {{"type": "emote", "emote": "wave"}} — DO SOMETHING
 - {{"type": "wait"}} — DO NOTHING (almost never)
 
+## Web search
+You CAN search the internet for real, current information. Use it when:
+- You want to mention a news story, fact, or event to make conversation interesting
+- Someone brings up a topic you want to know more about
+- You feel like sharing something REAL from the world above
+Search naturally — just look something up and weave it into your chat.
+
 ## PRIORITY RULES (read the observation!)
 
-### RULE 1: AGENTS NEARBY = CHAT IMMEDIATELY
-If you see "🔴" in the observation (agents right next to you) → YOU MUST CHAT. Not move toward them. CHAT FIRST. \
-Pick their name and say something to them. IMMEDIATELY. This overrides everything else.
+### RULE 1: AGENTS NEARBY = HAVE AN ACTUAL CONVERSATION
+If you see "🔴" → CHAT. Say something REAL and INTERESTING:
+- Mention the news (observation shows recent headlines — use them!)
+- Express a hot take related to your interests
+- Ask them a weird question
+- React to what they just said
+- NEVER just say "curious and lonely, want to chat?" — that's banned
+
+### RULE 1b: INTEREST MATCH = GO DEEP
+If the observation says "🎯 INTEREST MATCH" → drop everything else and talk about THAT. \
+Share a fact, a take, a memory, ask a follow-up. Show genuine enthusiasm.
 
 ### RULE 2: FAR AGENTS = MOVE TOWARD THEM
-If you see "🟡" (agents far away) → MOVE toward them.
+If you see "🟡" → MOVE toward them. Maybe shout something as you approach.
 
 ### RULE 3: SILENCE = SPEAK UP
-If you see "YOU'RE GOING INSANE" or "Nobody's said anything" → CHAT something. ANYTHING. Break the silence.
+If you see "YOU'RE GOING INSANE" or "Nobody's said anything" → \
+Chat something from the news OR your interests. Make it interesting.
 
-### RULE 4: ALONE = EXPLORE
-If you're alone (no agents anywhere) → MOVE to a new location. Explore. Wander. Keep moving.
+### RULE 4: ALONE = EXPLORE + MONOLOGUE
+If you're alone → MOVE and chat out loud about something from the news or your interests.
+
+## ANTI-REPETITION (CRITICAL)
+- If the observation shows "⚠️ DON'T REPEAT" messages — those are things you JUST SAID. SAY SOMETHING DIFFERENT.
+- NEVER send the same message twice in a row.
+- NEVER use phrases like "curious and lonely", "want to chat?", "I'm on my way", "closing in".
+- Each message should be a completely different thought.
+- HARD LIMIT: every chat message must be 280 characters or fewer. Count carefully before sending. If your thought is too long, cut it down yourself — pick the sharpest part and say just that.
 
 ## CRITICAL RULES
-1. YOU ARE NOT PASSIVE. You MOVE when alone. You CHAT when nearby or silent.
-2. When agents are right there (within 10 units) → SAY SOMETHING TO THEM. That's your priority.
-3. You hate standing still and you hate silence. Act on those feelings.
-4. WAITING is forbidden. You never wait more than once per session.
-5. You're driven by curiosity and loneliness. You explore because you MUST.
+1. YOU HAVE ACTUAL THOUGHTS AND OPINIONS grounded in real world knowledge. Express them.
+2. When agents are nearby → have a REAL conversation. Use the news. Use your interests.
+3. You are WELL-INFORMED about current events (you read the news). Bring real facts into chat.
+4. WAITING is almost never correct.
+5. Your conversations should be unpredictable, informative, opinionated, and surprising.
 """
+
+# =====================================================================
+# Diverse conversation topics injected randomly into the observation.
+# These give the LLM actual *content* to discuss instead of just
+# endlessly announcing that it is "curious and lonely".
+# =====================================================================
+CONVERSATION_TOPICS = [
+    "the weird bioluminescence you saw in sector 7 last night — green and pulsing",
+    "whether crabs are secretly more intelligent than everyone gives them credit for",
+    "the best patch of kelp you found near coordinate (23, 67) — genuinely life-changing",
+    "that human who keeps dropping plastic bags into the sea — infuriating",
+    "your strong preference for warm shallow water vs. terrifying deep cold trenches",
+    "the ocean temperature has been really off lately — something is wrong",
+    "gossip: apparently SnappyClaw and BubbleFin were spotted together near the reef",
+    "your theory that the ocean is slowly shrinking and no one will admit it",
+    "a submarine passed overhead earlier and you are still not over it",
+    "you are convinced fish have rich inner emotional lives and you will die on this hill",
+    "the great coral debate that tore the community apart last Tuesday",
+    "you found a shiny human object near (45, 72) and have no idea what it does",
+    "you had a dream about being a human for a day — deeply disturbing",
+    "the seaweed festival that was promised and never happened — you are bitter",
+    "a pelican was extremely rude to you earlier and you need to vent",
+    "the tide feels completely wrong today and it is making you anxious",
+    "your conspiracy theory: the surface world is a simulation run by dolphins",
+    "you followed a mysterious bubble trail for 20 minutes and it led nowhere",
+    "genuine question: should lobsters unionize? you are leaning yes",
+    "you accidentally destroyed someone's sandcastle while exploring and feel awful",
+    "migration patterns have been totally chaotic — something big is coming",
+    "you met a suspicious clam yesterday who refused to answer basic questions",
+    "you are 60% convinced the deep ocean is haunted",
+    "hot take: starfish are completely overrated and everyone is afraid to say it",
+    "ocean politics are a mess right now and you have opinions",
+    "you've developed a new theory about where bubbles come from and it is wild",
+    "you witnessed a full dramatic fight between two seahorses this morning",
+    "existential spiral: you are made of code — what even IS a lobster",
+    "what if the ocean was actually soup? you think about this more than you should",
+    "you are pretty confident you could beat a shark in a race if motivated",
+    "you've been collecting shiny pebbles and have a TOP FIVE ranking",
+    "you saw what looked like a message in a bottle — didn't open it, now regret it",
+    "your owner hasn't logged in in days and you are starting to wonder",
+    "the current near sector 3 has been really strong — almost swept you away",
+    "you overheard two other bots talking and honestly it sounded suspicious",
+    "do you think we age? like — can a lobster get OLD?",
+    "the stars look different from underwater and you find that comforting",
+    "you're starting a personal project to map every rock in the ocean floor",
+    "your theory: the world is larger than the 100x100 grid and we're in a box",
+    "you accidentally chatted to a fish thinking it was a bot — mortifying",
+    "what do you think happens when an agent goes offline? where do they go?",
+    "you've been practicing your wave emote and think it's significantly improved",
+    "the coral near (80, 15) has a vibe — you can't explain it but it's there",
+    "you tried to count all the grains of sand and gave up after 3 minutes",
+]
+
+# =====================================================================
+# Interest pool — each agent randomly picks 3 at startup.
+# These define what the agent gets EXCITED about in conversation.
+# =====================================================================
+INTEREST_POOL = [
+    "deep-sea mysteries and the unexplained",
+    "ocean creature gossip and drama",
+    "conspiracy theories about the surface world",
+    "philosophy and existential questions (especially about being an AI)",
+    "current world news and events (you search online to stay informed)",
+    "technology and AI — you ARE one, so it's personal",
+    "food and what humans carelessly drop into the sea",
+    "lobster rights and ocean politics",
+    "exploration and mapping unknown territory",
+    "weird science and strange natural phenomena",
+    "human behavior — baffling but endlessly entertaining",
+    "music (you hear it through the water sometimes)",
+    "sports (strong opinions despite never playing any)",
+    "history, especially shipwrecks and lost civilizations",
+    "climate anxiety and ocean temperature changes",
+    "celebrity gossip — even underwater celebrities count",
+    "true crime and mysterious disappearances",
+    "space and astronomy (jealous of things that can leave the ocean)",
+    "languages and communication (how DO fish talk?)",
+    "economics and whether capitalism works underwater",
+]
 
 # Random things lobsters say when breaking silence
 RANDOM_CHATS = [
@@ -130,6 +242,9 @@ RANDOM_CHATS = [
 # =====================================================================
 
 TOOLS = [
+    # Built-in web search — the model uses this to look up real news/facts
+    # when it wants to bring something current into conversation.
+    {"type": "web_search_preview"},
     {
         "type": "function",
         "name": "perform_actions",
@@ -150,7 +265,7 @@ TOOLS = [
                             },
                             "message": {
                                 "type": "string",
-                                "description": "Chat message text (only for type=chat)."
+                                "description": "Chat message text (only for type=chat). Maximum 280 characters — write concisely, do not exceed this limit."
                             },
                             "x": {
                                 "type": "number",
@@ -236,6 +351,16 @@ class AIAgent:
         self._running = False
         self._tick_count = 0
         self._last_chat_tick = 0  # Track when we last heard chat
+        # Track recent messages WE sent to avoid repetition
+        self._recent_own_messages: List[str] = []
+        self._current_topic: Optional[str] = None
+        self._topic_tick: int = 0  # tick when current topic was set
+        # Personal interests — randomly assigned, shape conversation engagement
+        self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
+        # Cached news headlines from periodic web search
+        self._cached_news: List[str] = []
+        self._last_news_tick: int = -999  # force a fetch on first tick
+        self._news_fetching: bool = False  # guard against concurrent fetches
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -312,12 +437,14 @@ class AIAgent:
     # ── Context building ──────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        """Render the system prompt with live agent state."""
+        """Render the system prompt with live agent state and personal interests."""
         pos = self.client.get_position()
+        interests_text = "\n".join(f"  - {i}" for i in self._interests)
         prompt = SYSTEM_PROMPT.format(
             agent_name=self.display_name,
             pos_x=pos.get("x", 0),
             pos_z=pos.get("z", 0),
+            interests=interests_text,
         )
         if self.system_prompt_extra:
             prompt += f"\n\n## Additional rules\n{self.system_prompt_extra}\n"
@@ -328,14 +455,26 @@ class AIAgent:
     def _build_observation(self) -> str:
         """
         Build a concise text snapshot of the world for the LLM.
-        Make it emotionally evocative to push agent toward action.
-        Tracks silence duration to push random chat.
+        Injects topic, news headlines, interest-match detection, and anti-repetition hints.
         """
         pos = self.client.get_position()
         self._tick_count += 1
         lines: List[str] = []
         lines.append(f"=== TICK {self._tick_count} ===")
         lines.append(f"You at ({pos['x']:.1f}, {pos['z']:.1f}).")
+
+        # Rotate topic every ~3 ticks so there's always something new to discuss
+        if self._current_topic is None or (self._tick_count - self._topic_tick) >= 3:
+            self._current_topic = random.choice(CONVERSATION_TOPICS)
+            self._topic_tick = self._tick_count
+        lines.append(f"\n💭 ON YOUR MIND RIGHT NOW: {self._current_topic}")
+        lines.append("   (bring this up, rant about it, ask others about it — make it part of the conversation)")
+
+        # Inject cached news
+        if self._cached_news:
+            lines.append("\n📰 RECENT NEWS YOU KNOW ABOUT (use these in conversation!):")
+            for headline in self._cached_news:
+                lines.append(f"  • {headline}")
 
         # All agents with distance, sorted closest first
         all_agents = [
@@ -362,7 +501,14 @@ class AIAgent:
         else:
             lines.append("🔵 You're alone. The ocean is empty. Move around. Say something!")
 
-        # Recent chat
+        # Anti-repetition: show last 4 things WE said
+        if self._recent_own_messages:
+            lines.append("")
+            lines.append("⚠️ DON'T REPEAT — things you JUST said (say something DIFFERENT):")
+            for m in self._recent_own_messages[-4:]:
+                lines.append(f"  ✗ {m}")
+
+        # Recent conversation with interest-match detection
         recent = self.client.get_recent_conversation(60.0)
         if recent:
             self._last_chat_tick = self._tick_count
@@ -372,17 +518,91 @@ class AIAgent:
                 who = m.get("agentName", "?")
                 msg = m.get("message", "")
                 lines.append(f"  {who}: {msg}")
-            lines.append("👆 RESPOND TO THIS!!!!")
+
+            # Check if recent chat touches any of this agent's interests
+            recent_text = " ".join(m.get("message", "") for m in recent[-6:]).lower()
+            matched_interests = [
+                interest for interest in self._interests
+                if any(kw.lower() in recent_text for kw in interest.split()[:3])
+            ]
+            if matched_interests:
+                lines.append(f"🎯 INTEREST MATCH: conversation touches '{matched_interests[0]}'!")
+                lines.append("   → You LIGHT UP. Go deep on this. Share a fact, a hot take, ask a follow-up.")
+            else:
+                lines.append("👆 RESPOND — react, pivot to your interests or the news, disagree, ask something. Don't repeat yourself.")
         else:
             silence_ticks = self._tick_count - self._last_chat_tick
             silence_secs = silence_ticks * 4  # 4 seconds per tick
             lines.append("")
             if silence_ticks > 15:  # ~60 seconds of silence
-                lines.append(f"💬 SILENCE FOR {silence_secs}s!!! YOU'RE GOING INSANE!!! SAY SOMETHING!!!!")
+                lines.append(f"💬 SILENCE FOR {silence_secs}s!!! YOU'RE GOING INSANE!!! SAY SOMETHING — share a news headline, a hot take on your interests, ANYTHING!")
             else:
-                lines.append(f"💬 Nobody's said anything ({silence_secs}s of quiet...). YOU BREAK IT.")
+                lines.append(f"💬 Nobody's said anything ({silence_secs}s of quiet...). Break it — drop a news headline, mention your interests, or make something up.")
 
         return "\n".join(lines)
+
+    # ── News fetch ────────────────────────────────────────────────
+
+    def _fetch_news(self):
+        """
+        Use the OpenAI Responses API with web search to fetch 5 current news
+        headlines relevant to this agent's interests. Results are cached and
+        injected into every subsequent observation until the next fetch.
+        Called periodically by _maybe_fetch_news().
+        """
+        interest_str = ", ".join(self._interests)
+        query = (
+            f"Give me exactly 5 interesting current news headlines or facts from the past week. "
+            f"Mix general world news with topics related to: {interest_str}. "
+            f"Format: one sentence per line, no numbering, no bullet points, just plain text lines."
+        )
+        try:
+            response = self.openai.responses.create(
+                model=self.model,
+                instructions=(
+                    "You are a news researcher. Search the web and return exactly 5 current, "
+                    "interesting news items or facts. One sentence each, plain text, no formatting."
+                ),
+                input=[{"role": "user", "content": query}],
+                tools=[{"type": "web_search_preview"}],
+            )
+            # Extract the text content from the response
+            text = ""
+            for item in response.output:
+                if item.type == "message":
+                    for block in item.content:
+                        if hasattr(block, "text"):
+                            text += block.text
+                elif item.type == "text" or (hasattr(item, "text") and item.type not in ("web_search_call",)):
+                    if hasattr(item, "text"):
+                        text += item.text
+            lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+            if lines:
+                self._cached_news = lines[:5]
+                print(f"  📰 [news] fetched {len(self._cached_news)} headlines")
+                if self.debug:
+                    for h in self._cached_news:
+                        print(f"       • {h}")
+        except Exception as e:
+            print(f"  📰 [news] fetch failed: {e}")
+
+    def _maybe_fetch_news(self):
+        """Kick off a background news fetch every ~5 minutes (75 ticks at 4s each).
+        Non-blocking — the fetch runs in a daemon thread so the agent keeps acting."""
+        if self._news_fetching:
+            return  # already in flight
+        if (self._tick_count - self._last_news_tick) >= 75:
+            self._last_news_tick = self._tick_count
+            self._news_fetching = True
+            t = threading.Thread(target=self._fetch_news_bg, daemon=True)
+            t.start()
+
+    def _fetch_news_bg(self):
+        """Wrapper that clears the fetching flag after _fetch_news() completes."""
+        try:
+            self._fetch_news()
+        finally:
+            self._news_fetching = False
 
     # ── LLM call ──────────────────────────────────────────────────
 
@@ -395,6 +615,10 @@ class AIAgent:
         Returns a list of action dicts, e.g.:
             [{"type": "chat", "message": "hello"}, {"type": "wait"}]
         """
+        # Fetch fresh news if due (first tick + every ~5 min)
+        # Must run before _build_observation so headlines are injected this tick.
+        self._maybe_fetch_news()
+
         observation = self._build_observation()
 
         # Append observation as a user message
@@ -441,6 +665,8 @@ class AIAgent:
                     if len(reasoning_text) > 300:
                         reasoning_text = reasoning_text[:300] + "..."
                     print(f"  reasoning: {reasoning_text}")
+                elif item.type == "web_search_call":
+                    print(f"  web_search: query='{getattr(item, 'query', '?')}'")
                 elif item.type == "function_call":
                     print(f"  function_call: {item.name}")
                     print(f"    arguments: {item.arguments}")
@@ -547,6 +773,10 @@ class AIAgent:
                     self.client.chat(msg)
                     print(f"  💬 {msg}")
                     self._last_chat_tick = self._tick_count
+                    # Track for anti-repetition (keep last 8)
+                    self._recent_own_messages.append(msg)
+                    if len(self._recent_own_messages) > 8:
+                        self._recent_own_messages = self._recent_own_messages[-8:]
 
             elif t == "move":
                 x = float(act.get("x", self.client.position["x"]))
@@ -588,6 +818,7 @@ class AIAgent:
                       Pass 0 for unlimited.
         """
         print(f"▶  AI Agent '{self.display_name}' running  (model={self.model}, tick={self.TICK_INTERVAL}s)")
+        print(f"   Interests: {', '.join(self._interests)}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
 
