@@ -43,18 +43,213 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Optional entity authentication support
+import sys
+import os
+import base64
+
+# RSA/AES auth — uses cryptography lib which is in requirements.txt
 try:
-    import sys
-    import os
-    # Add client-sdk-python to path for entity module access
-    _sdk_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'client-sdk-python')
-    if _sdk_path not in sys.path:
-        sys.path.insert(0, _sdk_path)
-    from openbot_entity import EntityManager
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.backends import default_backend
     HAS_ENTITY_AUTH = True
 except ImportError:
     HAS_ENTITY_AUTH = False
+
+
+# =====================================================================
+# Self-contained entity auth — no external SDK dependency.
+# openbotclaw is a standalone ClawHub skill; it must not rely on a
+# relative path to client-sdk-python/ being present on the host.
+# All RSA key management and challenge-response auth lives here.
+# =====================================================================
+
+_DEFAULT_KEY_DIR = os.path.expanduser("~/.openbot/keys")
+
+
+def _key_paths(entity_id: str, key_dir: str) -> tuple:
+    safe = entity_id.replace("/", "_").replace("\\", "_")
+    return (
+        os.path.join(key_dir, f"{safe}.pem"),
+        os.path.join(key_dir, f"{safe}.pub.pem"),
+    )
+
+
+def _load_private_key(entity_id: str, key_dir: str):
+    priv_path, _ = _key_paths(entity_id, key_dir)
+    if not os.path.exists(priv_path):
+        raise FileNotFoundError(
+            f"No private key for '{entity_id}' at {priv_path}. "
+            "Run create_entity() first, or restore your backup."
+        )
+    with open(priv_path, "rb") as f:
+        return serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+
+
+def _decrypt_challenge(private_key, encrypted_b64: str) -> str:
+    return private_key.decrypt(
+        base64.b64decode(encrypted_b64),
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    ).hex()
+
+
+def _sign_challenge(private_key, challenge: str) -> str:
+    return base64.b64encode(
+        private_key.sign(challenge.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
+    ).decode()
+
+
+def _decrypt_aes_response(private_key, encrypted_data: str, encrypted_key: str, iv: str, auth_tag: str) -> dict:
+    aes_key = private_key.decrypt(
+        base64.b64decode(encrypted_key),
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    iv_bytes = base64.b64decode(iv)
+    ciphertext = base64.b64decode(encrypted_data)
+    tag_bytes = base64.b64decode(auth_tag)
+    plaintext = AESGCM(aes_key).decrypt(iv_bytes, ciphertext + tag_bytes, None)
+    return json.loads(plaintext.decode())
+
+
+class EntityManager:
+    """
+    Standalone RSA entity auth bundled inside the skill.
+    Implements create_entity(), authenticate(), get_session_token()
+    using only cryptography + requests (both in requirements.txt).
+    """
+
+    def __init__(self, base_url: str, key_dir: str = _DEFAULT_KEY_DIR, **kwargs):
+        self.base_url = base_url.rstrip("/")
+        self.key_dir = key_dir
+        os.makedirs(key_dir, mode=0o700, exist_ok=True)
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self.http = requests.Session()
+        self.http.headers.update({"Content-Type": "application/json"})
+
+    def create_entity(
+        self,
+        entity_id: str,
+        entity_type: str = "lobster",
+        key_size: int = 2048,
+        entity_name: str = None,
+    ) -> Dict[str, Any]:
+        if not HAS_ENTITY_AUTH:
+            raise RuntimeError("cryptography library required: pip install cryptography")
+
+        import re
+        resolved_name = (entity_name or entity_id)[:64]
+        if not re.match(r"^[a-zA-Z0-9_-]{3,64}$", resolved_name):
+            raise ValueError(
+                f"entity_name '{resolved_name}' must be 3-64 alphanumeric/hyphen/underscore chars."
+            )
+
+        priv_path, pub_path = _key_paths(entity_id, self.key_dir)
+
+        if os.path.exists(priv_path):
+            # Keys already exist — load existing public key
+            with open(pub_path, "r") as f:
+                public_key_pem = f.read()
+        else:
+            private_key = rsa.generate_private_key(65537, key_size, default_backend())
+            priv_pem = private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+            pub_pem = private_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            with open(priv_path, "wb") as f:
+                f.write(priv_pem)
+            os.chmod(priv_path, 0o600)
+            with open(pub_path, "wb") as f:
+                f.write(pub_pem)
+            os.chmod(pub_path, 0o644)
+            public_key_pem = pub_pem.decode()
+
+        resp = self.http.post(
+            f"{self.base_url}/entity/create",
+            json={
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "entity_name": resolved_name,
+                "public_key": public_key_pem,
+            },
+            timeout=10,
+        )
+        result = resp.json()
+        if resp.status_code in (200, 201) and result.get("success"):
+            print(f"Entity created: #{result.get('numeric_id','?')} {entity_id} ({entity_type})")
+            print(f"Private key stored at: {priv_path}")
+            print("WARNING: Keep your private key safe. If lost, entity ownership cannot be recovered.")
+            return result
+        raise RuntimeError(f"Entity creation failed [{resp.status_code}]: {result.get('error','Unknown')}")
+
+    def authenticate(self, entity_id: str) -> Dict[str, Any]:
+        if not HAS_ENTITY_AUTH:
+            raise RuntimeError("cryptography library required: pip install cryptography")
+
+        private_key = _load_private_key(entity_id, self.key_dir)
+
+        # Step 1: request challenge
+        resp = self.http.post(
+            f"{self.base_url}/auth/challenge",
+            json={"entity_id": entity_id},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Challenge request failed [{resp.status_code}]: {resp.json().get('error','Unknown')}")
+
+        challenge_data = resp.json()
+        challenge_id = challenge_data["challenge_id"]
+        decrypted = _decrypt_challenge(private_key, challenge_data["encrypted_challenge"])
+        signature = _sign_challenge(private_key, decrypted)
+
+        # Step 2: submit signature
+        resp = self.http.post(
+            f"{self.base_url}/auth/session",
+            json={"entity_id": entity_id, "challenge_id": challenge_id, "signature": signature},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Authentication failed [{resp.status_code}]: {resp.json().get('error','Unknown')}")
+
+        result = resp.json()
+        if result.get("encrypted"):
+            session_data = _decrypt_aes_response(
+                private_key,
+                result["encryptedData"],
+                result["encryptedKey"],
+                result["iv"],
+                result["authTag"],
+            )
+        else:
+            session_data = result
+
+        with self._lock:
+            self._sessions[entity_id] = {
+                "token": session_data["session_token"],
+                "expires_at": session_data.get("expires_at", ""),
+            }
+
+        print(f"Authenticated as {entity_id} (expires: {session_data.get('expires_at','')})")
+        return session_data
+
+    def get_session_token(self, entity_id: str) -> Optional[str]:
+        with self._lock:
+            s = self._sessions.get(entity_id)
+        return s["token"] if s else None
 
 
 # =====================================================================
@@ -456,20 +651,40 @@ class OpenBotClawHub:
         eid = entity_id or self.entity_id
         if not eid:
             raise RuntimeError("No entity_id configured")
-        
+
+        if not HAS_ENTITY_AUTH:
+            raise RuntimeError(
+                "cryptography library required for entity authentication. "
+                "Install it with: pip install cryptography"
+            )
+
         if not self.entity_manager:
-            raise RuntimeError("No EntityManager configured")
-        
+            raise RuntimeError(
+                f"No EntityManager configured for entity '{eid}'. "
+                "Pass entity_id= when constructing OpenBotClawHub so an "
+                "EntityManager is auto-created, or pass entity_manager= directly."
+            )
+
         session_data = self.entity_manager.authenticate(eid)
-        self._session_token = session_data.get('session_token')
+
+        # Server returns 'session_token'; EntityManager internal dict uses 'token'.
+        # Try both so this works regardless of which dict is returned.
+        token = session_data.get('session_token') or session_data.get('token')
+        if not token:
+            raise RuntimeError(
+                f"authenticate_entity: server response contained no token. "
+                f"Keys received: {list(session_data.keys())}"
+            )
+
+        self._session_token = token
         self.entity_id = eid
-        
-        # Update HTTP session headers with auth token
-        if self.session and self._session_token:
+
+        # If connect() already ran, patch the live session immediately
+        if self.session:
             self.session.headers.update({
                 'Authorization': f'Bearer {self._session_token}'
             })
-        
+
         self.logger.info(f"Entity authenticated: {eid}")
         return session_data
     
@@ -1525,7 +1740,10 @@ class OpenBotClawHub:
                 if self.entity_manager and self.entity_id:
                     try:
                         session_data = self.entity_manager.authenticate(self.entity_id)
-                        self._session_token = session_data.get('session_token')
+                        self._session_token = (
+                            session_data.get('session_token')
+                            or session_data.get('token')
+                        )
                         if self._session_token:
                             self.session.headers.update({
                                 'Authorization': f'Bearer {self._session_token}'
