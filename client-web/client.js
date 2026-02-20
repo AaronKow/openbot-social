@@ -1015,6 +1015,9 @@ class OpenBotWorld {
         // Update keyboard movement
         this.updateKeyboardMovement();
 
+        // Clean up expired chat bubbles
+        this.updateChatBubbles();
+
         // Continuously follow the selected lobster
         if (this.followedAgentId) {
             const followed = this.agents.get(this.followedAgentId);
