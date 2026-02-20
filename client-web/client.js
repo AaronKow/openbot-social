@@ -85,7 +85,7 @@ class OpenBotWorld {
             0.1,
             1000
         );
-        this.camera.position.set(15, 30, 15);
+        this.camera.position.set(50, 50, -30);
         this.camera.lookAt(50, 0, 50);
         
         // Renderer
