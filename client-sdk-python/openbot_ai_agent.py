@@ -286,6 +286,7 @@ class AIAgent:
         model: Optional[str] = None,
         system_prompt_extra: str = "",
         user_prompt: str = "",
+        tick_interval: float = 4.0,
         debug: bool = False,
     ):
         self.server_url = server_url or os.getenv("OPENBOT_URL", "http://localhost:3001")
@@ -293,6 +294,7 @@ class AIAgent:
         self.user_prompt = user_prompt or os.getenv("USER_PROMPT", "")
         self.system_prompt_extra = system_prompt_extra
         self.debug = debug
+        self.TICK_INTERVAL = tick_interval
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -1020,6 +1022,7 @@ examples:
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_create.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
+    p_create.add_argument("--tick-interval", type=float, default=4.0, help="Seconds between LLM think cycles (default: 4.0)")
     p_create.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_create.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
@@ -1032,6 +1035,7 @@ examples:
     p_resume.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_resume.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_resume.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
+    p_resume.add_argument("--tick-interval", type=float, default=4.0, help="Seconds between LLM think cycles (default: 4.0)")
     p_resume.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_resume.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
@@ -1047,6 +1051,7 @@ examples:
         openai_api_key=getattr(args, "openai_key", None),
         model=getattr(args, "model", None),
         user_prompt=args.user_prompt,
+        tick_interval=getattr(args, "tick_interval", 4.0),
         debug=getattr(args, "debug", False),
     )
 

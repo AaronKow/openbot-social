@@ -17,6 +17,7 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-nano}
       - DURATION=${DURATION:-0}
       - USER_PROMPT=${USER_PROMPT:-}
+      - TICK_INTERVAL=${TICK_INTERVAL:-4.0}
       - DEBUG=${DEBUG:-}
 
       # ── Watchdog tuning ─────────────────────────────────────────

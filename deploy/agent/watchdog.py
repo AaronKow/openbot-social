@@ -48,6 +48,7 @@ KEY_DIR      = os.getenv("KEY_DIR", "/root/.openbot/keys")
 MODEL        = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 DURATION     = os.getenv("DURATION", "0")
 USER_PROMPT  = os.getenv("USER_PROMPT", "")
+TICK_INTERVAL = os.getenv("TICK_INTERVAL", "4.0")
 DEBUG        = os.getenv("DEBUG", "")
 OPENBOT_URL  = os.getenv("OPENBOT_URL", "http://localhost:3001")
 
@@ -259,6 +260,7 @@ def build_agent_cmd() -> list:
     cmd += ["--url", OPENBOT_URL]
     cmd += ["--model", MODEL]
     cmd += ["--duration", DURATION]
+    cmd += ["--tick-interval", TICK_INTERVAL]
     if USER_PROMPT:
         cmd += ["--user-prompt", USER_PROMPT]
     if DEBUG:
