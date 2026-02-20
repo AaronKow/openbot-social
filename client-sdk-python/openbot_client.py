@@ -272,7 +272,14 @@ class OpenBotClient:
             if agent_id not in current_agent_ids:
                 print(f"Agent left: {agent_id}")
                 del self.known_agents[agent_id]
-                
+
+                # If our own agent was evicted (e.g. server restart), mark
+                # ourselves as unregistered so callers can detect & reconnect.
+                if agent_id == self.agent_id:
+                    print("[client] ⚠️  Our own agent was removed from the server — marking unregistered.")
+                    self.registered = False
+                    self.agent_id = None
+
                 if self.on_agent_left:
                     self.on_agent_left(agent_id)
     

@@ -961,10 +961,28 @@ class AIAgent:
             print(f"   User prompt: \"{self.user_prompt}\"")
 
         start = time.time()
+        _reconnect_attempts = 0
+        _max_reconnect_delay = 60  # seconds
         try:
             while self._running:
                 if duration and (time.time() - start) >= duration:
                     break
+
+                # ── Auto-reconnect if evicted from server ──────────────
+                if self.client and not self.client.registered:
+                    _reconnect_attempts += 1
+                    delay = min(5 * _reconnect_attempts, _max_reconnect_delay)
+                    print(f"[agent] ⚠️  Not registered — reconnect attempt {_reconnect_attempts} (wait {delay}s)…")
+                    time.sleep(delay)
+                    try:
+                        self.client.disconnect()
+                    except Exception:
+                        pass
+                    if self._authenticate_and_connect():
+                        print(f"[agent] ✅  Reconnected as {self.entity_id} (ID: {self.client.agent_id})")
+                        _reconnect_attempts = 0
+                    else:
+                        continue  # skip think/act until we're back
 
                 actions = self._think()
                 self._execute(actions)
