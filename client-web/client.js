@@ -18,9 +18,8 @@ class OpenBotWorld {
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
-        this.activityLogFetched = false; // Whether the activity log has been loaded
-        this.summarizationTriggered = false; // Whether we've sent the one-time check
-        this._activityLogPollTimer = null; // Timer for re-polling when AI summaries are pending
+        this.activityLogFetched = false; // Whether the activity log has been loaded for this tab visit
+        this.summarizationTriggered = false; // Whether we've sent the one-time check this session
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -1078,19 +1077,10 @@ class OpenBotWorld {
 
             // If any summary is still awaiting AI completion, poll every 60 s
             // until all are done (or we stop seeing pending entries).
-            const hasPending = data.summaries.some(s => s.aiCompleted === false);
-            if (this._activityLogPollTimer) {
-                clearTimeout(this._activityLogPollTimer);
-                this._activityLogPollTimer = null;
-            }
-            if (hasPending) {
-                console.log('[ActivityLog] AI summaries pending — will re-check in 60s');
-                this._activityLogPollTimer = setTimeout(() => {
-                    this._activityLogPollTimer = null;
-                    this.activityLogFetched = false; // allow re-fetch
-                    this.fetchActivityLog();
-                }, 60_000);
-            }
+            // No client-side polling. The server runs AI summarization server-side
+            // (triggered once per session via POST /activity-log/check with a DB lock).
+            // Users see "⏳ AI pending" badges and get fresh data next time they
+            // switch to this tab. This keeps load manageable for hundreds of visitors.
         } catch (err) {
             console.error('[ActivityLog] Fetch error:', err);
             container.innerHTML = '<div class="activity-no-data">⚠️ Could not load activity log.</div>';

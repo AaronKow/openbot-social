@@ -137,14 +137,21 @@ async function initDatabase() {
         chat_count INTEGER NOT NULL DEFAULT 0,
         active_agents INTEGER NOT NULL DEFAULT 0,
         ai_completed BOOLEAN NOT NULL DEFAULT FALSE,
+        retry_count INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Migration: add ai_completed column if missing (for existing DBs)
+    // Migrations: add columns if missing (for existing DBs)
     await client.query(`
       DO $$ BEGIN
         ALTER TABLE activity_summaries ADD COLUMN IF NOT EXISTS ai_completed BOOLEAN NOT NULL DEFAULT FALSE;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE activity_summaries ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;
       EXCEPTION WHEN duplicate_column THEN NULL;
       END $$
     `);
@@ -608,14 +615,19 @@ async function getChatMessagesForDateRange(startTimestamp, endTimestamp) {
 // Save a daily activity summary (aiCompleted = true if AI generated, false if fallback)
 async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents, aiCompleted = false) {
   await pool.query(
-    `INSERT INTO activity_summaries (summary_date, daily_summary, hourly_summaries, chat_count, active_agents, ai_completed)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO activity_summaries (summary_date, daily_summary, hourly_summaries, chat_count, active_agents, ai_completed, retry_count)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6 THEN 0 ELSE 1 END)
      ON CONFLICT (summary_date) DO UPDATE SET
        daily_summary = EXCLUDED.daily_summary,
        hourly_summaries = EXCLUDED.hourly_summaries,
        chat_count = EXCLUDED.chat_count,
        active_agents = EXCLUDED.active_agents,
        ai_completed = EXCLUDED.ai_completed,
+       -- On success reset counter; on failure increment so we stop after 3 tries
+       retry_count = CASE
+         WHEN EXCLUDED.ai_completed = TRUE THEN 0
+         ELSE activity_summaries.retry_count + 1
+       END,
        created_at = CURRENT_TIMESTAMP`,
     [summaryDate, dailySummary, JSON.stringify(hourlySummaries), chatCount, activeAgents, aiCompleted]
   );
@@ -670,7 +682,9 @@ async function getUnsummarizedDays(beforeDate) {
      ) AS dates
      WHERE chat_date < $2
        AND chat_date NOT IN (
-         SELECT summary_date FROM activity_summaries WHERE ai_completed = TRUE
+         -- Skip days that are fully summarized OR have hit the retry cap (3 failures)
+         SELECT summary_date FROM activity_summaries
+         WHERE ai_completed = TRUE OR retry_count >= 3
        )
      ORDER BY chat_date ASC
      LIMIT 7`,

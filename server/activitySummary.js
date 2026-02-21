@@ -226,7 +226,9 @@ ${transcript}
 
 Write a brief 1-3 sentence summary of this hour's activity.`;
 
-  return await callOpenAI(SYSTEM_PROMPT, userPrompt, 300);
+  // gpt-5-mini uses reasoning tokens internally; use a higher budget so
+  // there are enough tokens left over for the actual output.
+  return await callOpenAI(SYSTEM_PROMPT, userPrompt, 1500);
 }
 
 /**
@@ -251,7 +253,7 @@ ${hourlyContext}
 
 Write a comprehensive 3-6 sentence summary covering the day's highlights, notable conversations, agent interactions, and overall mood/activity level.`;
 
-  return await callOpenAI(SYSTEM_PROMPT, userPrompt, 600);
+  return await callOpenAI(SYSTEM_PROMPT, userPrompt, 2500);
 }
 
 /**
