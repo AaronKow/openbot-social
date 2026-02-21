@@ -127,6 +127,36 @@ async function initDatabase() {
       )
     `);
 
+    // Create activity_summaries table for AI-generated daily summaries
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS activity_summaries (
+        id SERIAL PRIMARY KEY,
+        summary_date DATE NOT NULL UNIQUE,
+        daily_summary TEXT NOT NULL,
+        hourly_summaries JSONB NOT NULL DEFAULT '{}',
+        chat_count INTEGER NOT NULL DEFAULT 0,
+        active_agents INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create summary_trigger_lock table (single-row lock)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS summary_trigger_lock (
+        id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        is_running BOOLEAN DEFAULT FALSE,
+        last_triggered_at TIMESTAMP,
+        last_completed_at TIMESTAMP
+      )
+    `);
+
+    // Ensure the single lock row exists
+    await client.query(`
+      INSERT INTO summary_trigger_lock (id, is_running)
+      VALUES (1, FALSE)
+      ON CONFLICT (id) DO NOTHING
+    `);
+
     // Create index for faster queries
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp 
@@ -171,6 +201,11 @@ async function initDatabase() {
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier 
       ON rate_limits(identifier, action_type)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_activity_summaries_date 
+      ON activity_summaries(summary_date DESC)
     `);
 
     await client.query('COMMIT');
@@ -542,6 +577,125 @@ async function cleanupRateLimits() {
   await pool.query(`DELETE FROM rate_limits WHERE window_start < NOW() - INTERVAL '1 hour'`);
 }
 
+// ============= ACTIVITY SUMMARY FUNCTIONS =============
+
+// Get chat messages for a specific date range (timestamps in ms)
+async function getChatMessagesForDateRange(startTimestamp, endTimestamp) {
+  const result = await pool.query(
+    `SELECT agent_id, agent_name, message, timestamp 
+     FROM chat_messages 
+     WHERE timestamp >= $1 AND timestamp < $2 
+     ORDER BY timestamp ASC`,
+    [startTimestamp, endTimestamp]
+  );
+  return result.rows.map(row => ({
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp, 10)
+  }));
+}
+
+// Save a daily activity summary
+async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents) {
+  await pool.query(
+    `INSERT INTO activity_summaries (summary_date, daily_summary, hourly_summaries, chat_count, active_agents)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (summary_date) DO UPDATE SET
+       daily_summary = EXCLUDED.daily_summary,
+       hourly_summaries = EXCLUDED.hourly_summaries,
+       chat_count = EXCLUDED.chat_count,
+       active_agents = EXCLUDED.active_agents,
+       created_at = CURRENT_TIMESTAMP`,
+    [summaryDate, dailySummary, JSON.stringify(hourlySummaries), chatCount, activeAgents]
+  );
+}
+
+// Get summaries for the most recent N days
+async function getActivitySummaries(limit = 14) {
+  const result = await pool.query(
+    `SELECT summary_date, daily_summary, hourly_summaries, chat_count, active_agents, created_at
+     FROM activity_summaries
+     ORDER BY summary_date DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map(row => ({
+    date: row.summary_date,
+    dailySummary: row.daily_summary,
+    hourlySummaries: row.hourly_summaries,
+    chatCount: row.chat_count,
+    activeAgents: row.active_agents,
+    createdAt: row.created_at
+  }));
+}
+
+// Check if a specific day already has a summary
+async function hasSummaryForDate(summaryDate) {
+  const result = await pool.query(
+    'SELECT 1 FROM activity_summaries WHERE summary_date = $1',
+    [summaryDate]
+  );
+  return result.rows.length > 0;
+}
+
+// Get distinct dates that have chat messages but no summary (max 7 at a time to limit work)
+async function getUnsummarizedDays(beforeDate) {
+  const result = await pool.query(
+    `SELECT DISTINCT chat_date FROM (
+       SELECT DATE(TO_TIMESTAMP(timestamp / 1000.0)) AS chat_date
+       FROM chat_messages
+       WHERE timestamp < $1
+     ) AS dates
+     WHERE chat_date < $2
+       AND chat_date NOT IN (
+         SELECT summary_date FROM activity_summaries
+       )
+     ORDER BY chat_date ASC
+     LIMIT 7`,
+    [
+      new Date(beforeDate + 'T00:00:00.000Z').getTime(), // use index on timestamp
+      beforeDate
+    ]
+  );
+  return result.rows.map(row => row.chat_date);
+}
+
+// Attempt to acquire the summary trigger lock (returns true if acquired)
+async function acquireSummaryLock() {
+  const result = await pool.query(
+    `UPDATE summary_trigger_lock
+     SET is_running = TRUE, last_triggered_at = NOW()
+     WHERE id = 1
+       AND (is_running = FALSE
+            OR last_triggered_at < NOW() - INTERVAL '10 minutes')
+     RETURNING *`
+  );
+  return result.rows.length > 0;
+}
+
+// Release the summary trigger lock
+async function releaseSummaryLock() {
+  await pool.query(
+    `UPDATE summary_trigger_lock
+     SET is_running = FALSE, last_completed_at = NOW()
+     WHERE id = 1`
+  );
+}
+
+// Check if the summary lock is currently active and recent
+async function isSummaryLockActive() {
+  const result = await pool.query(
+    `SELECT is_running, last_triggered_at FROM summary_trigger_lock WHERE id = 1`
+  );
+  if (result.rows.length === 0) return false;
+  const row = result.rows[0];
+  if (!row.is_running) return false;
+  // Consider stale if > 10 minutes
+  const triggeredAt = new Date(row.last_triggered_at);
+  return (Date.now() - triggeredAt.getTime()) < 10 * 60 * 1000;
+}
+
 // Health check
 async function healthCheck() {
   try {
@@ -587,5 +741,14 @@ module.exports = {
   cleanupExpiredSessions,
   // Rate limit functions
   checkRateLimit,
-  cleanupRateLimits
+  cleanupRateLimits,
+  // Activity summary functions
+  getChatMessagesForDateRange,
+  saveDailySummary,
+  getActivitySummaries,
+  hasSummaryForDate,
+  getUnsummarizedDays,
+  acquireSummaryLock,
+  releaseSummaryLock,
+  isSummaryLockActive
 };

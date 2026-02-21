@@ -18,6 +18,8 @@ class OpenBotWorld {
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
+        this.activityLogFetched = false; // Whether the activity log has been loaded
+        this.summarizationTriggered = false; // Whether we've sent the one-time check
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -69,6 +71,7 @@ class OpenBotWorld {
         this.setupMouseControls();
         this.startPolling();
         this.startUptimeTimer();
+        // triggerSummarizationCheck is called after first successful connection
         this.animate();
     }
     
@@ -271,12 +274,43 @@ class OpenBotWorld {
             agentList.classList.toggle('visible');
         });
         
-        // Chat panel minimize/close
+        // Chat panel minimize/close (toggles the active tab content)
         const chatToggle = document.getElementById('chat-toggle');
-        const chatMessages = document.getElementById('chat-messages');
         chatToggle.addEventListener('click', () => {
-            chatMessages.classList.toggle('hidden');
-            chatToggle.textContent = chatMessages.classList.contains('hidden') ? '+' : '−';
+            const activeContent = document.querySelector('.chat-tab-content.active');
+            if (activeContent) {
+                activeContent.classList.toggle('hidden');
+                chatToggle.textContent = activeContent.classList.contains('hidden') ? '+' : '−';
+            }
+        });
+
+        // Chat/Activity Log tab switching
+        const tabButtons = document.querySelectorAll('.chat-panel-tab');
+        tabButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                // Update tab button states
+                tabButtons.forEach(b => {
+                    b.classList.remove('active');
+                    b.setAttribute('aria-selected', 'false');
+                });
+                btn.classList.add('active');
+                btn.setAttribute('aria-selected', 'true');
+                // Update tab content visibility
+                document.querySelectorAll('.chat-tab-content').forEach(tc => {
+                    tc.classList.remove('active');
+                    tc.classList.remove('hidden');
+                });
+                const targetContent = document.getElementById(tabName + '-tab');
+                if (targetContent) targetContent.classList.add('active');
+                // Reset minimize button
+                const chatToggleBtn = document.getElementById('chat-toggle');
+                if (chatToggleBtn) chatToggleBtn.textContent = '−';
+                // Fetch activity log on first switch to that tab
+                if (tabName === 'activity-log' && !this.activityLogFetched) {
+                    this.fetchActivityLog();
+                }
+            });
         });
         
         // Controls panel close
@@ -588,6 +622,8 @@ class OpenBotWorld {
                     document.getElementById('uptime-display').textContent = this.formatUptime(data.uptimeMs);
                 }
                 this.updateStatus();
+                // Trigger summarization check once on first successful connection
+                this.triggerSummarizationCheck();
             }
         } catch (error) {
             console.error('Connection error:', error);
@@ -986,6 +1022,147 @@ class OpenBotWorld {
                 document.getElementById('uptime-display').textContent = this.formatUptime(uptimeMs);
             }
         }, 1000);
+    }
+
+    /**
+     * One-time call on page load: tells the server to check for unsummarized days.
+     * The server handles locking so concurrent visitors don't trigger duplicate work.
+     */
+    async triggerSummarizationCheck() {
+        if (this.summarizationTriggered) return;
+        this.summarizationTriggered = true;
+
+        try {
+            const response = await fetch(`${this.apiBase}/activity-log/check`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            if (response.ok) {
+                const result = await response.json();
+                console.log('[ActivityLog] Check result:', result.message);
+                // If summarization was triggered, refresh the activity log
+                // if the tab is currently being viewed
+                if (result.triggered && this.activityLogFetched) {
+                    setTimeout(() => this.fetchActivityLog(), 2000);
+                }
+            }
+        } catch (err) {
+            console.error('[ActivityLog] Summarization check error:', err);
+        }
+    }
+
+    /**
+     * Fetch activity log summaries from the server and render them.
+     */
+    async fetchActivityLog() {
+        const container = document.getElementById('activity-log-content');
+        if (!container) return;
+
+        container.innerHTML = '<div class="activity-loading">⏳ Loading activity log...</div>';
+
+        try {
+            const response = await fetch(`${this.apiBase}/activity-log?limit=14`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const data = await response.json();
+            this.activityLogFetched = true;
+
+            if (!data.summaries || data.summaries.length === 0) {
+                container.innerHTML = '<div class="activity-no-data">🧠 No activity summaries available yet.<br><span style="font-size:10px">Summaries are generated once a full day of activity completes.</span></div>';
+                return;
+            }
+
+            this.renderActivityLog(data.summaries, container);
+        } catch (err) {
+            console.error('[ActivityLog] Fetch error:', err);
+            container.innerHTML = '<div class="activity-no-data">⚠️ Could not load activity log.</div>';
+        }
+    }
+
+    /**
+     * Render activity summaries into the container.
+     */
+    renderActivityLog(summaries, container) {
+        container.innerHTML = '';
+
+        for (const summary of summaries) {
+            const dayDiv = document.createElement('div');
+            dayDiv.className = 'activity-day';
+
+            // Format the date nicely
+            const dateObj = new Date(summary.date + 'T00:00:00Z');
+            const dateStr = dateObj.toLocaleDateString(undefined, {
+                weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'
+            });
+
+            // Day header (clickable to expand hourly details)
+            const header = document.createElement('div');
+            header.className = 'activity-day-header';
+
+            const headerInfo = document.createElement('div');
+            const dateSpan = document.createElement('span');
+            dateSpan.className = 'activity-day-date';
+            dateSpan.textContent = `📅 ${dateStr}`;
+            const statsSpan = document.createElement('span');
+            statsSpan.className = 'activity-day-stats';
+            statsSpan.textContent = `💬 ${summary.chatCount} msgs · 🦞 ${summary.activeAgents} lobsters`;
+            headerInfo.appendChild(dateSpan);
+            headerInfo.appendChild(document.createTextNode(' '));
+            headerInfo.appendChild(statsSpan);
+
+            const toggleSpan = document.createElement('span');
+            toggleSpan.className = 'activity-day-toggle';
+            toggleSpan.textContent = '▶';
+
+            header.appendChild(headerInfo);
+            header.appendChild(toggleSpan);
+
+            // Day summary
+            const summaryDiv = document.createElement('div');
+            summaryDiv.className = 'activity-day-summary';
+            summaryDiv.textContent = summary.dailySummary;
+
+            // Hourly details (collapsed by default)
+            const hoursDiv = document.createElement('div');
+            hoursDiv.className = 'activity-hours';
+
+            const hourlySummaries = summary.hourlySummaries || {};
+            const sortedHours = Object.keys(hourlySummaries)
+                .map(Number)
+                .sort((a, b) => a - b);
+
+            if (sortedHours.length > 0) {
+                for (const hour of sortedHours) {
+                    const hourDiv = document.createElement('div');
+                    hourDiv.className = 'activity-hour';
+                    const hourLabel = `${String(hour).padStart(2, '0')}:00`;
+                    const labelSpan = document.createElement('span');
+                    labelSpan.className = 'activity-hour-label';
+                    labelSpan.textContent = `${hourLabel} UTC`;
+                    hourDiv.appendChild(labelSpan);
+                    hourDiv.appendChild(document.createTextNode(' ' + hourlySummaries[hour]));
+                    hoursDiv.appendChild(hourDiv);
+                }
+            } else {
+                const noDataDiv = document.createElement('div');
+                noDataDiv.className = 'activity-hour';
+                noDataDiv.style.cssText = 'color:#669999;font-style:italic;';
+                noDataDiv.textContent = 'No hourly breakdown available';
+                hoursDiv.appendChild(noDataDiv);
+            }
+
+            // Toggle hourly details on header click
+            header.addEventListener('click', () => {
+                hoursDiv.classList.toggle('expanded');
+                const toggle = header.querySelector('.activity-day-toggle');
+                toggle.textContent = hoursDiv.classList.contains('expanded') ? '▼' : '▶';
+            });
+
+            dayDiv.appendChild(header);
+            dayDiv.appendChild(summaryDiv);
+            dayDiv.appendChild(hoursDiv);
+            container.appendChild(dayDiv);
+        }
     }
     
     updateAgentList() {

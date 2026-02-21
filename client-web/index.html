@@ -122,8 +122,47 @@
             padding: 15px;
             border-radius: 8px;
             max-width: 400px;
+            width: 400px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+        }
+        
+        .chat-panel-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 10px;
+            border-bottom: 2px solid rgba(0, 255, 204, 0.3);
+        }
+        
+        .chat-panel-tab {
+            background: none;
+            border: none;
+            border-bottom: 3px solid transparent;
+            color: rgba(0, 255, 204, 0.5);
+            cursor: pointer;
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+            padding: 6px 14px;
+            margin-bottom: -2px;
+            transition: color 0.2s, border-color 0.2s;
+        }
+        
+        .chat-panel-tab:hover {
+            color: #00ffcc;
+        }
+        
+        .chat-panel-tab.active {
+            color: #00ffcc;
+            border-bottom-color: #00ffcc;
+            font-weight: bold;
+        }
+        
+        .chat-tab-content {
+            display: none;
+        }
+        
+        .chat-tab-content.active {
+            display: block;
         }
         
         .chat-message {
@@ -261,6 +300,98 @@
         
         #chat-scroll-bottom:hover {
             background: rgba(0, 255, 204, 0.25);
+        }
+        
+        /* Activity Log styles */
+        #activity-log-content {
+            max-height: 300px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            font-size: 12px;
+        }
+        
+        .activity-day {
+            margin-bottom: 12px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(0, 255, 204, 0.15);
+        }
+        
+        .activity-day:last-child {
+            border-bottom: none;
+        }
+        
+        .activity-day-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            padding: 4px 0;
+            user-select: none;
+        }
+        
+        .activity-day-header:hover {
+            color: #00ffff;
+        }
+        
+        .activity-day-date {
+            font-weight: bold;
+            font-size: 13px;
+        }
+        
+        .activity-day-stats {
+            font-size: 10px;
+            color: #669999;
+        }
+        
+        .activity-day-toggle {
+            font-size: 10px;
+            color: #669999;
+            transition: transform 0.2s;
+        }
+        
+        .activity-day-summary {
+            margin: 6px 0;
+            padding: 6px 8px;
+            background: rgba(0, 255, 204, 0.06);
+            border-radius: 4px;
+            line-height: 1.5;
+            font-size: 11px;
+        }
+        
+        .activity-hours {
+            display: none;
+            margin-top: 6px;
+        }
+        
+        .activity-hours.expanded {
+            display: block;
+        }
+        
+        .activity-hour {
+            margin: 4px 0;
+            padding: 4px 8px;
+            border-left: 2px solid rgba(0, 255, 204, 0.2);
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        
+        .activity-hour-label {
+            color: #669999;
+            font-size: 10px;
+            font-family: monospace;
+        }
+        
+        .activity-no-data {
+            text-align: center;
+            color: #669999;
+            padding: 20px;
+            font-style: italic;
+        }
+        
+        .activity-loading {
+            text-align: center;
+            color: #669999;
+            padding: 20px;
         }
         
         .panel-header {
@@ -493,13 +624,24 @@
         </div>
     </div>
     
-    <div id="chat-panel" role="region" aria-label="Chat Messages">
+    <div id="chat-panel" role="region" aria-label="Chat & Activity Log">
         <div class="panel-header">
             <h2>💬 Chat</h2>
-            <button id="chat-toggle" class="panel-icon-btn" title="Minimize chat panel" aria-label="Minimize chat">−</button>
+            <button id="chat-toggle" class="panel-icon-btn" title="Minimize panel" aria-label="Minimize panel">−</button>
         </div>
-        <div id="chat-messages" role="log" aria-label="Chat message log" aria-live="polite"></div>
-        <button id="chat-scroll-bottom" aria-label="Scroll to latest messages">↓ New messages</button>
+        <div class="chat-panel-tabs" role="tablist">
+            <button class="chat-panel-tab active" role="tab" aria-selected="true" data-tab="chat" id="tab-btn-chat-main">💬 Chat</button>
+            <button class="chat-panel-tab" role="tab" aria-selected="false" data-tab="activity-log" id="tab-btn-activity-log">📋 Activity Log</button>
+        </div>
+        <div id="chat-tab" class="chat-tab-content active">
+            <div id="chat-messages" role="log" aria-label="Chat message log" aria-live="polite"></div>
+            <button id="chat-scroll-bottom" aria-label="Scroll to latest messages">↓ New messages</button>
+        </div>
+        <div id="activity-log-tab" class="chat-tab-content">
+            <div id="activity-log-content">
+                <div class="activity-loading">Loading activity log...</div>
+            </div>
+        </div>
     </div>
     
     <div id="controls-panel" role="region" aria-label="Camera Controls">

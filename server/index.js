@@ -5,6 +5,7 @@ const db = require('./db');
 const serverCrypto = require('./crypto');
 const { createEntityRouter, requireSession, optionalSession, encryptIfAuthenticated } = require('./entityRoutes');
 const { createRateLimiter, createEntityRateLimiter } = require('./rateLimit');
+const activitySummary = require('./activitySummary');
 
 const app = express();
 
@@ -609,6 +610,68 @@ app.get('/agents', (req, res) => {
   res.json({
     agents: Array.from(worldState.agents.values()).map(a => a.toJSON())
   });
+});
+
+// ============= ACTIVITY LOG ENDPOINTS =============
+
+// In-memory cache for activity log (avoids DB hit on every request from thousands of visitors)
+let _activityLogCache = null;
+let _activityLogCacheTime = 0;
+const ACTIVITY_LOG_CACHE_TTL = 60_000; // 1 minute
+
+// In-memory throttle for the /check endpoint (supplement to DB lock)
+let _lastCheckTriggerTime = 0;
+const CHECK_THROTTLE_MS = 30_000; // At most one real check every 30s
+
+// Get activity summaries (daily + hourly) for the frontend — cached
+app.get('/activity-log', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 14, 60);
+
+    // Serve from cache if fresh
+    if (_activityLogCache && (Date.now() - _activityLogCacheTime) < ACTIVITY_LOG_CACHE_TTL
+        && _activityLogCache._limit >= limit) {
+      return res.json(_activityLogCache.data);
+    }
+
+    const result = await activitySummary.getActivityLog(limit);
+
+    // Update cache
+    _activityLogCache = { data: result, _limit: limit };
+    _activityLogCacheTime = Date.now();
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching activity log:', error);
+    res.status(500).json({ summaries: [], error: 'Internal server error' });
+  }
+});
+
+// Trigger summarization check (called once by frontend on page load)
+// Throttled in-memory + DB lock to handle thousands of concurrent visitors
+app.post('/activity-log/check', async (req, res) => {
+  try {
+    const now = Date.now();
+
+    // In-memory throttle: if another check ran very recently, skip entirely
+    if (now - _lastCheckTriggerTime < CHECK_THROTTLE_MS) {
+      return res.json({ triggered: false, message: 'Check was performed recently' });
+    }
+    _lastCheckTriggerTime = now;
+
+    // Run summarization (has its own DB-level lock for safety)
+    const result = await activitySummary.checkAndSummarize();
+
+    // Invalidate the activity log cache if new summaries were created
+    if (result.triggered) {
+      _activityLogCache = null;
+    }
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error checking activity log:', error);
+    res.status(500).json({ triggered: false, message: 'Internal server error' });
+  }
 });
 
 // Initialize and start server
