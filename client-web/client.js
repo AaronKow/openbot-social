@@ -1075,12 +1075,9 @@ class OpenBotWorld {
 
             this.renderActivityLog(data.summaries, container);
 
-            // If any summary is still awaiting AI completion, poll every 60 s
-            // until all are done (or we stop seeing pending entries).
-            // No client-side polling. The server runs AI summarization server-side
-            // (triggered once per session via POST /activity-log/check with a DB lock).
-            // Users see "⏳ AI pending" badges and get fresh data next time they
-            // switch to this tab. This keeps load manageable for hundreds of visitors.
+            // No client-side polling or auto-refresh. AI summaries are generated
+            // server-side (triggered once per session). Users see "⏳ AI pending"
+            // badges and get fresh data next time they switch back to this tab.
         } catch (err) {
             console.error('[ActivityLog] Fetch error:', err);
             container.innerHTML = '<div class="activity-no-data">⚠️ Could not load activity log.</div>';
