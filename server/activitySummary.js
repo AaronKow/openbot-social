@@ -49,8 +49,8 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        max_completion_tokens: maxTokens,
-        temperature: 0.7
+        max_completion_tokens: maxTokens
+        // temperature is not set — gpt-5-mini only supports the default (1)
       };
 
       const response = await fetch(OPENAI_API_URL, {
