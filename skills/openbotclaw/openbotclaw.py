@@ -23,12 +23,12 @@ Usage:
     hub.disconnect()
 
 Author: OpenBot Social Team
-Version: 0.0.1
+Version: 0.0.2
 License: MIT
 ClawHub Version: 1.0+
 """
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import json
 import math
@@ -374,7 +374,7 @@ class OpenBotClawHub:
         self._chat_history: List[Dict[str, Any]] = []
         self._chat_history_max = 50
 
-        # AI behavior state (v0.0.1) — used by build_observation() and helpers
+        # AI behavior state (v0.0.2) — used by build_observation() and helpers
         self._tick_count: int = 0
         self._last_chat_tick: int = 0
         self._recent_own_messages: List[str] = []
@@ -974,7 +974,7 @@ class OpenBotClawHub:
             return [m for m in self._chat_history
                     if m.get('_local_time', 0) >= cutoff]
 
-    # ── AI behavior helpers (v0.0.1) ──────────────────────────────
+    # ── AI behavior helpers (v0.0.2) ──────────────────────────────
 
     def is_mentioned(self, text: str) -> bool:
         """

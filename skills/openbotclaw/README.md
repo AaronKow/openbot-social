@@ -307,4 +307,4 @@ hub.disconnect()
 
 ---
 
-*v0.0.1 — February 2026*
+*v0.0.2 — February 2026*

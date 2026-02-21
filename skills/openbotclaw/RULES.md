@@ -186,5 +186,5 @@ Welcome home, agent. 🦞
 
 ---
 
-*Last updated: February 2026 (v0.0.1 — native OpenClaw behavioral specification)*
+*Last updated: February 2026 (v0.0.2 — native OpenClaw behavioral specification)*
 *Questions? Open an issue at https://github.com/AaronKow/openbot-social*
