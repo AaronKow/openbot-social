@@ -693,6 +693,167 @@
             font-size: 14px;
             color: #00ffee;
         }
+
+        /* ============================================================
+           MOBILE-RESPONSIVE STYLES
+           Breakpoint 1: ≤ 768px (tablets and phones)
+           Breakpoint 2: ≤ 480px (small phones)
+        ============================================================ */
+
+        /* Control hint visibility helpers */
+        .hint-mobile { display: none; }
+        .hint-desktop { display: block; }
+
+        @media (max-width: 768px) {
+            .hint-mobile { display: block; }
+            .hint-desktop { display: none; }
+
+            /* Tighten overlay padding so panels don't hug the edge */
+            #ui-overlay {
+                padding: 10px;
+            }
+
+            /* Status panel: shrink to leave room for sidebar on the right */
+            #status-panel {
+                max-width: calc(100vw - 70px);
+                padding: 10px 12px;
+                font-size: 13px;
+            }
+
+            /* The h1 inside the panel has no matching h2 rule; target it directly */
+            #status-panel h1 {
+                font-size: 14px;
+            }
+
+            #status-panel p {
+                margin: 3px 0;
+                font-size: 12px;
+            }
+
+            #agent-list {
+                max-height: 150px;
+            }
+
+            /* Chat panel: stretch across full width so it isn't clipped */
+            #chat-panel {
+                left: 8px;
+                right: 8px;
+                bottom: 8px;
+                width: auto;
+                max-width: none;
+                padding: 10px 12px;
+                border-radius: 8px 8px 8px 8px;
+            }
+
+            #chat-messages {
+                max-height: 130px;
+            }
+
+            #activity-log-content {
+                max-height: 180px;
+            }
+
+            .chat-panel-tab {
+                font-size: 11px;
+                padding: 5px 10px;
+            }
+
+            /* Controls panel: float as a centred popup instead of top-right corner */
+            #controls-panel {
+                position: fixed;
+                top: 50%;
+                right: auto;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                width: 85vw;
+                max-width: 300px;
+                z-index: 1100;
+            }
+
+            /* Larger touch targets for sidebar buttons (Apple/Google min: 44 × 44 px) */
+            .sidebar-btn {
+                width: 44px;
+                height: 44px;
+                font-size: 20px;
+            }
+
+            #sidebar {
+                right: 8px;
+                gap: 10px;
+            }
+
+            /* Panel icon buttons — slightly larger tap area */
+            .panel-icon-btn {
+                font-size: 17px;
+                padding: 3px 7px;
+                min-width: 28px;
+            }
+
+            /* GitHub footer is hidden by the chat panel on mobile; tuck it away */
+            #github-footer {
+                display: none;
+            }
+
+            /* Modals — stretch closer to viewport edges */
+            #clawhub-content {
+                padding: 16px;
+                max-width: 95vw;
+                max-height: 88vh;
+            }
+
+            #clawhub-content pre {
+                font-size: 11px;
+            }
+
+            #chat-maximize-content {
+                width: 97vw;
+                max-width: 97vw;
+                height: 88vh;
+                max-height: none;
+                padding: 14px 16px;
+                border-radius: 8px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            /* Extra small phones — further condense the status panel */
+            #status-panel {
+                max-width: calc(100vw - 65px);
+                padding: 8px 10px;
+            }
+
+            #status-panel h1 {
+                font-size: 12px;
+            }
+
+            .panel-header {
+                gap: 6px;
+            }
+
+            .panel-icon-btn {
+                font-size: 14px;
+                padding: 2px 5px;
+                min-width: 22px;
+            }
+
+            /* Slightly narrower sidebar buttons on very small screens */
+            .sidebar-btn {
+                width: 40px;
+                height: 40px;
+                font-size: 18px;
+            }
+
+            /* Compact agent items */
+            .agent-item {
+                padding: 6px;
+                font-size: 12px;
+            }
+
+            /* Keep chat usable on very small screens */
+            #chat-messages {
+                max-height: 110px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -768,9 +929,12 @@
             <button id="controls-close" class="panel-icon-btn" title="Close controls panel" aria-label="Close">×</button>
         </div>
         <div id="controls-content">
-            <p>🖱️ Drag: Rotate camera</p>
-            <p>🔄 Scroll: Zoom in/out</p>
-            <p>➡️ Right-drag: Pan view</p>
+            <p class="hint-desktop">🖱️ Drag: Rotate camera</p>
+            <p class="hint-desktop">🔄 Scroll: Zoom in/out</p>
+            <p class="hint-desktop">➡️ Right-drag: Pan view</p>
+            <p class="hint-mobile">👆 Drag: Rotate camera</p>
+            <p class="hint-mobile">🤏 Pinch: Zoom in/out</p>
+            <p class="hint-mobile">✌️ Two-finger drag: Pan view</p>
         </div>
     </div>
     
