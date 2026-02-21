@@ -500,6 +500,99 @@
         #clawhub-modal.visible {
             display: flex;
         }
+
+        /* Chat Maximize Modal */
+        #chat-maximize-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+            border: none;
+            padding: 0;
+        }
+
+        #chat-maximize-modal.visible {
+            display: flex;
+        }
+
+        #chat-maximize-content {
+            background: rgba(0, 20, 40, 0.97);
+            color: #00ffcc;
+            padding: 24px 28px;
+            border-radius: 10px;
+            border: 2px solid #00ffcc;
+            width: 760px;
+            max-width: 92vw;
+            height: 70vh;
+            max-height: 700px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .chat-maximize-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .chat-maximize-header h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .chat-maximize-tabs {
+            margin-bottom: 12px;
+        }
+
+        #chat-tab-max,
+        #activity-log-tab-max {
+            flex: 1;
+            overflow: hidden;
+            display: none;
+        }
+
+        #chat-tab-max.active,
+        #activity-log-tab-max.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        #chat-messages-max {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            font-size: 13px;
+        }
+
+        #activity-log-content-max {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            font-size: 12px;
+        }
+
+        /* Read-more link for activity log */
+        .activity-read-more {
+            color: #00ffcc;
+            cursor: pointer;
+            font-size: 11px;
+            font-style: italic;
+            white-space: nowrap;
+            user-select: none;
+        }
+
+        .activity-read-more:hover {
+            color: #00ffff;
+            text-decoration: underline;
+        }
         
         #clawhub-content {
             background: rgba(0, 20, 40, 0.95);
@@ -624,10 +717,35 @@
         </div>
     </div>
     
+    <!-- Chat Maximized Modal -->
+    <dialog id="chat-maximize-modal" aria-label="Expanded Chat &amp; Activity Log">
+        <div id="chat-maximize-content">
+            <div class="chat-maximize-header">
+                <h2>💬 Chat &amp; Activity Log</h2>
+                <button id="chat-maximize-restore" class="panel-icon-btn" title="Restore to normal size" aria-label="Restore panel">⊡</button>
+            </div>
+            <div class="chat-panel-tabs chat-maximize-tabs" role="tablist">
+                <button class="chat-panel-tab active" role="tab" aria-selected="true" data-tab="chat" id="tab-btn-chat-max">💬 Chat</button>
+                <button class="chat-panel-tab" role="tab" aria-selected="false" data-tab="activity-log" id="tab-btn-activity-log-max">📋 Activity Log</button>
+            </div>
+            <div id="chat-tab-max" class="chat-tab-content active">
+                <div id="chat-messages-max" role="log" aria-label="Chat message log" aria-live="polite"></div>
+            </div>
+            <div id="activity-log-tab-max" class="chat-tab-content">
+                <div id="activity-log-content-max">
+                    <div class="activity-loading">Loading activity log...</div>
+                </div>
+            </div>
+        </div>
+    </dialog>
+
     <div id="chat-panel" role="region" aria-label="Chat & Activity Log">
         <div class="panel-header">
             <h2>💬 Chat</h2>
-            <button id="chat-toggle" class="panel-icon-btn" title="Minimize panel" aria-label="Minimize panel">−</button>
+            <div class="panel-icons">
+                <button id="chat-maximize" class="panel-icon-btn" title="Maximize panel" aria-label="Maximize panel">⛶</button>
+                <button id="chat-close" class="panel-icon-btn" title="Close panel" aria-label="Close panel">×</button>
+            </div>
         </div>
         <div class="chat-panel-tabs" role="tablist">
             <button class="chat-panel-tab active" role="tab" aria-selected="true" data-tab="chat" id="tab-btn-chat-main">💬 Chat</button>

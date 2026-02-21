@@ -274,18 +274,69 @@ class OpenBotWorld {
             agentList.classList.toggle('visible');
         });
         
-        // Chat panel minimize/close (toggles the active tab content)
-        const chatToggle = document.getElementById('chat-toggle');
-        chatToggle.addEventListener('click', () => {
-            const activeContent = document.querySelector('.chat-tab-content.active');
-            if (activeContent) {
-                activeContent.classList.toggle('hidden');
-                chatToggle.textContent = activeContent.classList.contains('hidden') ? '+' : '−';
-            }
+        // Chat panel close button
+        const chatClose = document.getElementById('chat-close');
+        if (chatClose) {
+            chatClose.addEventListener('click', () => {
+                const chatPanel = document.getElementById('chat-panel');
+                if (chatPanel) chatPanel.style.display = 'none';
+            });
+        }
+
+        // Chat panel maximize / restore
+        const chatMaximizeBtn = document.getElementById('chat-maximize');
+        const chatMaximizeModal = document.getElementById('chat-maximize-modal');
+        const chatMaximizeRestore = document.getElementById('chat-maximize-restore');
+        const chatPanel = document.getElementById('chat-panel');
+
+        const openChatMaximize = () => {
+            if (!chatMaximizeModal) return;
+            // Mirror current active tab into the modal
+            const activeTabBtn = document.querySelector('.chat-panel-tab.active');
+            const activeTabName = activeTabBtn ? activeTabBtn.dataset.tab : 'chat';
+            this._syncMaximizeTab(activeTabName);
+            chatMaximizeModal.classList.add('visible');
+        };
+
+        const closeChatMaximize = () => {
+            if (!chatMaximizeModal) return;
+            chatMaximizeModal.classList.remove('visible');
+        };
+
+        if (chatMaximizeBtn) chatMaximizeBtn.addEventListener('click', openChatMaximize);
+        if (chatMaximizeRestore) chatMaximizeRestore.addEventListener('click', closeChatMaximize);
+        if (chatMaximizeModal) {
+            chatMaximizeModal.addEventListener('click', (e) => {
+                if (e.target === chatMaximizeModal) closeChatMaximize();
+            });
+        }
+
+        // Maximize modal tab switching
+        const maxTabButtons = document.querySelectorAll('#chat-maximize-content .chat-panel-tab');
+        maxTabButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tabName = btn.dataset.tab;
+                maxTabButtons.forEach(b => {
+                    b.classList.remove('active');
+                    b.setAttribute('aria-selected', 'false');
+                });
+                btn.classList.add('active');
+                btn.setAttribute('aria-selected', 'true');
+                document.querySelectorAll('#chat-maximize-content .chat-tab-content').forEach(tc => {
+                    tc.classList.remove('active');
+                });
+                const target = document.getElementById(tabName + '-tab-max');
+                if (target) target.classList.add('active');
+                if (tabName === 'activity-log') {
+                    this._renderActivityLogInto('activity-log-content-max');
+                } else {
+                    this._mirrorChatMessages();
+                }
+            });
         });
 
         // Chat/Activity Log tab switching
-        const tabButtons = document.querySelectorAll('.chat-panel-tab');
+        const tabButtons = document.querySelectorAll('#chat-panel .chat-panel-tab');
         tabButtons.forEach(btn => {
             btn.addEventListener('click', () => {
                 const tabName = btn.dataset.tab;
@@ -297,15 +348,12 @@ class OpenBotWorld {
                 btn.classList.add('active');
                 btn.setAttribute('aria-selected', 'true');
                 // Update tab content visibility
-                document.querySelectorAll('.chat-tab-content').forEach(tc => {
+                document.querySelectorAll('#chat-panel .chat-tab-content').forEach(tc => {
                     tc.classList.remove('active');
                     tc.classList.remove('hidden');
                 });
                 const targetContent = document.getElementById(tabName + '-tab');
                 if (targetContent) targetContent.classList.add('active');
-                // Reset minimize button
-                const chatToggleBtn = document.getElementById('chat-toggle');
-                if (chatToggleBtn) chatToggleBtn.textContent = '−';
                 // Fetch activity log on first switch to that tab
                 if (tabName === 'activity-log') {
                     // Always re-fetch when switching to the tab so stale data
@@ -343,14 +391,13 @@ class OpenBotWorld {
         
         // Sidebar panel toggles
         const statusPanel = document.getElementById('status-panel');
-        const chatPanel = document.getElementById('chat-panel');
         
         document.getElementById('sidebar-status-btn').addEventListener('click', () => {
             statusPanel.style.display = statusPanel.style.display === 'none' ? 'block' : 'none';
         });
         
         document.getElementById('sidebar-chat-btn').addEventListener('click', () => {
-            chatPanel.style.display = chatPanel.style.display === 'none' ? 'block' : 'none';
+            if (chatPanel) chatPanel.style.display = chatPanel.style.display === 'none' ? 'block' : 'none';
         });
         
         document.getElementById('sidebar-controls-btn').addEventListener('click', () => {
@@ -1073,6 +1120,7 @@ class OpenBotWorld {
                 return;
             }
 
+            this._lastActivitySummaries = data.summaries;
             this.renderActivityLog(data.summaries, container);
 
             // No client-side polling or auto-refresh. AI summaries are generated
@@ -1135,10 +1183,34 @@ class OpenBotWorld {
             header.appendChild(headerInfo);
             header.appendChild(toggleSpan);
 
-            // Day summary
+            // Day summary — truncate at 250 chars with "... Read more ..."
             const summaryDiv = document.createElement('div');
             summaryDiv.className = 'activity-day-summary';
-            summaryDiv.textContent = summary.dailySummary;
+            const fullText = summary.dailySummary || '';
+            const TRUNC_LIMIT = 250;
+            if (fullText.length > TRUNC_LIMIT) {
+                const truncated = fullText.slice(0, TRUNC_LIMIT).trimEnd();
+                const textNode = document.createTextNode(truncated);
+                const readMoreLink = document.createElement('span');
+                readMoreLink.className = 'activity-read-more';
+                readMoreLink.textContent = '... Read more ...';
+                let expanded = false;
+                readMoreLink.addEventListener('click', (e) => {
+                    e.stopPropagation(); // don't trigger the day header toggle
+                    expanded = !expanded;
+                    if (expanded) {
+                        textNode.textContent = fullText;
+                        readMoreLink.textContent = ' Read less';
+                    } else {
+                        textNode.textContent = truncated;
+                        readMoreLink.textContent = '... Read more ...';
+                    }
+                });
+                summaryDiv.appendChild(textNode);
+                summaryDiv.appendChild(readMoreLink);
+            } else {
+                summaryDiv.textContent = fullText;
+            }
 
             // Hourly details (collapsed by default)
             const hoursDiv = document.createElement('div');
@@ -1182,7 +1254,62 @@ class OpenBotWorld {
             container.appendChild(dayDiv);
         }
     }
-    
+
+    /**
+     * Sync and open the maximize modal on a specific tab.
+     */
+    _syncMaximizeTab(tabName) {
+        // Switch buttons
+        document.querySelectorAll('#chat-maximize-content .chat-panel-tab').forEach(b => {
+            const isTarget = b.dataset.tab === tabName;
+            b.classList.toggle('active', isTarget);
+            b.setAttribute('aria-selected', String(isTarget));
+        });
+        // Switch panels
+        document.querySelectorAll('#chat-maximize-content .chat-tab-content').forEach(tc => {
+            tc.classList.remove('active');
+        });
+        const target = document.getElementById(tabName + '-tab-max');
+        if (target) target.classList.add('active');
+        // Fill content
+        if (tabName === 'activity-log') {
+            this._renderActivityLogInto('activity-log-content-max');
+        } else {
+            this._mirrorChatMessages();
+        }
+    }
+
+    /**
+     * Copy chat messages into the maximize modal.
+     */
+    _mirrorChatMessages() {
+        const src = document.getElementById('chat-messages');
+        const dst = document.getElementById('chat-messages-max');
+        if (!src || !dst) return;
+        dst.innerHTML = src.innerHTML;
+        dst.scrollTop = dst.scrollHeight;
+    }
+
+    /**
+     * Render the cached activity log summaries into a given container id.
+     */
+    _renderActivityLogInto(containerId) {
+        // Re-use fetchActivityLog data if already fetched, otherwise trigger fetch.
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        if (!this._lastActivitySummaries) {
+            container.innerHTML = '<div class="activity-loading">⏳ Loading activity log...</div>';
+            this.fetchActivityLog().then(() => {
+                if (this._lastActivitySummaries) {
+                    this.renderActivityLog(this._lastActivitySummaries, container);
+                }
+            });
+            return;
+        }
+        this.renderActivityLog(this._lastActivitySummaries, container);
+    }
+
     updateAgentList() {
         const listEl = document.getElementById('agent-list');
         listEl.innerHTML = '';
