@@ -29,31 +29,37 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
   const apiKey = getOpenAIKey();
   if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not configured');
+    throw new Error('OPENAI_API_KEY is not configured — set it in your .env file');
   }
 
   const model = getOpenAIModel();
+  console.log(`[ActivitySummary] Calling OpenAI model=${model}, maxTokens=${maxTokens}`);
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), OPENAI_REQUEST_TIMEOUT_MS);
 
     try {
+      // Send both max_tokens (legacy) and max_completion_tokens (newer models)
+      // to maximise compatibility — the API ignores the one it doesn't recognise.
+      const body = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: maxTokens,
+        max_completion_tokens: maxTokens,
+        temperature: 0.7
+      };
+
       const response = await fetch(OPENAI_API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          max_completion_tokens: maxTokens,
-          temperature: 0.7
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal
       });
 
@@ -70,11 +76,38 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
 
       if (!response.ok) {
         const errorBody = await response.text();
+        console.error(`[ActivitySummary] OpenAI API error ${response.status}: ${errorBody}`);
+
+        // If model or param rejected (400), try once more with only max_tokens
+        if (response.status === 400 && attempt === 0) {
+          console.warn(`[ActivitySummary] Retrying without max_completion_tokens in case model doesn't support it`);
+          delete body.max_completion_tokens;
+          const retryResp = await fetch(OPENAI_API_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(body)
+          });
+          if (retryResp.ok) {
+            const data = await retryResp.json();
+            return data.choices[0].message.content.trim();
+          }
+          const retryError = await retryResp.text();
+          console.error(`[ActivitySummary] Retry also failed ${retryResp.status}: ${retryError}`);
+        }
+
         throw new Error(`OpenAI API error ${response.status}: ${errorBody}`);
       }
 
       const data = await response.json();
-      return data.choices[0].message.content.trim();
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) {
+        console.error(`[ActivitySummary] OpenAI returned empty content:`, JSON.stringify(data).slice(0, 500));
+        throw new Error('OpenAI returned empty response content');
+      }
+      return content.trim();
     } catch (err) {
       clearTimeout(timeout);
       if (err.name === 'AbortError') {
@@ -86,7 +119,7 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
       }
       // Network errors — retry
       if (attempt < MAX_RETRIES && err.code !== 'ERR_ASSERTION') {
-        console.warn(`[ActivitySummary] Network error, retrying: ${err.message}`);
+        console.warn(`[ActivitySummary] Network error (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}`);
         await sleep(RETRY_DELAY_MS * (attempt + 1));
         continue;
       }
@@ -201,6 +234,7 @@ Write a comprehensive 3-6 sentence summary covering the day's highlights, notabl
 
 /**
  * Process a single day: fetch messages, generate hourly + daily summaries, save to DB.
+ * Returns true if AI successfully produced all summaries, false if fallbacks were used.
  */
 async function processDay(dateObj) {
   const dateStr = dateObj.toISOString().slice(0, 10); // YYYY-MM-DD
@@ -224,6 +258,7 @@ async function processDay(dateObj) {
   // Group by hour and generate hourly summaries
   const hourGroups = groupMessagesByHour(messages);
   const hourlySummaries = {};
+  let anyHourFailed = false;
 
   for (const [hour, hourMessages] of Object.entries(hourGroups)) {
     try {
@@ -234,23 +269,27 @@ async function processDay(dateObj) {
     } catch (err) {
       console.error(`[ActivitySummary] Error summarizing hour ${hour} of ${dateStr}:`, err.message);
       hourlySummaries[hour] = `(${hourMessages.length} messages — summary unavailable)`;
+      anyHourFailed = true;
     }
   }
 
   // Generate daily summary from hourly summaries
   let dailySummary;
+  let dailyFailed = false;
   try {
     dailySummary = await summarizeDay(messages, hourlySummaries, dateStr);
   } catch (err) {
     console.error(`[ActivitySummary] Error generating daily summary for ${dateStr}:`, err.message);
     dailySummary = `${messages.length} messages from ${getUniqueAgents(messages).length} lobsters. (AI summary unavailable)`;
+    dailyFailed = true;
   }
 
   const activeAgents = getUniqueAgents(messages).length;
+  const aiCompleted = !anyHourFailed && !dailyFailed;
 
-  // Save to database
-  await db.saveDailySummary(dateStr, dailySummary, hourlySummaries, messages.length, activeAgents);
-  console.log(`[ActivitySummary] Saved summary for ${dateStr}`);
+  // Save to database (with ai_completed flag so failed days can be retried)
+  await db.saveDailySummary(dateStr, dailySummary, hourlySummaries, messages.length, activeAgents, aiCompleted);
+  console.log(`[ActivitySummary] Saved summary for ${dateStr} (ai_completed=${aiCompleted})`);
 }
 
 /**

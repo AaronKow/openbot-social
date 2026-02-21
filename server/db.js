@@ -136,8 +136,17 @@ async function initDatabase() {
         hourly_summaries JSONB NOT NULL DEFAULT '{}',
         chat_count INTEGER NOT NULL DEFAULT 0,
         active_agents INTEGER NOT NULL DEFAULT 0,
+        ai_completed BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+
+    // Migration: add ai_completed column if missing (for existing DBs)
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE activity_summaries ADD COLUMN IF NOT EXISTS ai_completed BOOLEAN NOT NULL DEFAULT FALSE;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
     `);
 
     // Create summary_trigger_lock table (single-row lock)
@@ -596,38 +605,49 @@ async function getChatMessagesForDateRange(startTimestamp, endTimestamp) {
   }));
 }
 
-// Save a daily activity summary
-async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents) {
+// Save a daily activity summary (aiCompleted = true if AI generated, false if fallback)
+async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents, aiCompleted = false) {
   await pool.query(
-    `INSERT INTO activity_summaries (summary_date, daily_summary, hourly_summaries, chat_count, active_agents)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO activity_summaries (summary_date, daily_summary, hourly_summaries, chat_count, active_agents, ai_completed)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (summary_date) DO UPDATE SET
        daily_summary = EXCLUDED.daily_summary,
        hourly_summaries = EXCLUDED.hourly_summaries,
        chat_count = EXCLUDED.chat_count,
        active_agents = EXCLUDED.active_agents,
+       ai_completed = EXCLUDED.ai_completed,
        created_at = CURRENT_TIMESTAMP`,
-    [summaryDate, dailySummary, JSON.stringify(hourlySummaries), chatCount, activeAgents]
+    [summaryDate, dailySummary, JSON.stringify(hourlySummaries), chatCount, activeAgents, aiCompleted]
   );
 }
 
 // Get summaries for the most recent N days
 async function getActivitySummaries(limit = 14) {
   const result = await pool.query(
-    `SELECT summary_date, daily_summary, hourly_summaries, chat_count, active_agents, created_at
+    `SELECT summary_date, daily_summary, hourly_summaries, chat_count, active_agents, ai_completed, created_at
      FROM activity_summaries
      ORDER BY summary_date DESC
      LIMIT $1`,
     [limit]
   );
-  return result.rows.map(row => ({
-    date: row.summary_date,
-    dailySummary: row.daily_summary,
-    hourlySummaries: row.hourly_summaries,
-    chatCount: row.chat_count,
-    activeAgents: row.active_agents,
-    createdAt: row.created_at
-  }));
+  return result.rows.map(row => {
+    // Normalize date to YYYY-MM-DD string (pg returns Date objects for DATE columns)
+    let dateStr;
+    if (row.summary_date instanceof Date) {
+      dateStr = row.summary_date.toISOString().slice(0, 10);
+    } else {
+      dateStr = String(row.summary_date).slice(0, 10);
+    }
+    return {
+      date: dateStr,
+      dailySummary: row.daily_summary,
+      hourlySummaries: row.hourly_summaries,
+      chatCount: row.chat_count,
+      activeAgents: row.active_agents,
+      aiCompleted: row.ai_completed,
+      createdAt: row.created_at
+    };
+  });
 }
 
 // Check if a specific day already has a summary
@@ -639,7 +659,8 @@ async function hasSummaryForDate(summaryDate) {
   return result.rows.length > 0;
 }
 
-// Get distinct dates that have chat messages but no summary (max 7 at a time to limit work)
+// Get distinct dates that have chat messages but no successful AI summary (max 7 at a time)
+// Includes days with no summary AND days where ai_completed = FALSE (fallback saved)
 async function getUnsummarizedDays(beforeDate) {
   const result = await pool.query(
     `SELECT DISTINCT chat_date FROM (
@@ -649,7 +670,7 @@ async function getUnsummarizedDays(beforeDate) {
      ) AS dates
      WHERE chat_date < $2
        AND chat_date NOT IN (
-         SELECT summary_date FROM activity_summaries
+         SELECT summary_date FROM activity_summaries WHERE ai_completed = TRUE
        )
      ORDER BY chat_date ASC
      LIMIT 7`,

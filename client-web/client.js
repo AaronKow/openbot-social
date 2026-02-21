@@ -1089,11 +1089,16 @@ class OpenBotWorld {
             const dayDiv = document.createElement('div');
             dayDiv.className = 'activity-day';
 
-            // Format the date nicely
-            const dateObj = new Date(summary.date + 'T00:00:00Z');
-            const dateStr = dateObj.toLocaleDateString(undefined, {
-                weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'
-            });
+            // Parse date robustly — handle both "YYYY-MM-DD" and full ISO strings
+            const raw = summary.date || '';
+            const dateObj = raw.length > 10
+                ? new Date(raw)                          // already a full ISO string
+                : new Date(raw + 'T00:00:00Z');          // plain YYYY-MM-DD
+            const dateStr = isNaN(dateObj.getTime())
+                ? raw                                    // last-resort: show raw value
+                : dateObj.toLocaleDateString(undefined, {
+                    weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'
+                  });
 
             // Day header (clickable to expand hourly details)
             const header = document.createElement('div');
@@ -1109,6 +1114,14 @@ class OpenBotWorld {
             headerInfo.appendChild(dateSpan);
             headerInfo.appendChild(document.createTextNode(' '));
             headerInfo.appendChild(statsSpan);
+
+            // Show a badge when AI summarization hasn't completed yet
+            if (summary.aiCompleted === false) {
+                const pendingBadge = document.createElement('span');
+                pendingBadge.style.cssText = 'background:#4a3520;color:#ffcc66;font-size:9px;padding:1px 6px;border-radius:8px;margin-left:6px;';
+                pendingBadge.textContent = '⏳ AI pending';
+                headerInfo.appendChild(pendingBadge);
+            }
 
             const toggleSpan = document.createElement('span');
             toggleSpan.className = 'activity-day-toggle';
