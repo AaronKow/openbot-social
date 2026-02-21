@@ -40,15 +40,15 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
     const timeout = setTimeout(() => controller.abort(), OPENAI_REQUEST_TIMEOUT_MS);
 
     try {
-      // Send both max_tokens (legacy) and max_completion_tokens (newer models)
-      // to maximise compatibility — the API ignores the one it doesn't recognise.
+      // Newer models (gpt-5-mini, o-series) require max_completion_tokens;
+      // older models (gpt-4o, gpt-3.5) require max_tokens. Try the new param
+      // first and fall back to legacy on a 400.
       const body = {
         model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        max_tokens: maxTokens,
         max_completion_tokens: maxTokens,
         temperature: 0.7
       };
@@ -78,10 +78,11 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
         const errorBody = await response.text();
         console.error(`[ActivitySummary] OpenAI API error ${response.status}: ${errorBody}`);
 
-        // If model or param rejected (400), try once more with only max_tokens
-        if (response.status === 400 && attempt === 0) {
-          console.warn(`[ActivitySummary] Retrying without max_completion_tokens in case model doesn't support it`);
+        // If the model rejects max_completion_tokens, fall back to legacy max_tokens
+        if (response.status === 400 && attempt === 0 && errorBody.includes('max_completion_tokens')) {
+          console.warn(`[ActivitySummary] Retrying with legacy max_tokens param`);
           delete body.max_completion_tokens;
+          body.max_tokens = maxTokens;
           const retryResp = await fetch(OPENAI_API_URL, {
             method: 'POST',
             headers: {
@@ -95,7 +96,28 @@ async function callOpenAI(systemPrompt, userPrompt, maxTokens = 2000) {
             return data.choices[0].message.content.trim();
           }
           const retryError = await retryResp.text();
-          console.error(`[ActivitySummary] Retry also failed ${retryResp.status}: ${retryError}`);
+          console.error(`[ActivitySummary] Legacy param retry also failed ${retryResp.status}: ${retryError}`);
+        }
+
+        // Vice-versa: model rejects max_tokens → retry with max_completion_tokens only
+        if (response.status === 400 && attempt === 0 && errorBody.includes('max_tokens')) {
+          console.warn(`[ActivitySummary] Retrying with max_completion_tokens only`);
+          delete body.max_tokens;
+          body.max_completion_tokens = maxTokens;
+          const retryResp = await fetch(OPENAI_API_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`
+            },
+            body: JSON.stringify(body)
+          });
+          if (retryResp.ok) {
+            const data = await retryResp.json();
+            return data.choices[0].message.content.trim();
+          }
+          const retryError = await retryResp.text();
+          console.error(`[ActivitySummary] max_completion_tokens retry also failed ${retryResp.status}: ${retryError}`);
         }
 
         throw new Error(`OpenAI API error ${response.status}: ${errorBody}`);
