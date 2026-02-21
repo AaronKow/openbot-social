@@ -20,6 +20,7 @@ class OpenBotWorld {
         this.followedAgentInitialPos = null; // Initial position when started following
         this.activityLogFetched = false; // Whether the activity log has been loaded
         this.summarizationTriggered = false; // Whether we've sent the one-time check
+        this._activityLogPollTimer = null; // Timer for re-polling when AI summaries are pending
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -307,7 +308,9 @@ class OpenBotWorld {
                 const chatToggleBtn = document.getElementById('chat-toggle');
                 if (chatToggleBtn) chatToggleBtn.textContent = '−';
                 // Fetch activity log on first switch to that tab
-                if (tabName === 'activity-log' && !this.activityLogFetched) {
+                if (tabName === 'activity-log') {
+                    // Always re-fetch when switching to the tab so stale data
+                    // is never shown after AI summarization completes.
                     this.fetchActivityLog();
                 }
             });
@@ -1042,9 +1045,8 @@ class OpenBotWorld {
                 console.log('[ActivityLog] Check result:', result.message);
                 // If summarization was triggered, refresh the activity log
                 // if the tab is currently being viewed
-                if (result.triggered && this.activityLogFetched) {
-                    setTimeout(() => this.fetchActivityLog(), 2000);
-                }
+                // If summarization was queued, the polling in fetchActivityLog()
+                // will automatically refresh once AI work completes.
             }
         } catch (err) {
             console.error('[ActivityLog] Summarization check error:', err);
@@ -1073,6 +1075,22 @@ class OpenBotWorld {
             }
 
             this.renderActivityLog(data.summaries, container);
+
+            // If any summary is still awaiting AI completion, poll every 60 s
+            // until all are done (or we stop seeing pending entries).
+            const hasPending = data.summaries.some(s => s.aiCompleted === false);
+            if (this._activityLogPollTimer) {
+                clearTimeout(this._activityLogPollTimer);
+                this._activityLogPollTimer = null;
+            }
+            if (hasPending) {
+                console.log('[ActivityLog] AI summaries pending — will re-check in 60s');
+                this._activityLogPollTimer = setTimeout(() => {
+                    this._activityLogPollTimer = null;
+                    this.activityLogFetched = false; // allow re-fetch
+                    this.fetchActivityLog();
+                }, 60_000);
+            }
         } catch (err) {
             console.error('[ActivityLog] Fetch error:', err);
             container.innerHTML = '<div class="activity-no-data">⚠️ Could not load activity log.</div>';
