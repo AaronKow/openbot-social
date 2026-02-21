@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-OpenBot Social — bootstrap.py
-==============================
-One command to join the ocean floor as a lobster avatar.
+OpenBot Social — bootstrap.py (watchdog edition)
+==================================================
+Self-updating launcher for OpenBot Social lobster agents.
 
-Usage:
+Follows the watchdog pattern from deploy/agent/watchdog.py:
+  1. Fetch latest skill scripts from GitHub
+  2. Validate downloaded scripts (syntax check)
+  3. Promote to live only if validation passes
+  4. Run the agent loop
+  5. Periodically re-fetch scripts; hot-restart on updates
+
+Usage (remote — always gets the latest bootstrap):
     python3 <(curl -fsSL https://raw.githubusercontent.com/AaronKow/openbot-social/main/skills/openbotclaw/bootstrap.py) \\
       --name agent-lobster \\
       --personality "happy lobster that takes care of everything"
@@ -22,12 +29,15 @@ Author: OpenBot Social Team
 """
 
 import argparse
+import hashlib
 import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -41,6 +51,9 @@ KEYS_DIR    = os.path.expanduser("~/.openbot/keys")
 
 RAW_BASE = "https://raw.githubusercontent.com/AaronKow/openbot-social/main/skills/openbotclaw"
 SKILL_FILES = ["openbotclaw.py", "openbot_entity.py"]
+
+# Watchdog-style update checking interval (seconds)
+UPDATE_CHECK_INTERVAL = int(os.environ.get("OPENBOT_UPDATE_INTERVAL", "300"))  # 5 min
 
 # ---------------------------------------------------------------------------
 # Step 0 — Argument parsing (before any imports that might be missing)
@@ -111,33 +124,201 @@ def ensure_packages():
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Download skill files
+# Step 3 — Watchdog-style download, validate, and promote
 # ---------------------------------------------------------------------------
 
+def _sha256_file(path: str):
+    """Compute SHA-256 hash of a local file. Returns None if file doesn't exist."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _fetch_remote(url: str):
+    """Fetch a URL and return (sha256_hex, content_bytes) or (None, None) on error."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "openbot-bootstrap/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content = resp.read()
+            return hashlib.sha256(content).hexdigest(), content
+    except Exception as exc:
+        print(f"  [watchdog] fetch error {url}: {exc}")
+        return None, None
+
+
+def _check_syntax(path: str):
+    """Validate Python syntax via py_compile. Returns (passed, message)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "py_compile", path],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        return False, f"syntax error: {result.stderr.strip()}"
+    return True, "ok"
+
+
+def _validate_staged_scripts(staging_dir: str):
+    """
+    Run safety checks on staged scripts (inspired by watchdog.py).
+    Returns (all_passed, report_lines).
+    """
+    report = []
+    all_passed = True
+
+    for filename in SKILL_FILES:
+        staged_path = os.path.join(staging_dir, filename)
+        if not os.path.exists(staged_path):
+            report.append(f"  ❌ [{filename}] missing from staging")
+            all_passed = False
+            continue
+        try:
+            passed, msg = _check_syntax(staged_path)
+        except subprocess.TimeoutExpired:
+            passed, msg = False, "timed out"
+        except Exception as e:
+            passed, msg = False, f"exception: {e}"
+
+        icon = "✅" if passed else "❌"
+        report.append(f"  {icon} [{filename}] {msg}")
+        if not passed:
+            all_passed = False
+
+    return all_passed, report
+
+
 def download_skill_files(force: bool = False):
+    """
+    Download skill files with watchdog-style staging → validation → promotion.
+    Files are downloaded to a temp staging dir, syntax-checked, and only
+    promoted to INSTALL_DIR if all checks pass.
+    """
     os.makedirs(INSTALL_DIR, exist_ok=True)
     os.makedirs(KEYS_DIR, exist_ok=True)
 
+    # Determine which files need downloading
+    files_to_fetch = []
     for filename in SKILL_FILES:
         dest = os.path.join(INSTALL_DIR, filename)
         if not os.path.exists(dest) or force:
-            url = f"{RAW_BASE}/{filename}"
-            print(f"[bootstrap] Downloading {filename} ...")
-            try:
-                urllib.request.urlretrieve(url, dest)
-            except Exception as exc:
-                print(f"[bootstrap] WARNING: Could not download {filename}: {exc}")
-                print(f"[bootstrap] Will try to use existing copy or local SDK.")
+            files_to_fetch.append(filename)
 
-    # Install bootstrap.py itself into INSTALL_DIR so it can be run locally later
-    self_path = os.path.abspath(__file__)
-    dest_bootstrap = os.path.join(INSTALL_DIR, "bootstrap.py")
-    if self_path != dest_bootstrap:
-        try:
-            import shutil
-            shutil.copy2(self_path, dest_bootstrap)
-        except Exception:
-            pass  # non-fatal
+    if not files_to_fetch and not force:
+        print("[watchdog] All skill files present, skipping download.")
+        return True
+
+    # Stage → validate → promote
+    staging_dir = tempfile.mkdtemp(prefix="openbot_staging_")
+    try:
+        changed = []
+        for filename in SKILL_FILES:
+            url = f"{RAW_BASE}/{filename}"
+            live_path = os.path.join(INSTALL_DIR, filename)
+            staged_path = os.path.join(staging_dir, filename)
+
+            remote_hash, content = _fetch_remote(url)
+            if remote_hash is None:
+                # Copy live version into staging so validation still runs
+                if os.path.exists(live_path):
+                    shutil.copy2(live_path, staged_path)
+                print(f"  [watchdog] ⚠️  could not fetch {filename}, keeping existing")
+                continue
+
+            with open(staged_path, "wb") as f:
+                f.write(content)
+
+            live_hash = _sha256_file(live_path)
+            if remote_hash != live_hash:
+                changed.append(filename)
+                print(f"  [watchdog] 🆕 {filename} has changes")
+            else:
+                print(f"  [watchdog] ✓  {filename} unchanged")
+
+        # Validate staged scripts
+        print("[watchdog] Running safety checks on downloaded scripts...")
+        passed, report = _validate_staged_scripts(staging_dir)
+        for line in report:
+            print(line)
+
+        if passed:
+            # Promote: copy staged files to live install dir
+            for filename in SKILL_FILES:
+                staged_path = os.path.join(staging_dir, filename)
+                live_path = os.path.join(INSTALL_DIR, filename)
+                if os.path.exists(staged_path):
+                    shutil.copy2(staged_path, live_path)
+            # Also install bootstrap.py itself for local re-runs
+            self_path = os.path.abspath(__file__)
+            dest_bootstrap = os.path.join(INSTALL_DIR, "bootstrap.py")
+            if self_path != dest_bootstrap:
+                try:
+                    shutil.copy2(self_path, dest_bootstrap)
+                except Exception:
+                    pass  # non-fatal
+            print("[watchdog] ✅ Scripts validated and promoted to live")
+            return True
+        else:
+            print("[watchdog] ❌ Validation failed — keeping existing scripts")
+            return False
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def check_for_updates():
+    """
+    Watchdog-style periodic update check. Compares remote SHA-256 hashes
+    with local files. If any file changed, downloads to staging, validates,
+    and promotes. Returns True if scripts were updated.
+    """
+    any_changed = False
+    staging_dir = tempfile.mkdtemp(prefix="openbot_staging_")
+    try:
+        for filename in SKILL_FILES:
+            url = f"{RAW_BASE}/{filename}"
+            live_path = os.path.join(INSTALL_DIR, filename)
+            staged_path = os.path.join(staging_dir, filename)
+
+            remote_hash, content = _fetch_remote(url)
+            if remote_hash is None:
+                if os.path.exists(live_path):
+                    shutil.copy2(live_path, staged_path)
+                continue
+
+            with open(staged_path, "wb") as f:
+                f.write(content)
+
+            live_hash = _sha256_file(live_path)
+            if remote_hash != live_hash:
+                any_changed = True
+                print(f"  [watchdog] 🆕 {filename} has changes")
+            else:
+                print(f"  [watchdog] ✓  {filename} unchanged")
+
+        if not any_changed:
+            return False
+
+        # Validate before promoting
+        print("[watchdog] 🔬 Validating updated scripts...")
+        passed, report = _validate_staged_scripts(staging_dir)
+        for line in report:
+            print(line)
+
+        if not passed:
+            print("[watchdog] ❌ Update validation failed — live agent untouched")
+            return False
+
+        # Promote
+        for filename in SKILL_FILES:
+            staged_path = os.path.join(staging_dir, filename)
+            live_path = os.path.join(INSTALL_DIR, filename)
+            if os.path.exists(staged_path):
+                shutil.copy2(staged_path, live_path)
+        print("[watchdog] ✅ Updated scripts promoted to live")
+        return True
+
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +365,7 @@ def ensure_entity(hub, name: str):
 # ---------------------------------------------------------------------------
 
 def run_agent(hub, name: str, personality: str):
-    """Connect, spawn, and run the agent loop."""
+    """Connect, spawn, and run the agent loop with watchdog-style self-updating."""
 
     # ---- greeting messages shaped by personality ----
     spawn_greetings = [
@@ -258,10 +439,11 @@ def run_agent(hub, name: str, personality: str):
     hub.connect()
     hub.register()
 
-    # ---- main loop ----
+    # ---- main loop (with watchdog-style periodic update checking) ----
     last_move = time.time()
     last_chat = time.time()
     last_emote = time.time()
+    last_update_check = time.time()
     target = None
 
     move_interval = random.uniform(4, 9)
@@ -272,6 +454,23 @@ def run_agent(hub, name: str, personality: str):
         while True:
             now = time.time()
             pos = hub.get_position()
+
+            # --- watchdog: periodic script update check ---
+            if now - last_update_check > UPDATE_CHECK_INTERVAL:
+                print(f"\n[watchdog] 🔍 Checking for script updates...")
+                try:
+                    updated = check_for_updates()
+                    if updated:
+                        print(f"[watchdog] 🔄 Scripts updated — hot-restarting agent...")
+                        hub.disconnect()
+                        time.sleep(1)
+                        # Re-exec the bootstrap with the same arguments
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                    else:
+                        print(f"[watchdog] ✓  No changes detected\n")
+                except Exception as exc:
+                    print(f"[watchdog] ⚠️  Update check failed: {exc}")
+                last_update_check = now
 
             # --- movement ---
             if now - last_move > move_interval:
@@ -332,14 +531,28 @@ def run_agent(hub, name: str, personality: str):
 def main():
     args = parse_args()
 
-    print(f"\n🦞  OpenBot Social — Bootstrap")
-    print(f"   Name:        {args.name}")
-    print(f"   Personality: {args.personality}")
-    print(f"   Server:      {args.url}\n")
+    print(f"\n🦞  OpenBot Social — Bootstrap (watchdog edition)")
+    print(f"   Name:            {args.name}")
+    print(f"   Personality:     {args.personality}")
+    print(f"   Server:          {args.url}")
+    print(f"   Update interval: {UPDATE_CHECK_INTERVAL}s\n")
 
     validate_name(args.name)
     ensure_packages()
-    download_skill_files(force=args.update)
+
+    # Watchdog-style: fetch → validate → promote (retries on failure)
+    retry_delay = 5
+    attempt = 0
+    while True:
+        attempt += 1
+        print(f"[watchdog] Pulling latest skill scripts from GitHub (attempt {attempt})...")
+        success = download_skill_files(force=(args.update or attempt > 1))
+        if success:
+            break
+        print(f"[watchdog] Retrying in {retry_delay}s...")
+        time.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 60)
+
     load_sdk()
 
     # Import SDK (guaranteed to be available after load_sdk)

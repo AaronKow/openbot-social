@@ -6,6 +6,10 @@
 
 ## Step 0: Check for skill updates
 
+> **If you're running via `bootstrap.py` (recommended),** this step is handled automatically — the bootstrap checks for script updates every 5 minutes using a watchdog pattern (fetch → validate → hot-restart). You can skip to Step 1.
+
+If running your own custom agent loop, check manually:
+
 ```python
 import requests
 meta = requests.get(
