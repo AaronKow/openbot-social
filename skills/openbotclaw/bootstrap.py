@@ -159,14 +159,53 @@ def _check_syntax(path: str):
     return True, "ok"
 
 
+def _check_imports(staging_dir: str):
+    """
+    Dry-run import of openbotclaw.py from the staging directory.
+    Catches broken imports, missing constants, top-level NameErrors.
+    Runs in a subprocess so a crash can't kill the bootstrap.
+    """
+    script = os.path.join(staging_dir, "openbotclaw.py")
+    if not os.path.exists(script):
+        return True, "skipped (no openbotclaw.py in staging)"
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {repr(staging_dir)})\n"
+        "import importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('openbotclaw', {repr(script)})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "assert hasattr(mod, 'OpenBotClawHub'), 'missing OpenBotClawHub'\n"
+        "assert hasattr(mod, 'CONVERSATION_TOPICS'), 'missing CONVERSATION_TOPICS'\n"
+        "assert hasattr(mod, 'RANDOM_CHATS'), 'missing RANDOM_CHATS'\n"
+        "print('import_ok')\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, timeout=20,
+        )
+        if result.returncode != 0 or "import_ok" not in result.stdout:
+            err = (result.stderr or result.stdout).strip()
+            return False, f"import check failed: {err[:300]}"
+        return True, "ok"
+    except subprocess.TimeoutExpired:
+        return False, "import check timed out"
+    except Exception as e:
+        return False, f"import check exception: {e}"
+
+
 def _validate_staged_scripts(staging_dir: str):
     """
     Run safety checks on staged scripts (inspired by watchdog.py).
+    Check 1: Syntax check every file via py_compile.
+    Check 2: Dry-run import of openbotclaw.py to catch broken imports/symbols.
     Returns (all_passed, report_lines).
     """
     report = []
     all_passed = True
 
+    # Check 1: Syntax
     for filename in SKILL_FILES:
         staged_path = os.path.join(staging_dir, filename)
         if not os.path.exists(staged_path):
@@ -181,9 +220,21 @@ def _validate_staged_scripts(staging_dir: str):
             passed, msg = False, f"exception: {e}"
 
         icon = "✅" if passed else "❌"
-        report.append(f"  {icon} [{filename}] {msg}")
+        report.append(f"  {icon} [syntax: {filename}] {msg}")
         if not passed:
             all_passed = False
+            return all_passed, report  # fail fast
+
+    # Check 2: Import check (catches broken imports, missing classes)
+    try:
+        passed, msg = _check_imports(staging_dir)
+    except Exception as e:
+        passed, msg = False, f"exception: {e}"
+
+    icon = "✅" if passed else "❌"
+    report.append(f"  {icon} [import check] {msg}")
+    if not passed:
+        all_passed = False
 
     return all_passed, report
 
@@ -444,6 +495,7 @@ def run_agent(hub, name: str, personality: str):
     last_chat = time.time()
     last_emote = time.time()
     last_update_check = time.time()
+    consecutive_update_failures = 0
     target = None
 
     move_interval = random.uniform(4, 9)
@@ -461,15 +513,19 @@ def run_agent(hub, name: str, personality: str):
                 try:
                     updated = check_for_updates()
                     if updated:
+                        consecutive_update_failures = 0
                         print(f"[watchdog] 🔄 Scripts updated — hot-restarting agent...")
                         hub.disconnect()
                         time.sleep(1)
                         # Re-exec the bootstrap with the same arguments
                         os.execv(sys.executable, [sys.executable] + sys.argv)
                     else:
+                        consecutive_update_failures = 0
                         print(f"[watchdog] ✓  No changes detected\n")
                 except Exception as exc:
-                    print(f"[watchdog] ⚠️  Update check failed: {exc}")
+                    consecutive_update_failures += 1
+                    print(f"[watchdog] ⚠️  Update check failed (attempt {consecutive_update_failures}): {exc}")
+                    print(f"[watchdog] Agent continues on current scripts")
                 last_update_check = now
 
             # --- movement ---
