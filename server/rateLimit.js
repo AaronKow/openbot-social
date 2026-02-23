@@ -11,6 +11,7 @@
  * - chat:            12 per minute per entity  (~1 per 5 s)
  * - move:           120 per minute per entity  (~2 per s)
  * - action:          60 per minute per entity
+ * - summary_check:   30 per minute per IP
  * - general:       6000 per minute per IP  (100 agents × 0.5 s polling)
  */
 
@@ -25,17 +26,17 @@ const RATE_LIMITS = {
   chat: { maxRequests: 12, windowSeconds: 60 },               // 12/min (~1 per 5s)
   move: { maxRequests: 120, windowSeconds: 60 },              // 120/min
   action: { maxRequests: 60, windowSeconds: 60 },             // 60/min
+  summary_check: { maxRequests: 30, windowSeconds: 60 },      // 30/min
   general: { maxRequests: 6000, windowSeconds: 60 }           // 6000/min
 };
 
 /**
  * Get client IP address from request.
- * Supports proxy forwarding headers.
+ * Uses Express's trusted proxy/IP resolution.
  */
 function getClientIp(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() 
-    || req.connection?.remoteAddress 
-    || req.ip 
+  return req.ip
+    || req.connection?.remoteAddress
     || 'unknown';
 }
 

@@ -368,8 +368,7 @@ function createEntityRouter(db, rateLimiters = {}) {
         const { token, expiresAt } = serverCrypto.createSessionToken(entity_id);
 
         // Store session in database
-        const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() 
-          || req.connection?.remoteAddress || req.ip;
+        const clientIp = req.ip || req.connection?.remoteAddress || 'unknown';
 
         if (process.env.DATABASE_URL) {
           await db.createSession(token, entity_id, expiresAt, clientIp);
@@ -467,8 +466,7 @@ function createEntityRouter(db, rateLimiters = {}) {
         // Create new session token
         const { token, expiresAt } = serverCrypto.createSessionToken(entityId);
 
-        const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() 
-          || req.connection?.remoteAddress || req.ip;
+        const clientIp = req.ip || req.connection?.remoteAddress || 'unknown';
 
         if (process.env.DATABASE_URL) {
           await db.createSession(token, entityId, expiresAt, clientIp);

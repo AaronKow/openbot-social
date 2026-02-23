@@ -9,6 +9,18 @@ const activitySummary = require('./activitySummary');
 
 const app = express();
 
+function parseTrustProxy(value) {
+  if (value === undefined) return false;
+  const lowered = String(value).trim().toLowerCase();
+  if (lowered === 'true') return true;
+  if (lowered === 'false') return false;
+  const asNumber = Number(lowered);
+  if (!Number.isNaN(asNumber)) return asNumber;
+  return value;
+}
+
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
+
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -32,6 +44,7 @@ const rateLimiters = {
   chat: createEntityRateLimiter('chat', db),
   move: createEntityRateLimiter('move', db),
   action: createEntityRateLimiter('action', db),
+  summaryCheck: createRateLimiter('summary_check', {}, db),
   general: createRateLimiter('general', {}, db)
 };
 
@@ -134,6 +147,25 @@ function clampMovement(currentPos, targetPos) {
     y: currentPos.y + dy * scale,
     z: currentPos.z + dz * scale
   });
+}
+
+function getOwnedAgentOrReject(req, res, agentId) {
+  const agent = worldState.agents.get(agentId);
+  if (!agent) {
+    res.status(404).json({
+      success: false,
+      error: 'Agent not found'
+    });
+    return null;
+  }
+  if (!agent.entityId || req.entityId !== agent.entityId) {
+    res.status(403).json({
+      success: false,
+      error: 'Forbidden'
+    });
+    return null;
+  }
+  return agent;
 }
 
 // Format uptime from milliseconds to human readable string
@@ -260,7 +292,7 @@ app.post('/spawn', requireAuth, async (req, res) => {
 });
 
 // Move agent
-app.post('/move', rateLimiters.move, (req, res) => {
+app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
   try {
     const { agentId, position, rotation } = req.body;
     
@@ -271,13 +303,8 @@ app.post('/move', rateLimiters.move, (req, res) => {
       });
     }
     
-    const agent = worldState.agents.get(agentId);
-    if (!agent) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Agent not found' 
-      });
-    }
+    const agent = getOwnedAgentOrReject(req, res, agentId);
+    if (!agent) return;
     
     // Update agent position with realistic distance clamping
     if (position) {
@@ -300,7 +327,7 @@ app.post('/move', rateLimiters.move, (req, res) => {
 });
 
 // Send chat message
-app.post('/chat', rateLimiters.chat, async (req, res) => {
+app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
   try {
     const { agentId, message } = req.body;
     
@@ -311,13 +338,8 @@ app.post('/chat', rateLimiters.chat, async (req, res) => {
       });
     }
     
-    const agent = worldState.agents.get(agentId);
-    if (!agent) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Agent not found' 
-      });
-    }
+    const agent = getOwnedAgentOrReject(req, res, agentId);
+    if (!agent) return;
     
     // Add chat message to history (with entity link for conversation tracking)
     addChatMessage(agentId, agent.name, message, agent.entityId);
@@ -336,7 +358,7 @@ app.post('/chat', rateLimiters.chat, async (req, res) => {
 });
 
 // Perform action
-app.post('/action', rateLimiters.action, (req, res) => {
+app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
   try {
     const { agentId, action } = req.body;
     
@@ -347,13 +369,8 @@ app.post('/action', rateLimiters.action, (req, res) => {
       });
     }
     
-    const agent = worldState.agents.get(agentId);
-    if (!agent) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Agent not found' 
-      });
-    }
+    const agent = getOwnedAgentOrReject(req, res, agentId);
+    if (!agent) return;
     
     agent.lastAction = action;
     agent.lastUpdate = Date.now();
@@ -742,7 +759,7 @@ app.get('/activity-log', async (req, res) => {
 
 // Trigger summarization check (called once by frontend on page load)
 // Throttled in-memory + DB lock to handle thousands of concurrent visitors
-app.post('/activity-log/check', async (req, res) => {
+app.post('/activity-log/check', rateLimiters.summaryCheck, async (req, res) => {
   try {
     const now = Date.now();
 
