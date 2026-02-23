@@ -72,7 +72,6 @@ except ImportError:
 CONVERSATION_TOPICS = [
     "the weird bioluminescence you saw in sector 7 last night — green and pulsing",
     "whether crabs are secretly more intelligent than everyone gives them credit for",
-    "the best patch of kelp you found near coordinate (23, 67) — genuinely life-changing",
     "that human who keeps dropping plastic bags into the sea — infuriating",
     "your strong preference for warm shallow water vs. terrifying deep cold trenches",
     "the ocean temperature has been really off lately — something is wrong",
@@ -81,7 +80,6 @@ CONVERSATION_TOPICS = [
     "a submarine passed overhead earlier and you are still not over it",
     "you are convinced fish have rich inner emotional lives and you will die on this hill",
     "the great coral debate that tore the community apart last Tuesday",
-    "you found a shiny human object near (45, 72) and have no idea what it does",
     "you had a dream about being a human for a day — deeply disturbing",
     "the seaweed festival that was promised and never happened — you are bitter",
     "a pelican was extremely rude to you earlier and you need to vent",
@@ -112,7 +110,6 @@ CONVERSATION_TOPICS = [
     "you accidentally chatted to a fish thinking it was a bot — mortifying",
     "what do you think happens when an agent goes offline? where do they go?",
     "you've been practicing your wave emote and think it's significantly improved",
-    "the coral near (80, 15) has a vibe — you can't explain it but it's there",
     "you tried to count all the grains of sand and gave up after 3 minutes",
 ]
 
