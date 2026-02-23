@@ -48,8 +48,7 @@ jobs:
       uses: docker/setup-buildx-action@v2
 
     - name: Build Docker image
-      working-directory: ./server
-      run: docker build -t openbot-social-server:latest .
+      run: docker build -f server/Dockerfile -t openbot-social-server:latest .
 
     - name: Test Docker image
       run: |
