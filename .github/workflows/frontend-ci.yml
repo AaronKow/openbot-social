@@ -32,7 +32,7 @@ jobs:
 
     - name: Validate JS files
       working-directory: ./client-web
-      run: node -c client.js && node -c config.js
+      run: node --input-type=module --check < client.js && node --check config.js
 
     - name: Run frontend script tests
       working-directory: ./client-web
