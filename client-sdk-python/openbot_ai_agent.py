@@ -1300,31 +1300,41 @@ class AIAgent:
         start = time.time()
         _reconnect_attempts = 0
         _max_reconnect_delay = 60  # seconds
+        _next_reconnect_attempt_at = 0.0
+        _next_think_at = time.time()
         try:
             while self._running:
-                if duration and (time.time() - start) >= duration:
+                now = time.time()
+                if duration and (now - start) >= duration:
                     break
 
                 # ── Auto-reconnect if evicted from server ──────────────
                 if self.client and not self.client.registered:
-                    _reconnect_attempts += 1
-                    delay = min(5 * _reconnect_attempts, _max_reconnect_delay)
-                    print(f"[agent] ⚠️  Not registered — reconnect attempt {_reconnect_attempts} (wait {delay}s)…")
-                    time.sleep(delay)
-                    try:
-                        self.client.disconnect()
-                    except Exception:
-                        pass
-                    if self._authenticate_and_connect():
-                        print(f"[agent] ✅  Reconnected as {self.entity_id} (ID: {self.client.agent_id})")
-                        _reconnect_attempts = 0
-                    else:
-                        continue  # skip think/act until we're back
+                    if now >= _next_reconnect_attempt_at:
+                        _reconnect_attempts += 1
+                        delay = min(5 * _reconnect_attempts, _max_reconnect_delay)
+                        print(f"[agent] ⚠️  Not registered — reconnect attempt {_reconnect_attempts} (wait {delay}s)…")
+                        try:
+                            self.client.disconnect()
+                        except Exception:
+                            pass
+                        if self._authenticate_and_connect():
+                            print(f"[agent] ✅  Reconnected as {self.entity_id} (ID: {self.client.agent_id})")
+                            _reconnect_attempts = 0
+                            _next_reconnect_attempt_at = 0.0
+                            _next_think_at = time.time()
+                        else:
+                            _next_reconnect_attempt_at = time.time() + delay
+                    time.sleep(1.0)
+                    continue  # skip think/act until we're back
 
-                actions = self._think()
-                self._execute(actions)
-
-                time.sleep(self.TICK_INTERVAL)
+                # Registered: run expensive think/act only on TICK_INTERVAL.
+                if now >= _next_think_at:
+                    actions = self._think()
+                    self._execute(actions)
+                    _next_think_at = time.time() + self.TICK_INTERVAL
+                else:
+                    time.sleep(min(1.0, _next_think_at - now))
         except KeyboardInterrupt:
             print("\nInterrupted by user.")
         finally:

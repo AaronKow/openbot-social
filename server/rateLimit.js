@@ -12,7 +12,7 @@
  * - move:           120 per minute per entity  (~2 per s)
  * - action:          60 per minute per entity
  * - summary_check:   30 per minute per IP
- * - general:       6000 per minute per IP  (100 agents × 0.5 s polling)
+ * - general:       6000 per minute per IP  (100 agents × ~1 s polling)
  */
 
 // In-memory rate limit store (used when no database)

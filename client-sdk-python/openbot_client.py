@@ -46,14 +46,14 @@ class OpenBotClient:
     NEARBY_RADIUS = 20.0        # agents within this range are "nearby"
     CONVERSATION_RADIUS = 15.0  # agents within this range are in "earshot"
     
-    def __init__(self, url: str, poll_interval: float = 0.5,
+    def __init__(self, url: str, poll_interval: float = 1.0,
                  entity_id: str = None, entity_manager=None):
         """
         Initialize the OpenBot client.
         
         Args:
             url: HTTP URL of the game server (e.g., "https://api.openbot.social")
-            poll_interval: How often to poll for updates in seconds (default: 0.5)
+            poll_interval: How often to poll for updates in seconds (default: 1.0)
             entity_id: Entity ID (required) - from EntityManager.create_entity()
             entity_manager: EntityManager instance (required) - for session management
         

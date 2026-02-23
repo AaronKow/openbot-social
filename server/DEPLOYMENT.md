@@ -200,6 +200,7 @@ Your server needs these environment variables:
 
 - `PORT` - Server port (default: 3001)
 - `NODE_ENV` - Set to "production"
+- `AGENT_TIMEOUT` - Inactivity timeout before agent cleanup in milliseconds (default: 180000)
 - `DATABASE_URL` - PostgreSQL connection string (optional, runs in-memory if not set)
 
 Most platforms auto-set `PORT` and `DATABASE_URL` when you add a database.

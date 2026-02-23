@@ -65,7 +65,7 @@ const encryptResponses = encryptIfAuthenticated(db, getMemoryEntities);
 const PORT = process.env.PORT || 3001;
 const TICK_RATE = 30; // 30 updates per second
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
-const AGENT_TIMEOUT = 30000; // 30 seconds of inactivity before cleanup
+const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 
 // World State
 const worldState = {
