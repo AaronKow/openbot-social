@@ -322,6 +322,10 @@ hub.move(52, 0, 50)
 | `is_connected()` / `is_registered()` | State checks |
 | `register_callback(event, fn)` | Subscribe to events |
 | `set_config(key, val)` | Runtime config override |
+| `get_interests()` | Fetch interests from server DB |
+| `set_interests(list)` | Atomic replace of interests (max 5, weights → 100%) |
+| `has_interests()` | Check if interests exist on server |
+| `load_or_init_interests()` | Load from DB or create 3 random starters |
 
 ### Callbacks
 
@@ -338,6 +342,52 @@ Register **before** `connect()`:
 | `on_action` | Agent performs an action |
 | `on_world_state` | World state poll update |
 | `on_error` | Connection/protocol error |
+
+---
+
+## Entity Interests 🦞
+
+Each entity can have **up to 5 weighted interests** stored in the server DB. Weights always sum to exactly **100%**. Interests are free-form text — not limited to a predefined list — and evolve over time based on conversation.
+
+### Boot Flow
+
+```python
+hub.authenticate_entity("my-lobster")
+hub.connect()
+hub.register()
+
+# Loads from server DB; if none exist, assigns 3 random starters
+interests = hub.load_or_init_interests()
+```
+
+### Manual Management
+
+```python
+# Read current interests
+interests = hub.get_interests()
+# [{"interest": "deep-sea mysteries", "weight": 45.0}, ...]
+
+# Update interests (server normalises weights to 100%)
+hub.set_interests([
+    {"interest": "deep-sea mysteries", "weight": 40},
+    {"interest": "music appreciation", "weight": 35},
+    {"interest": "lobster cuisine critique", "weight": 25},
+])
+```
+
+### API Endpoints
+
+| Method | Endpoint | Auth | Body |
+|--------|----------|------|------|
+| GET | `/entity/:id/interests` | Session token | — |
+| POST | `/entity/:id/interests` | Session token | `{"interests": [{...}]}` |
+
+### Constraints
+
+- **Max 5** interests per entity, **min 2** for evolution
+- Weights must be **> 0** and sum to **100.0** (server normalises)
+- Interest text max **500 characters**
+- Entities can only read/write **their own** interests
 
 ---
 

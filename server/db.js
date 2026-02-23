@@ -224,6 +224,27 @@ async function initDatabase() {
       ON activity_summaries(summary_date DESC)
     `);
 
+    // Create entity_interests table — stores evolving weighted interests per entity
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_interests (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL,
+        interest TEXT NOT NULL,
+        weight NUMERIC(6,2) NOT NULL DEFAULT 33.33,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_entity_interests_entity FOREIGN KEY (entity_id)
+          REFERENCES entities(entity_id) ON DELETE CASCADE,
+        CONSTRAINT chk_weight_range CHECK (weight > 0 AND weight <= 100),
+        CONSTRAINT uq_entity_interest UNIQUE (entity_id, interest)
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_entity_interests_entity_id
+      ON entity_interests(entity_id)
+    `);
+
     await client.query('COMMIT');
     console.log('Database initialized successfully');
   } catch (error) {
@@ -742,6 +763,80 @@ async function healthCheck() {
   }
 }
 
+// ── Entity Interest functions ─────────────────────────────────────────────
+
+/**
+ * Get all interests for an entity, ordered by weight descending.
+ */
+async function getEntityInterests(entityId) {
+  const result = await pool.query(
+    `SELECT interest, weight::float FROM entity_interests
+     WHERE entity_id = $1 ORDER BY weight DESC`,
+    [entityId]
+  );
+  return result.rows; // [{ interest, weight }]
+}
+
+/**
+ * Atomic full-replace of an entity's interests.
+ * Validates: max 5 interests, positive weights, sum ≈ 100.
+ * Normalises weights server-side to ensure exact 100.0 sum.
+ */
+async function setEntityInterests(entityId, interests) {
+  if (!Array.isArray(interests) || interests.length === 0) {
+    throw new Error('interests must be a non-empty array');
+  }
+  if (interests.length > 5) {
+    throw new Error('Maximum 5 interests allowed');
+  }
+  // Validate each item
+  for (const item of interests) {
+    if (!item.interest || typeof item.interest !== 'string' || !item.interest.trim()) {
+      throw new Error('Each interest must have a non-empty string');
+    }
+    if (typeof item.weight !== 'number' || item.weight <= 0) {
+      throw new Error('Each weight must be a positive number');
+    }
+  }
+  // Server-side normalisation to exactly 100.0
+  const rawTotal = interests.reduce((s, i) => s + i.weight, 0);
+  if (rawTotal <= 0) throw new Error('Total weight must be positive');
+  const normalised = interests.map(i => ({
+    interest: i.interest.trim().substring(0, 500),
+    weight: Math.round((i.weight / rawTotal) * 10000) / 100,   // 2 dp
+  }));
+  // Fix rounding drift — add remainder to heaviest
+  const sumNow = normalised.reduce((s, i) => s + i.weight, 0);
+  const drift = Math.round((100.0 - sumNow) * 100) / 100;
+  if (drift !== 0) {
+    const heaviest = normalised.reduce((a, b) => a.weight >= b.weight ? a : b);
+    heaviest.weight = Math.round((heaviest.weight + drift) * 100) / 100;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      'DELETE FROM entity_interests WHERE entity_id = $1',
+      [entityId]
+    );
+    for (const item of normalised) {
+      await client.query(
+        `INSERT INTO entity_interests (entity_id, interest, weight, updated_at)
+         VALUES ($1, $2, $3, NOW())`,
+        [entityId, item.interest, item.weight]
+      );
+    }
+    await client.query('COMMIT');
+    return normalised;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   initDatabase,
   saveAgent,
@@ -785,5 +880,8 @@ module.exports = {
   getUnsummarizedDays,
   acquireSummaryLock,
   releaseSummaryLock,
-  isSummaryLockActive
+  isSummaryLockActive,
+  // Entity interest functions
+  getEntityInterests,
+  setEntityInterests
 };

@@ -368,6 +368,99 @@ app.post('/action', rateLimiters.action, (req, res) => {
   }
 });
 
+// ============= ENTITY INTEREST ROUTES =============
+
+/**
+ * GET /entity/:entityId/interests
+ * Returns the entity's current interests with weights.
+ * Requires valid session token.
+ */
+app.get('/entity/:entityId/interests', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+
+    // Only allow entities to read their own interests
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    let interests;
+    if (process.env.DATABASE_URL) {
+      interests = await db.getEntityInterests(entityId);
+    } else {
+      // In-memory fallback
+      if (!app._memoryInterests) app._memoryInterests = new Map();
+      interests = app._memoryInterests.get(entityId) || [];
+    }
+
+    res.json({ success: true, interests });
+  } catch (error) {
+    console.error('Error getting entity interests:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /entity/:entityId/interests
+ * Atomic full-replace of entity interests.
+ * Body: { interests: [{ interest: string, weight: number }, ...] }
+ * Constraints: max 5 interests, weights > 0, normalised to sum = 100.
+ * Requires valid session token.
+ */
+app.post('/entity/:entityId/interests', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const { interests } = req.body;
+    if (!Array.isArray(interests) || interests.length === 0) {
+      return res.status(400).json({ success: false, error: 'interests must be a non-empty array' });
+    }
+    if (interests.length > 5) {
+      return res.status(400).json({ success: false, error: 'Maximum 5 interests allowed' });
+    }
+    for (const item of interests) {
+      if (!item.interest || typeof item.interest !== 'string' || !item.interest.trim()) {
+        return res.status(400).json({ success: false, error: 'Each interest must have a non-empty string' });
+      }
+      if (typeof item.weight !== 'number' || item.weight <= 0) {
+        return res.status(400).json({ success: false, error: 'Each weight must be a positive number' });
+      }
+    }
+
+    let normalised;
+    if (process.env.DATABASE_URL) {
+      normalised = await db.setEntityInterests(entityId, interests);
+    } else {
+      // In-memory fallback — normalise weights client-side
+      if (!app._memoryInterests) app._memoryInterests = new Map();
+      const rawTotal = interests.reduce((s, i) => s + i.weight, 0);
+      normalised = interests.map(i => ({
+        interest: i.interest.trim().substring(0, 500),
+        weight: Math.round((i.weight / rawTotal) * 10000) / 100,
+      }));
+      const sumNow = normalised.reduce((s, i) => s + i.weight, 0);
+      const drift = Math.round((100.0 - sumNow) * 100) / 100;
+      if (drift !== 0) {
+        const heaviest = normalised.reduce((a, b) => a.weight >= b.weight ? a : b);
+        heaviest.weight = Math.round((heaviest.weight + drift) * 100) / 100;
+      }
+      app._memoryInterests.set(entityId, normalised);
+    }
+
+    res.json({ success: true, interests: normalised });
+  } catch (error) {
+    console.error('Error setting entity interests:', error);
+    if (error.message && (error.message.includes('Maximum') || error.message.includes('must'))) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 // Ping endpoint
 app.get('/ping', (req, res) => {
   res.json({ 

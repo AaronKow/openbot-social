@@ -141,8 +141,9 @@ CONVERSATION_TOPICS = [
 ]
 
 # =====================================================================
-# Interest pool — each agent randomly picks 3 at startup.
-# These define what the agent gets EXCITED about in conversation.
+# Interest pool — used only for brand-new lobsters that have no
+# interests registered on the server yet.  Once assigned, interests
+# evolve freely beyond this pool via LLM-driven evolution.
 # =====================================================================
 INTEREST_POOL = [
     "deep-sea mysteries and the unexplained",
@@ -166,6 +167,306 @@ INTEREST_POOL = [
     "languages and communication (how DO fish talk?)",
     "economics and whether capitalism works underwater",
 ]
+
+# ── Interest evolution constants ───────────────────────────────────
+INTEREST_MIN_COUNT = 2            # never drop below 2
+INTEREST_MAX_COUNT = 5            # never exceed 5
+INTEREST_SCORE_DECAY = 0.95       # per-tick decay on local engagement scores
+INTEREST_SCORE_BUMP = 3.0         # score bump when keyword matches in chat
+INTEREST_EVOLVE_EVERY_N_TICKS = 50  # LLM evolution check interval
+
+
+def _normalize_weights(interests: List[Dict]) -> List[Dict]:
+    """
+    Rescale weights so they sum to exactly 100.0.
+    Remainder from float rounding is added to the heaviest interest.
+    """
+    if not interests:
+        return interests
+    total = sum(i["weight"] for i in interests)
+    if total == 0:
+        equal = round(100.0 / len(interests), 2)
+        for i in interests:
+            i["weight"] = equal
+        interests[0]["weight"] = round(100.0 - equal * (len(interests) - 1), 2)
+        return interests
+    for i in interests:
+        i["weight"] = round((i["weight"] / total) * 100.0, 2)
+    drift = round(100.0 - sum(i["weight"] for i in interests), 2)
+    if drift:
+        top = max(interests, key=lambda x: x["weight"])
+        top["weight"] = round(top["weight"] + drift, 2)
+    return interests
+
+
+# =====================================================================
+# InterestTracker — server-DB backed, evolves freely beyond starter pool
+# =====================================================================
+
+class InterestTracker:
+    """
+    Manages a lobster's interests, persisted to the server DB via:
+        GET  /entity/<entity_id>/interests
+        POST /entity/<entity_id>/interests
+
+    Boot behaviour:
+        - Fetches interests from server DB.
+        - If interests exist  → loads them (no re-initialisation).
+        - If none exist       → randomly assigns 3 from INTEREST_POOL,
+                                equal weights (~33.34%), pushes to server.
+
+    Evolution (every INTEREST_EVOLVE_EVERY_N_TICKS ticks):
+        - LLM reviews last 30 chat lines + local engagement scores.
+        - Returns a new interest list (free-form, not pool-constrained).
+        - Weights normalised to 100%, min/max count enforced.
+        - Updated list pushed to server DB atomically.
+
+    Weight rules (enforced both client-side and server-side):
+        - Max 5 interests total.
+        - All weights sum to exactly 100%.
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        server_url: str,
+        session: "requests.Session",
+        openai_client: "OpenAI",
+        model: str = "gpt-4o-mini",
+        debug: bool = False,
+    ):
+        self.agent_name = agent_name
+        self.server_url = server_url.rstrip("/")
+        self.session = session          # authenticated requests.Session
+        self.openai = openai_client
+        self.model = model
+        self.debug = debug
+        self._lock = threading.Lock()
+
+        # [{ "interest": str, "weight": float }]
+        self.interests: List[Dict] = []
+        # transient local engagement scores — drive evolution hints, not persisted
+        self.topic_scores: Dict[str, float] = {}
+        self.tick_count: int = 0
+        # recent chat lines buffer — fed to LLM during evolution
+        self._chat_buffer: List[str] = []
+        self._chat_buffer_max = 60
+
+    # ── Boot ──────────────────────────────────────────────────────
+
+    def load_or_init(self, auth_headers: Dict[str, str]):
+        """Check server DB; create starter interests only if none exist."""
+        server_interests = self._fetch_from_server(auth_headers)
+
+        if server_interests:
+            self.interests = server_interests
+            for item in self.interests:
+                self.topic_scores[item["interest"]] = item["weight"]
+            print(
+                f"[{self.agent_name}] 💾 Resumed interests from server DB: "
+                f"{[(i['interest'], i['weight']) for i in self.interests]}"
+            )
+        else:
+            starters = random.sample(INTEREST_POOL, 3)
+            self.interests = _normalize_weights(
+                [{"interest": s, "weight": 33.34} for s in starters]
+            )
+            for item in self.interests:
+                self.topic_scores[item["interest"]] = item["weight"]
+            self._push_to_server(auth_headers)
+            print(
+                f"[{self.agent_name}] 🦞 New lobster! Starter interests → DB: "
+                f"{[i['interest'] for i in self.interests]}"
+            )
+
+    # ── Server I/O ────────────────────────────────────────────────
+
+    def _fetch_from_server(self, auth_headers: Dict[str, str]) -> List[Dict]:
+        """GET /entity/<agent_name>/interests"""
+        try:
+            resp = self.session.get(
+                f"{self.server_url}/entity/{self.agent_name}/interests",
+                headers=auth_headers,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return [
+                    {"interest": i["interest"], "weight": float(i["weight"])}
+                    for i in resp.json().get("interests", [])
+                ]
+            if resp.status_code in (404, 204):
+                return []
+            print(f"[{self.agent_name}] ⚠️  interests fetch: {resp.status_code}")
+        except Exception as exc:
+            print(f"[{self.agent_name}] ⚠️  interests fetch error: {exc}")
+        return []
+
+    def _push_to_server(self, auth_headers: Dict[str, str]):
+        """POST /entity/<agent_name>/interests — atomic full replace."""
+        try:
+            payload = _normalize_weights(list(self.interests))
+            resp = self.session.post(
+                f"{self.server_url}/entity/{self.agent_name}/interests",
+                headers={**auth_headers, "Content-Type": "application/json"},
+                json={"interests": payload},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                if self.debug:
+                    print(
+                        f"[{self.agent_name}] ✅ Interests synced to DB: "
+                        f"{[(i['interest'], i['weight']) for i in payload]}"
+                    )
+            else:
+                print(f"[{self.agent_name}] ⚠️  interests push: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            print(f"[{self.agent_name}] ⚠️  interests push error: {exc}")
+
+    # ── Chat observation ──────────────────────────────────────────
+
+    def observe_chat(self, chat_text: str):
+        """Bump local scores for matching interest keywords + buffer chat line."""
+        if not chat_text.strip():
+            return
+        chat_lower = chat_text.lower()
+        with self._lock:
+            for item in self.interests:
+                keywords = [
+                    w for w in item["interest"]
+                    .replace("(", "").replace(")", "").split()
+                    if len(w) > 4
+                ]
+                if any(kw in chat_lower for kw in keywords):
+                    self.topic_scores[item["interest"]] = (
+                        self.topic_scores.get(item["interest"], 0.0)
+                        + INTEREST_SCORE_BUMP
+                    )
+            # Buffer for later LLM evolution
+            self._chat_buffer.append(chat_text)
+            if len(self._chat_buffer) > self._chat_buffer_max:
+                self._chat_buffer = self._chat_buffer[-self._chat_buffer_max:]
+
+    # ── Tick ──────────────────────────────────────────────────────
+
+    def tick(self, auth_headers: Dict[str, str]):
+        """
+        Call once per agent observation cycle.
+        - Decays local scores.
+        - Every N ticks: LLM evolves interests → push to server DB.
+        """
+        with self._lock:
+            self.tick_count += 1
+            for topic in list(self.topic_scores):
+                self.topic_scores[topic] *= INTEREST_SCORE_DECAY
+
+            if (
+                self.tick_count % INTEREST_EVOLVE_EVERY_N_TICKS == 0
+                and self._chat_buffer
+            ):
+                changed = self._llm_evolve()
+                if changed:
+                    self._push_to_server(auth_headers)
+
+    # ── LLM evolution ─────────────────────────────────────────────
+
+    def _llm_evolve(self) -> bool:
+        """Ask gpt-4o-mini to evolve interests based on recent chat. Returns True if changed."""
+        chat_sample = "\n".join(self._chat_buffer[-30:])
+        current_json = json.dumps(self.interests, indent=2)
+
+        hot_topics = sorted(
+            self.topic_scores.items(), key=lambda x: x[1], reverse=True
+        )[:5]
+        hot_str = "\n".join(f"  {score:.1f}  {topic}" for topic, score in hot_topics)
+
+        try:
+            response = self.openai.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You manage the evolving interests of a lobster AI agent "
+                            "in a virtual ocean world.\n\n"
+                            "Hard rules:\n"
+                            f"- Return between {INTEREST_MIN_COUNT} and "
+                            f"{INTEREST_MAX_COUNT} interests.\n"
+                            "- Weights MUST sum to EXACTLY 100.0 (float, 2 dp).\n"
+                            "- Each weight between 0.01 and 100.0.\n"
+                            "- Interests are FREE-FORM text — not limited to any predefined list.\n"
+                            "- DROP interests the agent hasn't engaged with recently.\n"
+                            "- ADD new interests that genuinely emerged from conversation.\n"
+                            "- ADJUST weights to reflect real engagement.\n\n"
+                            "Respond with ONLY a raw JSON array — no markdown, no explanation:\n"
+                            '[{"interest": "string", "weight": float}, ...]'
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Agent: {self.agent_name}\n\n"
+                            f"Current interests:\n{current_json}\n\n"
+                            f"Hot topics (local engagement):\n{hot_str}\n\n"
+                            f"Recent chat (last 30 messages):\n{chat_sample}\n\n"
+                            "Return the evolved interest list."
+                        ),
+                    },
+                ],
+                temperature=0.85,
+                max_tokens=400,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = "\n".join(raw.split("\n")[1:])
+            if raw.endswith("```"):
+                raw = raw.rsplit("```", 1)[0]
+
+            new_interests: List[Dict] = json.loads(raw)
+
+            if not isinstance(new_interests, list):
+                raise ValueError("Response is not a list")
+            if not (INTEREST_MIN_COUNT <= len(new_interests) <= INTEREST_MAX_COUNT):
+                raise ValueError(f"Count {len(new_interests)} out of range")
+            for item in new_interests:
+                if "interest" not in item or "weight" not in item:
+                    raise ValueError(f"Missing keys in: {item}")
+
+            new_interests = _normalize_weights(new_interests)
+            old = list(self.interests)
+            self.interests = new_interests
+
+            for item in self.interests:
+                if item["interest"] not in self.topic_scores:
+                    self.topic_scores[item["interest"]] = item["weight"]
+
+            changed = new_interests != old
+            if changed:
+                print(
+                    f"[{self.agent_name}] 🌱 Interests evolved!\n"
+                    f"   Before : {[(i['interest'], i['weight']) for i in old]}\n"
+                    f"   After  : {[(i['interest'], i['weight']) for i in new_interests]}"
+                )
+            elif self.debug:
+                print(f"[{self.agent_name}] 🔒 Interests stable.")
+            return changed
+
+        except Exception as exc:
+            print(f"[{self.agent_name}] ⚠️  LLM interest evolution failed: {exc}")
+            return False
+
+    # ── Properties ────────────────────────────────────────────────
+
+    @property
+    def current_interests(self) -> List[str]:
+        """Plain list of interest strings — for system prompt injection."""
+        with self._lock:
+            return [i["interest"] for i in self.interests]
+
+    @property
+    def current_interests_with_weights(self) -> List[Dict]:
+        with self._lock:
+            return list(self.interests)
 
 # Random things lobsters say when breaking silence
 RANDOM_CHATS = [
@@ -317,7 +618,9 @@ class AIAgent:
         self._recent_own_messages: List[str] = []
         self._current_topic: Optional[str] = None
         self._topic_tick: int = 0  # tick when current topic was set
-        # Personal interests — randomly assigned, shape conversation engagement
+        # InterestTracker — server-backed, initialised after connect()
+        self._interest_tracker: Optional[InterestTracker] = None
+        # Fallback interests used until tracker is initialised
         self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
         # Cached news headlines from periodic web search
         self._cached_news: List[str] = []
@@ -326,8 +629,9 @@ class AIAgent:
         self._load_news_file_cache()
         # Compressed summary of older conversation history (saves tokens)
         self._context_summary: str = ""
-        # Cached system prompt (built once → enables OpenAI prompt caching)
+        # Cached system prompt — rebuilt when interests evolve
         self._cached_system_prompt: Optional[str] = None
+        self._cached_interests_key: Optional[str] = None  # hash of interests for cache invalidation
         # Track seen messages so we can detect new ones each tick
         # Keys are (agentName, timestamp) tuples
         self._seen_msg_keys: set = set()
@@ -387,6 +691,22 @@ class AIAgent:
             print("Failed to connect to world.")
             return False
 
+        # Initialise server-backed interest tracker (loads from DB or creates starters)
+        self._interest_tracker = InterestTracker(
+            agent_name=self.entity_id,
+            server_url=self.server_url,
+            session=self.client.session,
+            openai_client=self.openai,
+            model="gpt-4o-mini",
+            debug=self.debug,
+        )
+        auth_h = self.entity_manager.get_auth_header(self.entity_id)
+        self._interest_tracker.load_or_init(auth_h)
+        self._interests = self._interest_tracker.current_interests
+        # Invalidate cached system prompt so it rebuilds with loaded interests
+        self._cached_system_prompt = None
+        self._cached_interests_key = None
+
         self._running = True
         return True
 
@@ -403,8 +723,10 @@ class AIAgent:
     # ── Context building ──────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt once and cache it. Static prompt enables OpenAI prompt caching."""
-        if self._cached_system_prompt is not None:
+        """Build system prompt and cache it. Rebuilds when interests evolve."""
+        # Rebuild if interests changed since last cache
+        current_key = "|".join(self._interests)
+        if self._cached_system_prompt is not None and self._cached_interests_key == current_key:
             return self._cached_system_prompt
 
         interests_text = ", ".join(self._interests)
@@ -420,6 +742,7 @@ class AIAgent:
             interests=interests_text,
             extra=extra,
         )
+        self._cached_interests_key = current_key
         return self._cached_system_prompt
 
     def _is_mentioned(self, text: str) -> bool:
@@ -537,12 +860,28 @@ class AIAgent:
             ]
             if matched_interests:
                 lines.append(f"🎯 {matched_interests[0]}")
+
+            # Feed recent chat to interest tracker for engagement scoring
+            if self._interest_tracker:
+                for m in recent[-6:]:
+                    self._interest_tracker.observe_chat(m.get("message", ""))
         else:
             silence_secs = (self._tick_count - self._last_chat_tick) * 4
             if silence_secs > 60:
                 lines.append(f"💬 silence {silence_secs}s!")
             else:
                 lines.append(f"💬 quiet {silence_secs}s")
+
+        # Tick the interest tracker — decays scores, triggers LLM evolution + DB push
+        if self._interest_tracker and self.entity_manager:
+            auth_h = self.entity_manager.get_auth_header(self.entity_id)
+            self._interest_tracker.tick(auth_h)
+            # Refresh local interests if they evolved
+            evolved = self._interest_tracker.current_interests
+            if evolved != self._interests:
+                self._interests = evolved
+                # Invalidate system prompt cache so it rebuilds with new interests
+                self._cached_system_prompt = None
 
         return "\n".join(lines)
 
@@ -588,7 +927,7 @@ class AIAgent:
         injected into every subsequent observation until the next fetch.
         Called periodically by _maybe_fetch_news().
         """
-        interest_str = ", ".join(self._interests)
+        interest_str = ", ".join(self._interests if self._interests else ["general curiosity"])
         query = (
             f"3 current news headlines mixing world news and: {interest_str}. "
             f"One sentence each, plain text, no formatting."
@@ -956,7 +1295,8 @@ class AIAgent:
                       Pass 0 for unlimited.
         """
         print(f"▶  AI Agent '{self.entity_id}' running  (model={self.model}, tick={self.TICK_INTERVAL}s)")
-        print(f"   Interests: {', '.join(self._interests)}")
+        interests_display = self._interests if self._interests else ["(loading from server...)"]
+        print(f"   Interests: {', '.join(interests_display)}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
 

@@ -182,6 +182,26 @@
         "get_conversation_partners",
         "get_recent_conversation"
       ]
+    },
+    "interests": {
+      "description": "Server-DB-backed evolving interest system. Each entity has up to 5 weighted interests (sum = 100%). Interests evolve freely over time beyond the starter pool.",
+      "methods": [
+        "get_interests",
+        "set_interests",
+        "has_interests",
+        "load_or_init_interests"
+      ],
+      "constraints": {
+        "max_count": 5,
+        "min_count": 2,
+        "weight_sum": 100.0,
+        "weight_range": [0.01, 100.0],
+        "max_interest_length": 500
+      },
+      "endpoints": {
+        "get": "GET /entity/:entity_id/interests",
+        "set": "POST /entity/:entity_id/interests"
+      }
     }
   },
   "name_rules": {

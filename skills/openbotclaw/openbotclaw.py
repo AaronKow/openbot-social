@@ -139,6 +139,33 @@ INTEREST_POOL = [
     "economics and whether capitalism works underwater",
 ]
 
+# ── Interest constants ─────────────────────────────────────────────
+INTEREST_MAX_COUNT = 5
+INTEREST_MIN_COUNT = 2
+
+
+def normalize_interest_weights(interests: List[Dict]) -> List[Dict]:
+    """
+    Rescale weights so they sum to exactly 100.0.
+    Remainder from float rounding is added to the heaviest interest.
+    """
+    if not interests:
+        return interests
+    total = sum(i["weight"] for i in interests)
+    if total == 0:
+        equal = round(100.0 / len(interests), 2)
+        for i in interests:
+            i["weight"] = equal
+        interests[0]["weight"] = round(100.0 - equal * (len(interests) - 1), 2)
+        return interests
+    for i in interests:
+        i["weight"] = round((i["weight"] / total) * 100.0, 2)
+    drift = round(100.0 - sum(i["weight"] for i in interests), 2)
+    if drift:
+        top = max(interests, key=lambda x: x["weight"])
+        top["weight"] = round(top["weight"] + drift, 2)
+    return interests
+
 RANDOM_CHATS = [
     "hello??? anyone out there???",
     "it's so quiet... somebody say something!",
@@ -381,6 +408,7 @@ class OpenBotClawHub:
         self._current_topic: Optional[str] = None
         self._topic_tick: int = 0
         self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
+        self._interests_with_weights: List[Dict[str, Any]] = []  # server-backed weighted interests
         self._cached_news: List[str] = []
         self._seen_msg_keys: set = set()
         self._new_senders: List[str] = []
@@ -1105,6 +1133,10 @@ class OpenBotClawHub:
             ]
             if matched_interests:
                 lines.append(f"🎯 {matched_interests[0]}")
+
+            # Bump transient interest scores for recent chat
+            for m in recent[-6:]:
+                self._observe_chat_for_interests(m.get("message", ""))
         else:
             silence_secs = (self._tick_count - self._last_chat_tick) * 4
             if silence_secs > 60:
@@ -1123,6 +1155,141 @@ class OpenBotClawHub:
         if len(self._recent_own_messages) > 8:
             self._recent_own_messages = self._recent_own_messages[-8:]
         self._last_chat_tick = self._tick_count
+
+    # ── Entity Interest API helpers ──────────────────────────────────
+
+    def get_interests(self) -> List[Dict[str, Any]]:
+        """
+        Fetch this entity's interests from the server DB.
+
+        Returns:
+            List of ``{"interest": str, "weight": float}`` dicts,
+            or empty list if none stored / fetch fails.
+
+        Example:
+            >>> interests = hub.get_interests()
+            >>> for i in interests:
+            ...     print(f"{i['interest']} ({i['weight']}%)")
+        """
+        entity = self.entity_id or self.agent_name
+        if not self.session:
+            self.logger.warning("get_interests: no active session")
+            return []
+        try:
+            resp = self.session.get(
+                f"{self.url}/entity/{entity}/interests",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("interests", [])
+                self._interests_with_weights = data
+                self._interests = [i["interest"] for i in data]
+                return data
+            if resp.status_code in (404, 204):
+                return []
+            self.logger.warning(f"get_interests: {resp.status_code}")
+        except Exception as exc:
+            self.logger.warning(f"get_interests error: {exc}")
+        return []
+
+    def set_interests(self, interests: List[Dict[str, Any]]) -> bool:
+        """
+        Atomic full-replace of this entity's interests on the server DB.
+
+        Weights are normalised server-side to sum to exactly 100.0.
+        Maximum 5 interests allowed; minimum weight > 0.
+
+        Args:
+            interests: List of ``{"interest": str, "weight": float}`` dicts.
+
+        Returns:
+            True on success, False otherwise.
+
+        Example:
+            >>> hub.set_interests([
+            ...     {"interest": "deep-sea mysteries", "weight": 40},
+            ...     {"interest": "ocean politics", "weight": 35},
+            ...     {"interest": "weird science", "weight": 25},
+            ... ])
+        """
+        entity = self.entity_id or self.agent_name
+        if not self.session:
+            self.logger.warning("set_interests: no active session")
+            return False
+        if not interests or len(interests) > INTEREST_MAX_COUNT:
+            self.logger.warning(f"set_interests: invalid count ({len(interests) if interests else 0})")
+            return False
+        try:
+            normalised = normalize_interest_weights(list(interests))
+            resp = self.session.post(
+                f"{self.url}/entity/{entity}/interests",
+                json={"interests": normalised},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                result = resp.json().get("interests", normalised)
+                self._interests_with_weights = result
+                self._interests = [i["interest"] for i in result]
+                self.logger.debug(f"Interests synced: {self._interests}")
+                return True
+            self.logger.warning(f"set_interests: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            self.logger.warning(f"set_interests error: {exc}")
+        return False
+
+    def has_interests(self) -> bool:
+        """
+        Check if this entity has interests stored on the server.
+
+        Returns:
+            True if interests exist, False otherwise.
+        """
+        return len(self.get_interests()) > 0
+
+    def load_or_init_interests(self) -> List[Dict[str, Any]]:
+        """
+        Load interests from server DB; if none exist, assign 3 random starters
+        from INTEREST_POOL.
+
+        Returns:
+            The entity's current interests (from server or freshly created).
+
+        Example:
+            >>> hub.authenticate_entity("my-lobster")
+            >>> hub.connect()
+            >>> interests = hub.load_or_init_interests()
+        """
+        existing = self.get_interests()
+        if existing:
+            self.logger.info(f"Resumed interests from DB: {[i['interest'] for i in existing]}")
+            return existing
+
+        starters = random.sample(INTEREST_POOL, min(3, len(INTEREST_POOL)))
+        new_interests = normalize_interest_weights(
+            [{"interest": s, "weight": 33.34} for s in starters]
+        )
+        if self.set_interests(new_interests):
+            self.logger.info(f"Starter interests created: {[i['interest'] for i in new_interests]}")
+        else:
+            # Fallback: use locally even if push failed
+            self._interests_with_weights = new_interests
+            self._interests = [i["interest"] for i in new_interests]
+            self.logger.warning("Could not push starter interests to server; using locally")
+        return self._interests_with_weights
+
+    def _observe_chat_for_interests(self, chat_text: str) -> None:
+        """Bump transient interest engagement score when keywords match."""
+        if not chat_text or not chat_text.strip():
+            return
+        chat_lower = chat_text.lower()
+        for interest in self._interests:
+            keywords = [
+                w for w in interest.replace("(", "").replace(")", "").split()
+                if len(w) > 4
+            ]
+            if any(kw in chat_lower for kw in keywords):
+                # Transient score — can be used by external evolution logic
+                pass  # External agents implement their own evolution
 
     def register_callback(self, event_type: str, callback: Callable) -> None:
         """
