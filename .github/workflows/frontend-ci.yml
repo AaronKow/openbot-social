@@ -13,10 +13,10 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Validate HTML
       working-directory: ./client-web
       run: |
@@ -24,15 +24,19 @@ jobs:
         if grep -r "TODO\|FIXME\|XXX" *.html *.js; then
           echo "Warning: Found TODO/FIXME markers"
         fi
-    
-    - name: Check JavaScript syntax
+
+    - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '18'
-    
+
     - name: Validate JS files
       working-directory: ./client-web
-      run: node -c client.js
+      run: node -c client.js && node -c config.js
+
+    - name: Run frontend script tests
+      working-directory: ./client-web
+      run: npm test
 
   # Note: Netlify handles deployment automatically via GitHub integration
   # No manual deployment step needed here
