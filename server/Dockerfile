@@ -3,13 +3,13 @@ FROM node:18-alpine
 WORKDIR /app
 
 # Copy package files
-COPY server/package*.json ./
+COPY package*.json ./
 
 # Install dependencies
 RUN npm install --omit=dev
 
 # Copy server files
-COPY server/ .
+COPY . .
 
 # Expose port
 EXPOSE 3001
