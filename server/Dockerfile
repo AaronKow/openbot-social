@@ -2,14 +2,14 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Copy package files from the server directory (build context is repo root on Render)
+COPY server/package*.json ./
 
 # Install dependencies
 RUN npm install --omit=dev
 
 # Copy server files
-COPY . .
+COPY server/ ./
 
 # Expose port
 EXPOSE 3001
