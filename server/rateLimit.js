@@ -78,7 +78,7 @@ function checkMemoryRateLimit(identifier, actionType, maxRequests, windowSeconds
 }
 
 // Periodically clean up expired memory entries (every 5 minutes)
-setInterval(() => {
+const memoryCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of memoryStore) {
     // Remove entries older than 2 hours
@@ -87,6 +87,10 @@ setInterval(() => {
     }
   }
 }, 300000);
+
+if (typeof memoryCleanupInterval.unref === 'function') {
+  memoryCleanupInterval.unref();
+}
 
 /**
  * Create rate limiting middleware for a specific action type.
