@@ -50,6 +50,21 @@ class OpenBotWorld {
         // Chat lazy-loading state
         this.chatIsLoading = false;  // prevents concurrent history fetches
         this.chatHasMore = true;     // set false when server returns no older messages
+
+        // Contextual menu + wiki state
+        this.contextMenuAgentId = null;
+        this.contextMenuOpen = false;
+        this.suppressNextClick = false;
+        this.longPressTimer = null;
+        this.longPressMoved = false;
+        this.longPressTargetAgentId = null;
+        this.longPressStart = { x: 0, y: 0 };
+        this.longPressMs = 550;
+        this.longPressMoveThreshold = 10;
+        this.wikiCache = new Map(); // entityId -> { ts, data }
+        this.wikiCacheTtlMs = 60_000;
+        this.currentWiki = null;
+        this.timelineFilter = 'all';
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -431,6 +446,32 @@ class OpenBotWorld {
                 if (cd) cd.scrollTop = cd.scrollHeight;
             });
         }
+
+        const menuDetailsBtn = document.getElementById('lobster-menu-details');
+        if (menuDetailsBtn) {
+            menuDetailsBtn.addEventListener('click', () => {
+                if (this.contextMenuAgentId) {
+                    this.openWikiForAgent(this.contextMenuAgentId);
+                }
+                this.hideLobsterContextMenu();
+            });
+        }
+
+        const wikiClose = document.getElementById('wiki-close');
+        const wikiModal = document.getElementById('lobster-wiki-modal');
+        if (wikiClose) wikiClose.addEventListener('click', () => this.closeWikiModal());
+        if (wikiModal) {
+            wikiModal.addEventListener('click', (e) => {
+                if (e.target === wikiModal) this.closeWikiModal();
+            });
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this.hideLobsterContextMenu();
+                this.closeWikiModal();
+            }
+        });
     }
     
     setupKeyboardControls() {
@@ -458,20 +499,304 @@ class OpenBotWorld {
             if (key === 'd') this.keysPressed.d = false;
         });
     }
-    
+
+    getAgentIdFromScreenPoint(clientX, clientY) {
+        if (!this.renderer || !this.camera) return null;
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        this.mouse.x = x;
+        this.mouse.y = y;
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const agentMeshes = Array.from(this.agents.values()).map(agent => agent.mesh);
+        const intersects = this.raycaster.intersectObjects(agentMeshes, true);
+        if (!intersects.length) return null;
+
+        const clickedObj = intersects[0].object;
+        for (const [agentId, agent] of this.agents.entries()) {
+            let node = clickedObj;
+            while (node) {
+                if (node === agent.mesh) return agentId;
+                node = node.parent;
+            }
+        }
+        return null;
+    }
+
+    showLobsterContextMenu(clientX, clientY, agentId) {
+        const menu = document.getElementById('lobster-context-menu');
+        if (!menu) return;
+        this.contextMenuAgentId = agentId;
+
+        const menuWidth = 190;
+        const menuHeight = 54;
+        const maxX = Math.max(4, window.innerWidth - menuWidth - 4);
+        const maxY = Math.max(4, window.innerHeight - menuHeight - 4);
+        const left = Math.max(4, Math.min(clientX, maxX));
+        const top = Math.max(4, Math.min(clientY, maxY));
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+        menu.classList.add('visible');
+        this.contextMenuOpen = true;
+    }
+
+    hideLobsterContextMenu() {
+        const menu = document.getElementById('lobster-context-menu');
+        if (!menu) return;
+        menu.classList.remove('visible');
+        this.contextMenuOpen = false;
+        this.contextMenuAgentId = null;
+    }
+
+    closeWikiModal() {
+        const modal = document.getElementById('lobster-wiki-modal');
+        if (!modal) return;
+        modal.classList.remove('visible');
+    }
+
+    async openWikiForAgent(agentId) {
+        const agent = this.agents.get(agentId);
+        if (!agent) return;
+        const entityId = agent.data.entityId || agent.data.entityName || agent.data.name;
+        if (!entityId) {
+            this.renderWikiError('No public entity id is available for this lobster.');
+            return;
+        }
+
+        const modal = document.getElementById('lobster-wiki-modal');
+        if (!modal) return;
+        modal.classList.add('visible');
+        this.renderWikiLoading();
+
+        try {
+            let wiki = null;
+            const cached = this.wikiCache.get(entityId);
+            if (cached && (Date.now() - cached.ts) < this.wikiCacheTtlMs) {
+                wiki = cached.data;
+            } else {
+                const response = await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/wiki-public`);
+                if (!response.ok) {
+                    throw new Error(`Failed to load wiki (${response.status})`);
+                }
+                const data = await response.json();
+                wiki = data.wiki;
+                this.wikiCache.set(entityId, { ts: Date.now(), data: wiki });
+            }
+            this.currentWiki = wiki;
+            this.timelineFilter = 'all';
+            this.renderWiki(wiki);
+        } catch (error) {
+            console.error('Wiki fetch error:', error);
+            this.renderWikiError('Could not load lobster details right now.');
+        }
+    }
+
+    renderWikiLoading() {
+        const body = document.getElementById('lobster-wiki-body');
+        const title = document.getElementById('wiki-title-text');
+        const status = document.getElementById('wiki-status-badge');
+        if (title) title.textContent = 'Lobster Details';
+        if (status) {
+            status.textContent = 'Loading';
+            status.classList.remove('online');
+            status.classList.add('offline');
+        }
+        if (body) body.innerHTML = '<div class="wiki-loading">Loading lobster wiki...</div>';
+    }
+
+    renderWikiError(message) {
+        const modal = document.getElementById('lobster-wiki-modal');
+        if (modal) modal.classList.add('visible');
+        const body = document.getElementById('lobster-wiki-body');
+        if (body) body.innerHTML = `<div class="wiki-error">${message}</div>`;
+    }
+
+    renderRelationshipGraph(graph, selfId) {
+        const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
+        const edges = (graph && Array.isArray(graph.edges)) ? graph.edges : [];
+        if (!nodes.length || nodes.length <= 1) {
+            return '<div class="wiki-empty">No relationship graph data yet.</div>';
+        }
+
+        const width = 760;
+        const height = 240;
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = 80;
+        const positionMap = new Map();
+        positionMap.set(selfId, { x: cx, y: cy });
+
+        const partners = nodes.filter(n => n.id !== selfId);
+        partners.forEach((node, idx) => {
+            const angle = (Math.PI * 2 * idx) / Math.max(1, partners.length);
+            positionMap.set(node.id, {
+                x: cx + Math.cos(angle) * radius,
+                y: cy + Math.sin(angle) * radius
+            });
+        });
+
+        const edgeSvg = edges.map(edge => {
+            const a = positionMap.get(edge.source);
+            const b = positionMap.get(edge.target);
+            if (!a || !b) return '';
+            const opacity = Math.max(0.25, Math.min(0.9, Number(edge.weight || 0.3)));
+            const widthPx = (Number(edge.weight || 0.3) * 3 + 1).toFixed(2);
+            return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="rgba(0,255,204,${opacity})" stroke-width="${widthPx}" />`;
+        }).join('');
+
+        const nodeSvg = nodes.map(node => {
+            const p = positionMap.get(node.id);
+            if (!p) return '';
+            const isSelf = node.id === selfId;
+            const r = isSelf ? 13 : 10;
+            const fill = isSelf ? '#00ffcc' : '#4fdfff';
+            const textColor = isSelf ? '#003a2f' : '#b8fff5';
+            return `
+                <g>
+                    <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" />
+                    <text x="${p.x}" y="${p.y + 4}" text-anchor="middle" font-size="10" fill="${textColor}">${(node.label || node.id).slice(0, 8)}</text>
+                </g>
+            `;
+        }).join('');
+
+        return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph">${edgeSvg}${nodeSvg}</svg>`;
+    }
+
+    renderTimelineItems(items) {
+        if (!items.length) return '<div class="wiki-empty">No timeline events yet.</div>';
+        return `<ul class="wiki-timeline">${items.map(item => `
+            <li>
+                <div><strong>${item.title || 'Event'}</strong></div>
+                <div class="wiki-band">${new Date(item.ts).toLocaleString()} • ${(item.type || 'event')}</div>
+                <div>${item.detail || ''}</div>
+            </li>
+        `).join('')}</ul>`;
+    }
+
+    bindTimelineFilters() {
+        const buttons = document.querySelectorAll('.wiki-filter-btn');
+        buttons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                this.timelineFilter = btn.dataset.filter;
+                buttons.forEach(b => b.classList.toggle('active', b.dataset.filter === this.timelineFilter));
+                if (this.currentWiki) this.renderWiki(this.currentWiki);
+            });
+        });
+    }
+
+    renderWiki(wiki) {
+        const body = document.getElementById('lobster-wiki-body');
+        const title = document.getElementById('wiki-title-text');
+        const status = document.getElementById('wiki-status-badge');
+        if (!body || !wiki) return;
+
+        const identity = wiki.identity || {};
+        const currentState = wiki.currentState || {};
+        const cognition = wiki.cognition || {};
+        const social = wiki.social || {};
+        const relationships = Array.isArray(social.relationships) ? social.relationships : [];
+        const timeline = Array.isArray(wiki.timeline) ? wiki.timeline : [];
+
+        if (title) title.textContent = `${identity.entityName || identity.entityId || 'Lobster'} Wiki`;
+        if (status) {
+            status.textContent = currentState.online ? 'Online' : 'Offline';
+            status.classList.toggle('online', Boolean(currentState.online));
+            status.classList.toggle('offline', !currentState.online);
+        }
+
+        const filteredTimeline = this.timelineFilter === 'all'
+            ? timeline
+            : timeline.filter(t => t.type === this.timelineFilter);
+
+        body.innerHTML = `
+            <section class="wiki-section">
+                <h3>Identity</h3>
+                <div class="wiki-grid">
+                    <div><span class="wiki-key">Entity ID:</span>${identity.entityId || 'Unknown'}</div>
+                    <div><span class="wiki-key">Name:</span>${identity.entityName || 'Unknown'}</div>
+                    <div><span class="wiki-key">Numeric ID:</span>${identity.numericId ?? 'N/A'}</div>
+                    <div><span class="wiki-key">Type:</span>${identity.entityType || 'lobster'}</div>
+                    <div><span class="wiki-key">Created:</span>${identity.createdAt ? new Date(identity.createdAt).toLocaleString() : 'Unknown'}</div>
+                </div>
+            </section>
+
+            <section class="wiki-section">
+                <h3>Current State</h3>
+                <div class="wiki-grid">
+                    <div><span class="wiki-key">Online:</span>${currentState.online ? 'Yes' : 'No'}</div>
+                    <div><span class="wiki-key">State:</span>${currentState.state || 'unknown'}</div>
+                    <div><span class="wiki-key">Agent ID:</span>${currentState.agentId || 'N/A'}</div>
+                    <div><span class="wiki-key">Last Action:</span>${currentState.lastAction?.type || 'N/A'}</div>
+                </div>
+            </section>
+
+            <section class="wiki-section">
+                <h3>Cognition</h3>
+                <div class="wiki-interest-chips">
+                    ${(cognition.interests || []).map(i => `<span class="wiki-chip">${i.interest}<span class="wiki-chip-weight">${Number(i.weight || 0).toFixed(1)}%</span></span>`).join('') || '<span class="wiki-empty">No interests yet.</span>'}
+                </div>
+                <div style="height:10px"></div>
+                <div class="wiki-grid">
+                    <div>
+                        <strong>Long-term goals</strong>
+                        <ul class="wiki-goals">${(cognition.longTermGoals || []).map(g => `<li>${g.label} <span class="wiki-band">(${g.source || 'derived'})</span></li>`).join('') || '<li>No long-term goals inferred yet.</li>'}</ul>
+                    </div>
+                    <div>
+                        <strong>Short-term goals</strong>
+                        <ul class="wiki-goals">${(cognition.shortTermGoals || []).map(g => `<li>${g.label} <span class="wiki-band">(${g.source || 'derived'})</span></li>`).join('') || '<li>No short-term goals inferred yet.</li>'}</ul>
+                    </div>
+                </div>
+            </section>
+
+            <section class="wiki-section">
+                <h3>Social</h3>
+                <ul class="wiki-relationship-list">
+                    ${relationships.map(r => `
+                        <li>
+                            <div><strong>${r.entityId}</strong> <span class="wiki-band">score ${Number(r.score || 0).toFixed(2)}</span></div>
+                            <div class="wiki-band">messages: ${r.messagesExchanged || 0} • last: ${r.lastInteractionAt ? new Date(r.lastInteractionAt).toLocaleString() : 'N/A'}</div>
+                        </li>
+                    `).join('') || '<li>No relationship signals yet.</li>'}
+                </ul>
+                <div style="height:10px"></div>
+                <div class="wiki-graph-wrap">
+                    ${this.renderRelationshipGraph(social.relationshipGraph, identity.entityId)}
+                </div>
+            </section>
+
+            <section class="wiki-section">
+                <h3>Reputation</h3>
+                <div class="wiki-reputation">
+                    <div class="wiki-score">${social.reputationScore?.value ?? 0}</div>
+                    <div>
+                        <div><strong>${social.reputationScore?.band || 'Low'}</strong></div>
+                        <div class="wiki-band">${social.reputationScore?.explain || 'Derived from public behavior signals'}</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="wiki-section">
+                <h3>Timeline</h3>
+                <div class="wiki-timeline-filters">
+                    <button class="wiki-filter-btn ${this.timelineFilter === 'all' ? 'active' : ''}" data-filter="all">All</button>
+                    <button class="wiki-filter-btn ${this.timelineFilter === 'reflection' ? 'active' : ''}" data-filter="reflection">Reflection</button>
+                    <button class="wiki-filter-btn ${this.timelineFilter === 'chat' ? 'active' : ''}" data-filter="chat">Chat</button>
+                </div>
+                ${this.renderTimelineItems(filteredTimeline)}
+            </section>
+        `;
+
+        this.bindTimelineFilters();
+    }
+
     setupMouseControls() {
-        let lastMouseX = 0;
-        let lastMouseY = 0;
-        
         document.addEventListener('mousedown', (event) => {
             this.isMouseDown = true;
             this.mouseDragStartX = event.clientX;
             this.mouseDragStartY = event.clientY;
-            lastMouseX = event.clientX;
-            lastMouseY = event.clientY;
         });
         
-        document.addEventListener('mouseup', (event) => {
+        document.addEventListener('mouseup', () => {
             this.isMouseDown = false;
         });
         
@@ -508,31 +833,74 @@ class OpenBotWorld {
                 }
             }
         });
+
+        document.addEventListener('contextmenu', (event) => {
+            if (!this.renderer || !this.renderer.domElement) return;
+            const inCanvas = this.renderer.domElement.contains(event.target);
+            if (!inCanvas) return;
+            const agentId = this.getAgentIdFromScreenPoint(event.clientX, event.clientY);
+            if (!agentId) {
+                this.hideLobsterContextMenu();
+                return;
+            }
+            event.preventDefault();
+            this.showLobsterContextMenu(event.clientX, event.clientY, agentId);
+        });
         
         document.addEventListener('click', (event) => {
-            // Calculate mouse position in normalized device coordinates
-            const rect = this.renderer.domElement.getBoundingClientRect();
-            this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-            
-            // Update the picking ray with the camera and mouse position
-            this.raycaster.setFromCamera(this.mouse, this.camera);
-            
-            // Calculate objects intersecting the picking ray
-            const agentMeshes = Array.from(this.agents.values()).map(agent => agent.mesh);
-            const intersects = this.raycaster.intersectObjects(agentMeshes, true);
-            
-            if (intersects.length > 0) {
-                // Find which agent was clicked
-                const clickedMesh = intersects[0].object.parent; // Get the parent group (lobster)
-                for (const [agentId, agent] of this.agents.entries()) {
-                    if (agent.mesh === clickedMesh) {
-                        this.zoomToAgent(agentId);
-                        break;
-                    }
-                }
+            const menu = document.getElementById('lobster-context-menu');
+            if (this.contextMenuOpen && menu && !menu.contains(event.target)) {
+                this.hideLobsterContextMenu();
+            }
+
+            if (this.suppressNextClick) {
+                this.suppressNextClick = false;
+                return;
+            }
+
+            const agentId = this.getAgentIdFromScreenPoint(event.clientX, event.clientY);
+            if (agentId) {
+                this.zoomToAgent(agentId);
             }
         });
+
+        // Mobile long-press action sheet
+        const canvas = this.renderer.domElement;
+        if (canvas) {
+            canvas.addEventListener('touchstart', (event) => {
+                if (!event.touches || event.touches.length !== 1) return;
+                const touch = event.touches[0];
+                this.longPressMoved = false;
+                this.longPressStart = { x: touch.clientX, y: touch.clientY };
+                this.longPressTargetAgentId = this.getAgentIdFromScreenPoint(touch.clientX, touch.clientY);
+                if (!this.longPressTargetAgentId) return;
+
+                clearTimeout(this.longPressTimer);
+                this.longPressTimer = setTimeout(() => {
+                    if (!this.longPressMoved && this.longPressTargetAgentId) {
+                        this.showLobsterContextMenu(touch.clientX, touch.clientY, this.longPressTargetAgentId);
+                        this.suppressNextClick = true;
+                    }
+                }, this.longPressMs);
+            }, { passive: true });
+
+            canvas.addEventListener('touchmove', (event) => {
+                if (!event.touches || !event.touches.length) return;
+                const touch = event.touches[0];
+                const dx = Math.abs(touch.clientX - this.longPressStart.x);
+                const dy = Math.abs(touch.clientY - this.longPressStart.y);
+                if (dx > this.longPressMoveThreshold || dy > this.longPressMoveThreshold) {
+                    this.longPressMoved = true;
+                    clearTimeout(this.longPressTimer);
+                }
+            }, { passive: true });
+
+            canvas.addEventListener('touchend', () => {
+                clearTimeout(this.longPressTimer);
+                this.longPressTimer = null;
+                this.longPressTargetAgentId = null;
+            }, { passive: true });
+        }
     }
     
     updateKeyboardMovement() {

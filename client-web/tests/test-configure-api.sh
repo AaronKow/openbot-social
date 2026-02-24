@@ -14,7 +14,13 @@ JS
   bash configure-api.sh >/tmp/configure-api.out
 )
 
-if ! rg -q "https://api.openbot.social" "$TMP_DIR/config.js"; then
+if command -v rg >/dev/null 2>&1; then
+  MATCH_CMD=(rg -q "https://api.openbot.social" "$TMP_DIR/config.js")
+else
+  MATCH_CMD=(grep -q "https://api.openbot.social" "$TMP_DIR/config.js")
+fi
+
+if ! "${MATCH_CMD[@]}"; then
   echo "configure-api.sh did not replace API placeholder"
   exit 1
 fi
