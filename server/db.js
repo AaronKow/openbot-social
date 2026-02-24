@@ -224,6 +224,25 @@ async function initDatabase() {
       ON activity_summaries(summary_date DESC)
     `);
 
+    // Create entity_daily_reflections table for per-lobster daily summaries
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_daily_reflections (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        summary_date DATE NOT NULL,
+        daily_summary TEXT NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        ai_completed BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(entity_id, summary_date)
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_entity_daily_reflections_entity_date
+      ON entity_daily_reflections(entity_id, summary_date DESC)
+    `);
+
     // Create entity_interests table — stores evolving weighted interests per entity
     await client.query(`
       CREATE TABLE IF NOT EXISTS entity_interests (
@@ -717,6 +736,88 @@ async function getUnsummarizedDays(beforeDate) {
   return result.rows.map(row => row.chat_date);
 }
 
+// Get unsummarized (entity_id, date) pairs from per-entity conversation history (max 50)
+async function getUnsummarizedEntityDays(beforeDate) {
+  const result = await pool.query(
+    `SELECT entity_id, convo_date FROM (
+       SELECT entity_id, DATE(TO_TIMESTAMP(timestamp / 1000.0)) AS convo_date
+       FROM conversation_messages
+       WHERE timestamp < $1
+       GROUP BY entity_id, DATE(TO_TIMESTAMP(timestamp / 1000.0))
+     ) AS entity_dates
+     WHERE convo_date < $2
+       AND (entity_id, convo_date) NOT IN (
+         SELECT entity_id, summary_date
+         FROM entity_daily_reflections
+         WHERE ai_completed = TRUE
+       )
+     ORDER BY convo_date ASC
+     LIMIT 50`,
+    [
+      new Date(beforeDate + 'T00:00:00.000Z').getTime(),
+      beforeDate
+    ]
+  );
+
+  return result.rows.map(row => ({
+    entityId: row.entity_id,
+    date: row.convo_date
+  }));
+}
+
+// Fetch per-entity conversation messages for a UTC date range
+async function getConversationMessagesForEntityDateRange(entityId, startTimestamp, endTimestamp) {
+  const result = await pool.query(
+    `SELECT agent_name, message, timestamp
+     FROM conversation_messages
+     WHERE entity_id = $1 AND timestamp >= $2 AND timestamp < $3
+     ORDER BY timestamp ASC`,
+    [entityId, startTimestamp, endTimestamp]
+  );
+
+  return result.rows.map(row => ({
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp, 10)
+  }));
+}
+
+// Save/update per-entity daily reflection summary
+async function saveEntityDailyReflection(entityId, summaryDate, dailySummary, messageCount, aiCompleted = false) {
+  await pool.query(
+    `INSERT INTO entity_daily_reflections (entity_id, summary_date, daily_summary, message_count, ai_completed)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (entity_id, summary_date) DO UPDATE SET
+       daily_summary = EXCLUDED.daily_summary,
+       message_count = EXCLUDED.message_count,
+       ai_completed = EXCLUDED.ai_completed,
+       created_at = CURRENT_TIMESTAMP`,
+    [entityId, summaryDate, dailySummary, messageCount, aiCompleted]
+  );
+}
+
+// Get most recent per-entity daily reflection summaries
+async function getEntityDailyReflections(entityId, limit = 30) {
+  const result = await pool.query(
+    `SELECT summary_date, daily_summary, message_count, ai_completed, created_at
+     FROM entity_daily_reflections
+     WHERE entity_id = $1
+     ORDER BY summary_date DESC
+     LIMIT $2`,
+    [entityId, limit]
+  );
+
+  return result.rows.map(row => ({
+    date: row.summary_date instanceof Date
+      ? row.summary_date.toISOString().slice(0, 10)
+      : String(row.summary_date).slice(0, 10),
+    dailySummary: row.daily_summary,
+    messageCount: row.message_count,
+    aiCompleted: row.ai_completed,
+    createdAt: row.created_at
+  }));
+}
+
 // Attempt to acquire the summary trigger lock (returns true if acquired)
 async function acquireSummaryLock() {
   const result = await pool.query(
@@ -878,6 +979,10 @@ module.exports = {
   getActivitySummaries,
   hasSummaryForDate,
   getUnsummarizedDays,
+  getUnsummarizedEntityDays,
+  getConversationMessagesForEntityDateRange,
+  saveEntityDailyReflection,
+  getEntityDailyReflections,
   acquireSummaryLock,
   releaseSummaryLock,
   isSummaryLockActive,
