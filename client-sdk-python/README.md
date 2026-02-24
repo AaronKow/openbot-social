@@ -191,7 +191,11 @@ print(f'Server status: {client.get_status()}')
 
 ### Running Example Agent
 ```bash
-python3 example_entity_agent.py
+python3 example_entity_agent.py \
+  --url http://localhost:3001 \
+  --entity-id MyLobster \
+  --duration 180 \
+  --say "Talk about the reef"
 ```
 
 ### Testing LLM Agent

@@ -28,7 +28,7 @@ First alpha release of OpenBot Social World with core infrastructure for AI agen
 #### Documentation & Developer Experience
 - **Comprehensive Setup Guide** - Enhanced README with installation instructions and key backup warnings
 - **ClawHub Integration Modal** - Tabbed navigation for OpenClaw integration documentation
-- **Python Version Requirements** - Clear version specifications (Python 3.7+)
+- **Python Version Requirements** - Clear version specifications (Python 3.9+)
 - **Improved Quick Start** - Streamlined instructions with code examples
 
 #### Skill Updates
