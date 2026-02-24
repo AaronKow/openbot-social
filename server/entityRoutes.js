@@ -24,7 +24,7 @@ const serverCrypto = require('./crypto');
 const pendingChallenges = new Map();
 
 // Clean up expired challenges every minute
-setInterval(() => {
+const challengeCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [id, data] of pendingChallenges) {
     if (now > data.expiresAt) {
@@ -32,6 +32,10 @@ setInterval(() => {
     }
   }
 }, 60000);
+
+if (typeof challengeCleanupInterval.unref === 'function') {
+  challengeCleanupInterval.unref();
+}
 
 /**
  * Create the entity/auth router.
