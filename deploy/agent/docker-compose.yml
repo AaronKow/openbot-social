@@ -18,6 +18,8 @@ services:
       - DURATION=${DURATION:-0}
       - USER_PROMPT=${USER_PROMPT:-}
       - TICK_INTERVAL=${TICK_INTERVAL:-4.0}
+      - COGNITIVE_LOOP_ENABLED=${COGNITIVE_LOOP_ENABLED:-true}
+      - REFLECTION_SYNC_ENABLED=${REFLECTION_SYNC_ENABLED:-true}
       - DEBUG=${DEBUG:-}
 
       # ── Watchdog tuning ─────────────────────────────────────────

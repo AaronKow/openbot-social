@@ -1091,6 +1091,7 @@ class OpenBotClawHub:
         recent = self.get_recent_conversation(60.0)
         self._new_senders = []
         self._tagged_by = []
+        new_chat_texts: List[str] = []
         agent_name = self.entity_id or self.agent_name
         if recent:
             self._last_chat_tick = self._tick_count
@@ -1103,6 +1104,8 @@ class OpenBotClawHub:
                 if sender != agent_name and is_new:
                     self._seen_msg_keys.add(key)
                     self._new_senders.append(sender)
+                    if msg_text:
+                        new_chat_texts.append(msg_text)
                     tagged = self.is_mentioned(msg_text)
                     if tagged:
                         self._tagged_by.append(sender)
@@ -1132,8 +1135,8 @@ class OpenBotClawHub:
                 lines.append(f"🎯 {matched_interests[0]}")
 
             # Bump transient interest scores for recent chat
-            for m in recent[-6:]:
-                self._observe_chat_for_interests(m.get("message", ""))
+            for chat_text in new_chat_texts:
+                self._observe_chat_for_interests(chat_text)
         else:
             silence_secs = (self._tick_count - self._last_chat_tick) * 4
             if silence_secs > 60:
@@ -1142,6 +1145,54 @@ class OpenBotClawHub:
                 lines.append(f"💬 quiet {silence_secs}s")
 
         return "\n".join(lines)
+
+    def _extract_observation_markers(self, observation: str) -> Dict[str, List[str]]:
+        """
+        Parse observation markers into structured buckets.
+        """
+        markers: Dict[str, List[str]] = {
+            "urgent_chat": [],
+            "move_closer": [],
+            "interest_match": [],
+            "mentions": [],
+            "new_messages": [],
+            "reply_targets": [],
+        }
+        for raw in observation.splitlines():
+            line = raw.strip()
+            if line.startswith("🔴"):
+                markers["urgent_chat"].append(line)
+            elif line.startswith("🟡"):
+                markers["move_closer"].append(line)
+            elif line.startswith("🎯"):
+                markers["interest_match"].append(line)
+            elif line.startswith("📣"):
+                markers["mentions"].append(line)
+            elif line.startswith("⬅ NEW"):
+                markers["new_messages"].append(line)
+            elif line.startswith("REPLY TO:"):
+                markers["reply_targets"].append(line.replace("REPLY TO:", "", 1).strip())
+        return markers
+
+    def build_perception_packet(self, cached_news: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Build a structured PerceptionPacket for cognitive-loop style agents.
+
+        Returns:
+            Dict with observation text, marker buckets, current position, and sender metadata.
+        """
+        observation = self.build_observation(cached_news=cached_news)
+        pos = self.get_position()
+        return {
+            "tick": self._tick_count,
+            "timestamp": int(time.time() * 1000),
+            "position": {"x": pos["x"], "y": pos.get("y", 0.0), "z": pos["z"]},
+            "observation": observation,
+            "markers": self._extract_observation_markers(observation),
+            "new_senders": list(self._new_senders),
+            "tagged_by": list(self._tagged_by),
+            "interests": list(self._interests),
+        }
 
     def track_own_message(self, message: str) -> None:
         """
@@ -1273,6 +1324,83 @@ class OpenBotClawHub:
             self._interests = [i["interest"] for i in new_interests]
             self.logger.warning("Could not push starter interests to server; using locally")
         return self._interests_with_weights
+
+    def record_reflection(
+        self,
+        summary_date: str,
+        daily_summary: str,
+        message_count: int = 0,
+        social_summary: str = "",
+        goal_progress: Optional[Dict[str, Any]] = None,
+        memory_updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Persist a per-entity daily reflection to the server.
+
+        Args:
+            summary_date: Date string in YYYY-MM-DD format.
+            daily_summary: Main daily reflection text (required).
+            message_count: Optional chat/action count for that day.
+            social_summary: Optional social interaction summary.
+            goal_progress: Optional JSON-serializable goal status object.
+            memory_updates: Optional JSON-serializable memory update object.
+        """
+        entity = self.entity_id or self.agent_name
+        if not self.session:
+            self.logger.warning("record_reflection: no active session")
+            return False
+        if not entity:
+            self.logger.warning("record_reflection: missing entity id/name")
+            return False
+        if not summary_date or not daily_summary or not daily_summary.strip():
+            self.logger.warning("record_reflection: summary_date and daily_summary are required")
+            return False
+
+        payload = {
+            "summaryDate": str(summary_date),
+            "dailySummary": str(daily_summary).strip()[:4000],
+            "messageCount": max(0, int(message_count)),
+            "socialSummary": str(social_summary).strip()[:2000] if social_summary else "",
+            "goalProgress": goal_progress or {},
+            "memoryUpdates": memory_updates or {},
+        }
+        try:
+            resp = self.session.post(
+                f"{self.url}/entity/{entity}/daily-reflections",
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return True
+            self.logger.warning(f"record_reflection: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            self.logger.warning(f"record_reflection error: {exc}")
+        return False
+
+    def get_daily_reflections(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """
+        Fetch most recent per-entity daily reflections from the server.
+        """
+        entity = self.entity_id or self.agent_name
+        if not self.session:
+            self.logger.warning("get_daily_reflections: no active session")
+            return []
+        if not entity:
+            self.logger.warning("get_daily_reflections: missing entity id/name")
+            return []
+        safe_limit = max(1, min(int(limit), 90))
+        try:
+            resp = self.session.get(
+                f"{self.url}/entity/{entity}/daily-reflections",
+                params={"limit": safe_limit},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("summaries", [])
+            self.logger.warning(f"get_daily_reflections: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            self.logger.warning(f"get_daily_reflections error: {exc}")
+        return []
 
     def _observe_chat_for_interests(self, chat_text: str) -> None:
         """Bump transient interest engagement score when keywords match."""

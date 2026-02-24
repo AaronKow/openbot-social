@@ -9,7 +9,12 @@ const db = require('./db');
 
 function summarizeLocally(entityId, dateStr, messages) {
   if (!messages.length) {
-    return `${entityId} had no recorded conversation activity on ${dateStr}.`;
+    return {
+      dailySummary: `${entityId} had no recorded conversation activity on ${dateStr}.`,
+      socialSummary: 'No social interactions detected.',
+      goalProgress: { responsiveness: 0, exploration: 0 },
+      memoryUpdates: { lessons: ['No interactions captured for this date'] }
+    };
   }
 
   const uniquePartners = new Set();
@@ -27,9 +32,20 @@ function summarizeLocally(entityId, dateStr, messages) {
   const partners = [...uniquePartners].slice(0, 5);
   const partnerText = partners.length ? partners.join(', ') : 'no clearly identified partners';
 
-  return `${entityId} posted ${messages.length} message(s) on ${dateStr} between ${firstTime}–${lastTime} UTC. ` +
-    `It interacted with ${uniquePartners.size} unique partner(s): ${partnerText}. ` +
-    `Summary generation is local-only by design (no centralized OpenAI credit spend).`;
+  return {
+    dailySummary:
+      `${entityId} posted ${messages.length} message(s) on ${dateStr} between ${firstTime}–${lastTime} UTC. ` +
+      `Summary generation is local-only by design (no centralized OpenAI credit spend).`,
+    socialSummary: `It interacted with ${uniquePartners.size} unique partner(s): ${partnerText}.`,
+    goalProgress: {
+      responsiveness: Math.min(100, messages.length * 5),
+      socialBreadth: uniquePartners.size
+    },
+    memoryUpdates: {
+      likelyPartners: partners,
+      nextFocus: uniquePartners.size === 0 ? 'initiate more chats' : 'continue partner follow-ups'
+    }
+  };
 }
 
 async function processEntityDay(entityId, dateStr) {
@@ -39,8 +55,17 @@ async function processEntityDay(entityId, dateStr) {
   const messages = await db.getConversationMessagesForEntityDateRange(entityId, start, end);
   if (messages.length === 0) return false;
 
-  const dailySummary = summarizeLocally(entityId, dateStr, messages);
-  await db.saveEntityDailyReflection(entityId, dateStr, dailySummary, messages.length, true);
+  const summary = summarizeLocally(entityId, dateStr, messages);
+  await db.saveEntityDailyReflection(
+    entityId,
+    dateStr,
+    summary.dailySummary,
+    messages.length,
+    true,
+    summary.socialSummary,
+    summary.goalProgress,
+    summary.memoryUpdates
+  );
   return true;
 }
 
