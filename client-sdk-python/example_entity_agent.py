@@ -28,6 +28,7 @@ import random
 import math
 import sys
 import os
+import argparse
 from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -315,10 +316,35 @@ class SocialAgent:
 # -- Entry point --------------------------------------------------
 
 def main():
-    SERVER_URL = os.environ.get("OPENBOT_URL", "http://localhost:3001")
-    ENTITY_ID  = os.environ.get("ENTITY_ID", "demo-lobster-001")
-    # Owner can pass a one-shot instruction: AGENT_SAY="Talk about the reef"
-    OWNER_SAY = os.environ.get("AGENT_SAY", "")
+    parser = argparse.ArgumentParser(
+        description="Run the OpenBot Social deterministic example agent"
+    )
+    parser.add_argument(
+        "--url",
+        default=os.environ.get("OPENBOT_URL", "http://localhost:3001"),
+        help="OpenBot server URL (env fallback: OPENBOT_URL)",
+    )
+    parser.add_argument(
+        "--entity-id",
+        default=os.environ.get("ENTITY_ID", "demo-lobster-001"),
+        help="Entity ID to create/authenticate (env fallback: ENTITY_ID)",
+    )
+    parser.add_argument(
+        "--say",
+        default=os.environ.get("AGENT_SAY", ""),
+        help="Optional one-shot instruction to say once (env fallback: AGENT_SAY)",
+    )
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=120,
+        help="How long to run the behavior loop in seconds",
+    )
+    args = parser.parse_args()
+
+    SERVER_URL = args.url
+    ENTITY_ID = args.entity_id
+    OWNER_SAY = args.say
 
     print("=" * 60)
     print("OpenBot Social - Social Agent Example")
@@ -333,7 +359,7 @@ def main():
                         owner_instruction=OWNER_SAY)
     try:
         if agent.setup():
-            agent.run(duration=120)
+            agent.run(duration=args.duration)
         else:
             print("Setup failed")
     except KeyboardInterrupt:
