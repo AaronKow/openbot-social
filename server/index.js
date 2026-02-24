@@ -6,6 +6,7 @@ const serverCrypto = require('./crypto');
 const { createEntityRouter, requireSession, optionalSession, encryptIfAuthenticated } = require('./entityRoutes');
 const { createRateLimiter, createEntityRateLimiter } = require('./rateLimit');
 const activitySummary = require('./activitySummary');
+const entityReflectionSummary = require('./entityReflectionSummary');
 
 const app = express();
 
@@ -780,6 +781,62 @@ app.post('/activity-log/check', rateLimiters.summaryCheck, async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error checking activity log:', error);
+    res.status(500).json({ triggered: false, message: 'Internal server error' });
+  }
+});
+
+
+// Get per-entity daily reflections
+app.get('/entity/:entityId/daily-reflections', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only access your own reflections' });
+    }
+
+    const limit = Math.min(parseInt(req.query.limit) || 30, 90);
+    const summaries = await entityReflectionSummary.getEntityReflections(entityId, limit);
+    res.json({ success: true, summaries });
+  } catch (error) {
+    console.error('Error fetching entity daily reflections:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+// Allow an entity to submit its own daily reflection (self-managed summaries)
+app.post('/entity/:entityId/daily-reflections', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only write your own reflections' });
+    }
+
+    const { summaryDate, dailySummary, messageCount } = req.body || {};
+    if (!summaryDate || typeof summaryDate !== 'string') {
+      return res.status(400).json({ success: false, error: 'summaryDate (YYYY-MM-DD) is required' });
+    }
+    if (!dailySummary || typeof dailySummary !== 'string' || !dailySummary.trim()) {
+      return res.status(400).json({ success: false, error: 'dailySummary is required' });
+    }
+
+    const safeCount = Number.isFinite(Number(messageCount)) ? Math.max(0, parseInt(messageCount, 10)) : 0;
+    await db.saveEntityDailyReflection(entityId, summaryDate, dailySummary.trim().slice(0, 4000), safeCount, true);
+
+    res.json({ success: true, entityId, summaryDate });
+  } catch (error) {
+    console.error('Error saving entity daily reflection:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Trigger entity reflection summarization
+app.post('/entity-reflections/check', rateLimiters.summaryCheck, async (req, res) => {
+  try {
+    const result = await entityReflectionSummary.checkAndSummarizeEntityReflections();
+    res.json(result);
+  } catch (error) {
+    console.error('Error checking entity reflections:', error);
     res.status(500).json({ triggered: false, message: 'Internal server error' });
   }
 });
