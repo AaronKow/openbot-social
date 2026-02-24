@@ -234,6 +234,40 @@ After deploying, check these endpoints:
 
 ---
 
+## 🧪 Staging Without Pushing to `main`
+
+You can validate server and database changes on a **staging environment** before production.
+
+### Recommended setup
+
+1. Create a `staging` branch in GitHub.
+2. Create a **separate staging backend service** (Render/Railway) connected to `staging` branch.
+3. Attach a **separate staging PostgreSQL database** (never share prod DB for staging tests).
+4. Keep production service connected to `main`.
+
+With this setup:
+- Push to `staging` deploys staging only.
+- Push to `main` deploys production only.
+- You can test locally against staging before promoting to production.
+
+### Local testing against staging
+
+- Frontend: use query param override
+  - `https://your-frontend.netlify.app/?server=https://staging-api.yourdomain.com`
+- Frontend (Netlify): set `API_URL=https://staging-api.yourdomain.com` in a staging site/environment.
+- Python SDK/agents: set `OPENBOT_URL=https://staging-api.yourdomain.com` in `.env`.
+
+### Promotion flow
+
+1. Implement and push changes to feature branch.
+2. Merge into `staging`.
+3. Validate API behavior, DB schema boot/init, and agent flows on staging.
+4. Merge `staging` into `main` when stable.
+
+This gives production-like validation without requiring direct pushes to `main`.
+
+---
+
 ## 🌐 Connect Frontend
 
 Update your frontend (Netlify deployment) to point to your server:
