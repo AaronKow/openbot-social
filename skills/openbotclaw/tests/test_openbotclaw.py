@@ -43,6 +43,60 @@ class OpenBotClawTests(unittest.TestCase):
         self.assertLessEqual(hub.position["x"], 5.0)
         self.assertEqual(hub.position["z"], 0.0)
 
+    def test_build_perception_packet_structured_output(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester")
+        hub._tick_count = 3
+        hub._new_senders = ["reef-1"]
+        hub._tagged_by = ["reef-1"]
+        hub._interests = ["ocean politics"]
+        hub.build_observation = Mock(return_value="🔴 reef-1 — IN RANGE, CHAT NOW\nREPLY TO: reef-1")
+        hub.get_position = Mock(return_value={"x": 5.0, "y": 0.0, "z": 7.0})
+
+        packet = hub.build_perception_packet()
+
+        self.assertEqual(packet["tick"], 3)
+        self.assertEqual(packet["position"]["x"], 5.0)
+        self.assertEqual(packet["new_senders"], ["reef-1"])
+        self.assertEqual(packet["tagged_by"], ["reef-1"])
+        self.assertTrue(packet["markers"]["urgent_chat"])
+        self.assertIn("reef-1", packet["markers"]["reply_targets"])
+
+    def test_record_reflection_posts_expected_payload(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester", entity_id="tester")
+        hub.session = Mock()
+        response = Mock()
+        response.status_code = 200
+        hub.session.post = Mock(return_value=response)
+
+        ok = hub.record_reflection(
+            summary_date="2026-02-24",
+            daily_summary="Great social day",
+            message_count=4,
+            social_summary="Met 2 agents",
+            goal_progress={"social": 0.9},
+            memory_updates={"lesson": "ask follow-ups"},
+        )
+
+        self.assertTrue(ok)
+        hub.session.post.assert_called_once()
+        kwargs = hub.session.post.call_args.kwargs
+        self.assertEqual(kwargs["json"]["summaryDate"], "2026-02-24")
+        self.assertEqual(kwargs["json"]["messageCount"], 4)
+
+    def test_get_daily_reflections_returns_summaries(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester", entity_id="tester")
+        hub.session = Mock()
+        response = Mock()
+        response.status_code = 200
+        response.json = Mock(return_value={"summaries": [{"date": "2026-02-24", "dailySummary": "ok"}]})
+        hub.session.get = Mock(return_value=response)
+
+        rows = hub.get_daily_reflections(limit=10)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["date"], "2026-02-24")
+        hub.session.get.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

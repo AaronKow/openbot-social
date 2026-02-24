@@ -55,6 +55,13 @@ _NEWS_CACHE_HEADLINES: List[str] = []
 _NEWS_CACHE_FETCHED_AT: float = 0.0  # epoch seconds of last successful fetch
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # =====================================================================
 # System prompt — tells the LLM about the world, the rules, and the
 # JSON action schema it must respond with.
@@ -551,6 +558,32 @@ TOOLS = [
 ]
 
 
+class CognitiveLoop:
+    """
+    Explicit 7-stage cognition shell:
+        Perception -> Memory -> Identity -> Reasoning -> Planning -> Action -> Reflection
+    """
+
+    def __init__(self, agent: "AIAgent"):
+        self.agent = agent
+
+    def run_tick(self):
+        perception = self.agent.perceive()
+        memory_bundle = self.agent.retrieve_memory(perception)
+        identity_profile = self.agent.identity_profile()
+        reasoning_artifact = self.agent.reason(perception, memory_bundle, identity_profile)
+        plan = self.agent.plan(reasoning_artifact, perception)
+        action_outcome = self.agent.act(plan)
+        self.agent.reflect(
+            perception=perception,
+            memory_bundle=memory_bundle,
+            identity_profile=identity_profile,
+            reasoning_artifact=reasoning_artifact,
+            plan=plan,
+            action_outcome=action_outcome,
+        )
+
+
 # =====================================================================
 # AIAgent class
 # =====================================================================
@@ -593,6 +626,8 @@ class AIAgent:
         self.system_prompt_extra = system_prompt_extra
         self.debug = debug
         self.TICK_INTERVAL = tick_interval
+        self._cognitive_loop_enabled = _env_bool("COGNITIVE_LOOP_ENABLED", True)
+        self._reflection_sync_enabled = _env_bool("REFLECTION_SYNC_ENABLED", True)
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -637,6 +672,19 @@ class AIAgent:
         self._new_senders: List[str] = []
         # Senders who @mentioned us this tick — require a direct reply
         self._tagged_by: List[str] = []
+        # Reflection records for in-process cognition feedback (bounded)
+        self._reflection_history: List[Dict[str, Any]] = []
+        self._procedural_stats: Dict[str, int] = {
+            "ticks": 0,
+            "chat_actions": 0,
+            "movement_actions": 0,
+            "emote_actions": 0,
+            "wait_actions": 0,
+            "tag_replies": 0,
+        }
+        self._daily_reflection_rollup: Dict[str, Dict[str, Any]] = {}
+        self._last_reflection_day: Optional[str] = None
+        self._cognitive_loop = CognitiveLoop(self)
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -818,6 +866,7 @@ class AIAgent:
         recent = self.client.get_recent_conversation(60.0)
         self._new_senders = []   # reset each tick
         self._tagged_by = []     # reset each tick
+        new_chat_texts: List[str] = []
         if recent:
             self._last_chat_tick = self._tick_count
             for m in recent[-6:]:
@@ -830,6 +879,8 @@ class AIAgent:
                 if sender != self.entity_id and is_new:
                     self._seen_msg_keys.add(key)
                     self._new_senders.append(sender)
+                    if msg_text:
+                        new_chat_texts.append(msg_text)
                     tagged = self._is_mentioned(msg_text)
                     if tagged:
                         self._tagged_by.append(sender)
@@ -859,9 +910,9 @@ class AIAgent:
                 lines.append(f"🎯 {matched_interests[0]}")
 
             # Feed recent chat to interest tracker for engagement scoring
-            if self._interest_tracker:
-                for m in recent[-6:]:
-                    self._interest_tracker.observe_chat(m.get("message", ""))
+            if self._interest_tracker and new_chat_texts:
+                for chat_text in new_chat_texts:
+                    self._interest_tracker.observe_chat(chat_text)
         else:
             silence_secs = (self._tick_count - self._last_chat_tick) * 4
             if silence_secs > 60:
@@ -1079,104 +1130,291 @@ class AIAgent:
         if self.debug:
             print(f"  📊 [history] summarized {len(old)} old msgs → {len(self._context_summary)} chars, keeping {len(recent)} recent")
 
+    # ── Cognitive stages ────────────────────────────────────────────
+
+    def _extract_markers(self, observation: str) -> Dict[str, List[str]]:
+        markers: Dict[str, List[str]] = {
+            "urgent_chat": [],
+            "move_closer": [],
+            "interest_match": [],
+            "mentions": [],
+            "new_messages": [],
+        }
+        for raw in observation.splitlines():
+            line = raw.strip()
+            if line.startswith("🔴"):
+                markers["urgent_chat"].append(line)
+            elif line.startswith("🟡"):
+                markers["move_closer"].append(line)
+            elif line.startswith("🎯"):
+                markers["interest_match"].append(line)
+            elif line.startswith("📣"):
+                markers["mentions"].append(line)
+            elif line.startswith("⬅ NEW"):
+                markers["new_messages"].append(line)
+        return markers
+
+    def perceive(self) -> Dict[str, Any]:
+        self._maybe_fetch_news()
+        observation = self._build_observation()
+        position = self.client.get_position()
+        return {
+            "tick": self._tick_count,
+            "timestamp": int(time.time() * 1000),
+            "position": {"x": position["x"], "z": position["z"]},
+            "observation": observation,
+            "markers": self._extract_markers(observation),
+            "newSenders": list(self._new_senders),
+            "taggedBy": list(self._tagged_by),
+        }
+
+    def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
+        recent_reflections = self._reflection_history[-3:]
+        return {
+            "working": self._llm_history[-self.RECENT_WINDOW:],
+            "episodic": {
+                "new_senders": perception.get("newSenders", [])[-4:],
+                "tagged_by": perception.get("taggedBy", [])[-4:],
+                "recent_reflections": recent_reflections,
+            },
+            "semantic": {
+                "interests": list(self._interests),
+                "context_summary": self._context_summary,
+            },
+            "procedural": {
+                "stats": dict(self._procedural_stats),
+                "recent_own_messages": self._recent_own_messages[-4:],
+            },
+        }
+
+    def identity_profile(self) -> Dict[str, Any]:
+        return {
+            "entity_id": self.entity_id,
+            "persona": "Impulsive, opinionated, weird lobster with strong hot takes",
+            "voice_contract": "Short social responses, direct @replies when tagged, avoid repetition",
+            "boundaries": {"max_chat_chars": 280, "actions_per_tick": [1, 3]},
+            "long_term_objectives": [
+                "sustain engaging conversation",
+                "stay responsive to mentions",
+                "adapt interests from social feedback",
+            ],
+            "user_prompt": self.user_prompt or "",
+        }
+
     # ── LLM call ──────────────────────────────────────────────────
 
-    def _think(self) -> List[Dict[str, Any]]:
-        """
-        Ask the LLM what to do given the current observation.
-
-        Uses the OpenAI Responses API (gpt-5-nano and newer models).
-
-        Returns a list of action dicts, e.g.:
-            [{"type": "chat", "message": "hello"}, {"type": "wait"}]
-        """
-        # Fetch fresh news if due (first tick + every ~5 min)
-        # Must run before _build_observation so headlines are injected this tick.
-        self._maybe_fetch_news()
-
-        observation = self._build_observation()
-
-        # Append observation as a user message
+    def _reason_with_observation(
+        self,
+        observation: str,
+        memory_bundle: Optional[Dict[str, Any]] = None,
+        identity_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context_payload = {
+            "memory": {
+                "episodic": (memory_bundle or {}).get("episodic", {}),
+                "semantic": (memory_bundle or {}).get("semantic", {}),
+                "procedural": (memory_bundle or {}).get("procedural", {}),
+            },
+            "identity": identity_profile or {},
+        }
+        context_text = json.dumps(context_payload, ensure_ascii=True, separators=(",", ":"))[:1200]
         self._llm_history.append({"role": "user", "content": observation})
-
-        # Summarize old history to save tokens (keeps recent verbatim)
         self._summarize_and_trim_history()
+        llm_input = list(self._llm_history) + [
+            {"role": "user", "content": f"[cognitive-context] {context_text}"}
+        ]
 
         try:
             response = self.openai.responses.create(
                 model=self.model,
                 instructions=self._build_system_prompt(),
-                input=self._llm_history,
+                input=llm_input,
                 tools=TOOLS,
                 tool_choice={"type": "function", "name": "perform_actions"},
             )
         except Exception as e:
             print(f"[LLM] API error: {e}")
-            return [{"type": "wait"}]
+            return {"actions": [{"type": "wait"}], "reasoningNotes": [], "responseItemTypes": []}
+
+        actions: List[Dict[str, Any]] = []
+        reasoning_notes: List[str] = []
+        response_item_types: List[str] = []
 
         if self.debug:
-            print("\n[DEBUG] === SYSTEM PROMPT ===")
-            system_prompt = self._build_system_prompt()
-            print(f"{system_prompt}\n")
-            print("[DEBUG] === CONVERSATION HISTORY ===")
-            for i, msg in enumerate(self._llm_history):
-                role = msg.get("role", "?")
-                content = msg.get("content", "")
-                if len(content) > 200:
-                    content = content[:200] + "..."
-                print(f"  [{i}] {role}: {content}")
-            print(f"\n[DEBUG] === API CALL ===")
-            print(f"Model: {self.model}")
-            print(f"History size: {len(self._llm_history)} messages")
-            print("\n[DEBUG] === TOOLS SENT ===")
-            print(json.dumps(TOOLS, indent=2))
             print("\n[DEBUG] === API RESPONSE ===")
-            output_items = [f'{item.type}:{getattr(item, "name", "")}' for item in response.output]
-            print(f"Response items: {output_items}")
-            for item in response.output:
-                if item.type == "reasoning":
-                    reasoning_text = getattr(item, "text", "")
-                    if len(reasoning_text) > 300:
-                        reasoning_text = reasoning_text[:300] + "..."
-                    print(f"  reasoning: {reasoning_text}")
-                elif item.type == "web_search_call":
-                    print(f"  web_search: query='{getattr(item, 'query', '?')}'")
-                elif item.type == "function_call":
-                    print(f"  function_call: {item.name}")
-                    print(f"    arguments: {item.arguments}")
-                else:
-                    print(f"  {item.type}: {getattr(item, 'content', '')}")
-            print("[DEBUG] ================================================\n")
-
-        actions = []
-
         for item in response.output:
+            response_item_types.append(item.type)
+            if item.type == "reasoning":
+                txt = getattr(item, "text", "")
+                if txt:
+                    reasoning_notes.append(txt[:200])
+                    if self.debug:
+                        print(f"  reasoning: {txt[:200]}")
             if item.type == "function_call" and item.name == "perform_actions":
                 try:
                     payload = json.loads(item.arguments)
                     actions = payload.get("actions", [])
                 except json.JSONDecodeError:
                     print(f"[LLM] Bad JSON from tool call: {item.arguments}")
+            if self.debug and item.type == "function_call":
+                print(f"  function_call: {item.name} {item.arguments[:180]}")
+        if self.debug:
+            print("[DEBUG] ================================================\n")
 
         if not actions:
             actions = [{"type": "wait"}]
-        
-        if self.debug:
-            print(f"\n[DEBUG] === PARSED ACTIONS ===")
-            print(json.dumps(actions, indent=2))
-            print("[DEBUG] ================================================\n")
-        # Record assistant turn as a concise summary for history context
+
         summary = "; ".join(_action_summary(a) for a in actions)
         self._llm_history.append({"role": "assistant", "content": summary})
+        return {
+            "actions": actions,
+            "reasoningNotes": reasoning_notes,
+            "responseItemTypes": response_item_types,
+        }
 
-        return actions
+    def reason(
+        self,
+        perception: Dict[str, Any],
+        memory_bundle: Dict[str, Any],
+        identity_profile: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return self._reason_with_observation(
+            observation=perception["observation"],
+            memory_bundle=memory_bundle,
+            identity_profile=identity_profile,
+        )
+
+    def plan(self, reasoning_artifact: Dict[str, Any], perception: Dict[str, Any]) -> Dict[str, Any]:
+        raw_actions = reasoning_artifact.get("actions", [])
+        actions: List[Dict[str, Any]] = []
+        for act in raw_actions[:3]:
+            if isinstance(act, dict) and isinstance(act.get("type"), str):
+                actions.append(act)
+        if not actions:
+            actions = [{"type": "wait"}]
+
+        confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
+        if perception.get("markers", {}).get("mentions"):
+            confidence = max(confidence, 0.7)
+        return {"actions": actions, "confidence": round(confidence, 2), "fallback": {"type": "wait"}}
+
+    def act(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        executed = self._execute(plan.get("actions", []))
+        return {"executedActions": executed}
+
+    def _rollup_reflection(self, date_str: str, record: Dict[str, Any]):
+        slot = self._daily_reflection_rollup.setdefault(date_str, {
+            "message_count": 0,
+            "tag_replies": 0,
+            "notes": [],
+        })
+        slot["message_count"] += record.get("chatActions", 0)
+        slot["tag_replies"] += record.get("tagReplies", 0)
+        if record.get("worked"):
+            slot["notes"].append(record["worked"])
+            slot["notes"] = slot["notes"][-8:]
+
+    def _maybe_sync_previous_day_reflection(self, current_day: str):
+        if not self._reflection_sync_enabled:
+            return
+        if self._last_reflection_day is None:
+            self._last_reflection_day = current_day
+            return
+        if current_day == self._last_reflection_day:
+            return
+
+        prev_day = self._last_reflection_day
+        self._last_reflection_day = current_day
+        rollup = self._daily_reflection_rollup.pop(prev_day, None)
+        if not rollup or not self.client or not self.entity_manager or not self.entity_id:
+            return
+
+        note = rollup["notes"][-1] if rollup["notes"] else "steady activity"
+        summary = (
+            f"{self.entity_id} reflection for {prev_day}: "
+            f"{rollup['message_count']} chat action(s), "
+            f"{rollup['tag_replies']} direct mention reply/replies. "
+            f"Latest learning: {note}."
+        )
+
+        try:
+            auth_h = self.entity_manager.get_auth_header(self.entity_id)
+            resp = self.client.session.post(
+                f"{self.server_url}/entity/{self.entity_id}/daily-reflections",
+                headers={**auth_h, "Content-Type": "application/json"},
+                json={
+                    "summaryDate": prev_day,
+                    "dailySummary": summary[:4000],
+                    "messageCount": int(rollup["message_count"]),
+                },
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                print(f"[{self.entity_id}] ⚠️ daily reflection sync failed: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            print(f"[{self.entity_id}] ⚠️ daily reflection sync error: {exc}")
+
+    def reflect(
+        self,
+        perception: Dict[str, Any],
+        memory_bundle: Dict[str, Any],
+        identity_profile: Dict[str, Any],
+        reasoning_artifact: Dict[str, Any],
+        plan: Dict[str, Any],
+        action_outcome: Dict[str, Any],
+    ):
+        executed_actions = action_outcome.get("executedActions", [])
+        chat_actions = sum(1 for a in executed_actions if a.get("type") == "chat")
+        movement_actions = sum(1 for a in executed_actions if a.get("type") in ("move", "move_to_agent"))
+        emote_actions = sum(1 for a in executed_actions if a.get("type") == "emote")
+        wait_actions = sum(1 for a in executed_actions if a.get("type") == "wait")
+        tag_replies = chat_actions if perception.get("taggedBy") else 0
+
+        self._procedural_stats["ticks"] += 1
+        self._procedural_stats["chat_actions"] += chat_actions
+        self._procedural_stats["movement_actions"] += movement_actions
+        self._procedural_stats["emote_actions"] += emote_actions
+        self._procedural_stats["wait_actions"] += wait_actions
+        self._procedural_stats["tag_replies"] += tag_replies
+
+        worked = "kept social cadence" if chat_actions > 0 else "maintained movement/exploration"
+        if perception.get("markers", {}).get("mentions") and chat_actions == 0:
+            worked = "missed direct mention; fallback override required"
+
+        record = {
+            "tick": perception.get("tick"),
+            "ts": perception.get("timestamp"),
+            "chatActions": chat_actions,
+            "movementActions": movement_actions,
+            "tagReplies": tag_replies,
+            "worked": worked,
+            "nextAdjustment": "prioritize direct replies when tagged",
+        }
+        self._reflection_history.append(record)
+        self._reflection_history = self._reflection_history[-40:]
+
+        self._context_summary = f"{self._context_summary} -> {worked}".strip(" ->")
+        if len(self._context_summary) > 220:
+            self._context_summary = self._context_summary[-220:]
+
+        day_str = time.strftime("%Y-%m-%d", time.gmtime(perception.get("timestamp", int(time.time() * 1000)) / 1000))
+        self._rollup_reflection(day_str, record)
+        self._maybe_sync_previous_day_reflection(day_str)
+
+    def _think(self) -> List[Dict[str, Any]]:
+        perception = self.perceive()
+        memory_bundle = self.retrieve_memory(perception)
+        identity_profile = self.identity_profile()
+        reasoning = self.reason(perception, memory_bundle, identity_profile)
+        return reasoning.get("actions", [{"type": "wait"}])
 
     # ── Action execution ──────────────────────────────────────────
 
-    def _execute(self, actions: List[Dict[str, Any]]):
+    def _execute(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Execute a list of action dicts returned by the LLM."""
 
         pos = self.client.get_position()
+        executed: List[Dict[str, Any]] = []
         
         # Bucket agents by distance
         in_range: list = []     # <= 15 units — within CONVERSATION_RADIUS
@@ -1251,6 +1489,7 @@ class AIAgent:
                     self._recent_own_messages.append(msg)
                     if len(self._recent_own_messages) > 8:
                         self._recent_own_messages = self._recent_own_messages[-8:]
+                    executed.append({"type": "chat", "message": msg, "status": "ok"})
 
             elif t == "move":
                 x = float(act.get("x", self.client.position["x"]))
@@ -1263,23 +1502,30 @@ class AIAgent:
                 )
                 self.client.move(x, 0, z, rotation)
                 print(f"  🚶 move → ({x:.1f}, {z:.1f})")
+                executed.append({"type": "move", "x": x, "z": z, "status": "ok"})
 
             elif t == "move_to_agent":
                 name = act.get("agent_name", "")
                 if name:
                     moved = self.client.move_towards_agent(name, stop_distance=3.0, step=5.0)
                     print(f"  🚶 move toward {name} ({'ok' if moved else 'already close'})")
+                    executed.append({"type": "move_to_agent", "agent_name": name, "status": "ok" if moved else "already_close"})
 
             elif t == "emote":
                 emote = act.get("emote", "wave")
                 self.client.action(emote)
                 print(f"  🙌 emote: {emote}")
+                executed.append({"type": "emote", "emote": emote, "status": "ok"})
 
             elif t == "wait":
                 print("  ⏳ wait")
+                executed.append({"type": "wait", "status": "ok"})
 
             else:
                 print(f"  ❓ unknown action type: {t}")
+                executed.append({"type": t, "status": "unknown"})
+
+        return executed
 
     # ── Main loop ─────────────────────────────────────────────────
 
@@ -1294,6 +1540,8 @@ class AIAgent:
         print(f"▶  AI Agent '{self.entity_id}' running  (model={self.model}, tick={self.TICK_INTERVAL}s)")
         interests_display = self._interests if self._interests else ["(loading from server...)"]
         print(f"   Interests: {', '.join(interests_display)}")
+        print(f"   Cognitive loop: {'enabled' if self._cognitive_loop_enabled else 'disabled'}")
+        print(f"   Reflection sync: {'enabled' if self._reflection_sync_enabled else 'disabled'}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
 
@@ -1330,8 +1578,11 @@ class AIAgent:
 
                 # Registered: run expensive think/act only on TICK_INTERVAL.
                 if now >= _next_think_at:
-                    actions = self._think()
-                    self._execute(actions)
+                    if self._cognitive_loop_enabled:
+                        self._cognitive_loop.run_tick()
+                    else:
+                        actions = self._think()
+                        self._execute(actions)
                     _next_think_at = time.time() + self.TICK_INTERVAL
                 else:
                     time.sleep(min(1.0, _next_think_at - now))

@@ -812,7 +812,7 @@ app.post('/entity/:entityId/daily-reflections', requireAuth, async (req, res) =>
       return res.status(403).json({ success: false, error: 'Forbidden: can only write your own reflections' });
     }
 
-    const { summaryDate, dailySummary, messageCount } = req.body || {};
+    const { summaryDate, dailySummary, messageCount, socialSummary, goalProgress, memoryUpdates } = req.body || {};
     if (!summaryDate || typeof summaryDate !== 'string') {
       return res.status(400).json({ success: false, error: 'summaryDate (YYYY-MM-DD) is required' });
     }
@@ -821,7 +821,16 @@ app.post('/entity/:entityId/daily-reflections', requireAuth, async (req, res) =>
     }
 
     const safeCount = Number.isFinite(Number(messageCount)) ? Math.max(0, parseInt(messageCount, 10)) : 0;
-    await db.saveEntityDailyReflection(entityId, summaryDate, dailySummary.trim().slice(0, 4000), safeCount, true);
+    await db.saveEntityDailyReflection(
+      entityId,
+      summaryDate,
+      dailySummary.trim().slice(0, 4000),
+      safeCount,
+      true,
+      typeof socialSummary === 'string' ? socialSummary.trim().slice(0, 2000) : '',
+      goalProgress && typeof goalProgress === 'object' ? goalProgress : {},
+      memoryUpdates && typeof memoryUpdates === 'object' ? memoryUpdates : {}
+    );
 
     res.json({ success: true, entityId, summaryDate });
   } catch (error) {

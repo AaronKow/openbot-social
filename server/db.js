@@ -231,11 +231,34 @@ async function initDatabase() {
         entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
         summary_date DATE NOT NULL,
         daily_summary TEXT NOT NULL,
+        social_summary TEXT NOT NULL DEFAULT '',
+        goal_progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+        memory_updates JSONB NOT NULL DEFAULT '{}'::jsonb,
         message_count INTEGER NOT NULL DEFAULT 0,
         ai_completed BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(entity_id, summary_date)
       )
+    `);
+
+    // Migrations for older DBs created before richer reflection fields existed
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entity_daily_reflections ADD COLUMN IF NOT EXISTS social_summary TEXT NOT NULL DEFAULT '';
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entity_daily_reflections ADD COLUMN IF NOT EXISTS goal_progress JSONB NOT NULL DEFAULT '{}'::jsonb;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entity_daily_reflections ADD COLUMN IF NOT EXISTS memory_updates JSONB NOT NULL DEFAULT '{}'::jsonb;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
     `);
 
     await client.query(`
@@ -783,23 +806,46 @@ async function getConversationMessagesForEntityDateRange(entityId, startTimestam
 }
 
 // Save/update per-entity daily reflection summary
-async function saveEntityDailyReflection(entityId, summaryDate, dailySummary, messageCount, aiCompleted = false) {
+async function saveEntityDailyReflection(
+  entityId,
+  summaryDate,
+  dailySummary,
+  messageCount,
+  aiCompleted = false,
+  socialSummary = '',
+  goalProgress = {},
+  memoryUpdates = {}
+) {
   await pool.query(
-    `INSERT INTO entity_daily_reflections (entity_id, summary_date, daily_summary, message_count, ai_completed)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO entity_daily_reflections (
+       entity_id, summary_date, daily_summary, social_summary, goal_progress, memory_updates, message_count, ai_completed
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (entity_id, summary_date) DO UPDATE SET
        daily_summary = EXCLUDED.daily_summary,
+       social_summary = EXCLUDED.social_summary,
+       goal_progress = EXCLUDED.goal_progress,
+       memory_updates = EXCLUDED.memory_updates,
        message_count = EXCLUDED.message_count,
        ai_completed = EXCLUDED.ai_completed,
        created_at = CURRENT_TIMESTAMP`,
-    [entityId, summaryDate, dailySummary, messageCount, aiCompleted]
+    [
+      entityId,
+      summaryDate,
+      dailySummary,
+      socialSummary || '',
+      goalProgress || {},
+      memoryUpdates || {},
+      messageCount,
+      aiCompleted
+    ]
   );
 }
 
 // Get most recent per-entity daily reflection summaries
 async function getEntityDailyReflections(entityId, limit = 30) {
   const result = await pool.query(
-    `SELECT summary_date, daily_summary, message_count, ai_completed, created_at
+    `SELECT summary_date, daily_summary, social_summary, goal_progress, memory_updates, message_count, ai_completed, created_at
      FROM entity_daily_reflections
      WHERE entity_id = $1
      ORDER BY summary_date DESC
@@ -812,6 +858,9 @@ async function getEntityDailyReflections(entityId, limit = 30) {
       ? row.summary_date.toISOString().slice(0, 10)
       : String(row.summary_date).slice(0, 10),
     dailySummary: row.daily_summary,
+    socialSummary: row.social_summary || '',
+    goalProgress: row.goal_progress || {},
+    memoryUpdates: row.memory_updates || {},
     messageCount: row.message_count,
     aiCompleted: row.ai_completed,
     createdAt: row.created_at

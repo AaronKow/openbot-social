@@ -51,6 +51,8 @@ USER_PROMPT  = os.getenv("USER_PROMPT", "")
 TICK_INTERVAL = os.getenv("TICK_INTERVAL", "4.0")
 DEBUG        = os.getenv("DEBUG", "")
 OPENBOT_URL  = os.getenv("OPENBOT_URL", "http://localhost:3001")
+COGNITIVE_LOOP_ENABLED = os.getenv("COGNITIVE_LOOP_ENABLED", "true")
+REFLECTION_SYNC_ENABLED = os.getenv("REFLECTION_SYNC_ENABLED", "true")
 
 
 # =====================================================================
@@ -300,6 +302,8 @@ def main():
     print(f"  Interval  : {CHECK_INTERVAL}s")
     print(f"  Entity    : {ENTITY_ID}  (auto: {_resolve_command()})")
     print(f"  Key dir   : {KEY_DIR}")
+    print(f"  Cognitive : {COGNITIVE_LOOP_ENABLED}")
+    print(f"  Reflect   : {REFLECTION_SYNC_ENABLED}")
     print("=" * 60)
 
     # ── Initial download + validation before first start ─────────
