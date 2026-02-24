@@ -86,3 +86,104 @@ test('buildEntityWikiPublic returns complete bounded wiki payload', async () => 
   assert.ok(wiki.social.reputationScore.value >= 0 && wiki.social.reputationScore.value <= 100);
   assert.ok(wiki.timeline.length <= 20);
 });
+
+
+test('buildEntityWikiPublic prefers persisted goals snapshot when available', async () => {
+  const now = Date.now();
+  const fakeDb = {
+    async getEntity(entityId) {
+      return {
+        entity_id: entityId,
+        entity_name: entityId,
+        entity_type: 'lobster',
+        created_at: new Date(now - 10_000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    },
+    async getLatestEntityGoalSnapshot() {
+      return {
+        longTermGoals: [{ label: 'Build a coral coalition', source: 'gpt-4o-mini' }],
+        shortTermGoals: [{ label: 'Send 3 outreach pings', source: 'gpt-4o-mini' }],
+        source: 'ai-v1',
+        generatedAt: new Date(now - 60_000).toISOString()
+      };
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb);
+  assert.deepEqual(wiki.cognition.longTermGoals, [{ label: 'Build a coral coalition', source: 'gpt-4o-mini' }]);
+  assert.deepEqual(wiki.cognition.shortTermGoals, [{ label: 'Send 3 outreach pings', source: 'gpt-4o-mini' }]);
+  assert.ok(wiki.meta.sources.includes('entity_goal_snapshots'));
+});
+
+test('buildEntityWikiPublic does not write goal snapshots in wiki read path', async () => {
+  const now = Date.now();
+  let writeCalls = 0;
+  const fakeDb = {
+    async getEntity(entityId) {
+      return {
+        entity_id: entityId,
+        entity_name: entityId,
+        entity_type: 'lobster',
+        created_at: new Date(now - 10_000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'ocean politics', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    },
+    async getLatestEntityGoalSnapshot() {
+      return null;
+    },
+    async saveEntityGoalSnapshot() {
+      writeCalls += 1;
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb);
+  assert.equal(writeCalls, 0);
+  assert.ok(wiki.cognition.longTermGoals.length > 0);
+});
+
+
+test('buildEntityWikiPublic uses in-memory goal snapshot fallback when DB is unavailable', async () => {
+  const now = Date.now();
+  const memoryEntity = {
+    entity_id: 'alpha-lobster',
+    entity_name: 'alpha-lobster',
+    entity_type: 'lobster',
+    created_at: new Date(now - 1000).toISOString()
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, null, {
+    memoryEntity,
+    memoryInterests: [{ interest: 'currents', weight: 100 }],
+    memoryGoalSnapshot: {
+      longTermGoals: [{ label: 'Expand reef diplomacy', source: 'entity-agent' }],
+      shortTermGoals: [{ label: 'Check in with reef-bot', source: 'entity-agent' }],
+      source: 'entity-agent-v1'
+    }
+  });
+
+  assert.deepEqual(wiki.cognition.longTermGoals, [{ label: 'Expand reef diplomacy', source: 'entity-agent' }]);
+  assert.deepEqual(wiki.cognition.shortTermGoals, [{ label: 'Check in with reef-bot', source: 'entity-agent' }]);
+});

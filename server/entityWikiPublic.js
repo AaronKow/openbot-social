@@ -116,6 +116,24 @@ function deriveShortTermGoals(reflections, relationships, currentState) {
   return deduped;
 }
 
+function normalizeGoalEntries(goals, fallbackSource = 'persisted') {
+  if (!Array.isArray(goals)) return [];
+  return goals
+    .map(goal => {
+      if (!goal || typeof goal !== 'object') return null;
+      const label = typeof goal.label === 'string' ? goal.label.trim() : '';
+      if (!label) return null;
+      return {
+        label,
+        source: typeof goal.source === 'string' && goal.source.trim()
+          ? goal.source.trim()
+          : fallbackSource
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
 function deriveRelationships(rawPartners) {
   const now = Date.now();
   return (rawPartners || []).map(partner => {
@@ -300,8 +318,29 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   }
 
   const relationships = deriveRelationships(rawPartners);
-  const longTermGoals = deriveLongTermGoals(interests, reflections, recentOwnChats);
-  const shortTermGoals = deriveShortTermGoals(reflections, relationships, currentState);
+
+  const derivedLongTermGoals = deriveLongTermGoals(interests, reflections, recentOwnChats);
+  const derivedShortTermGoals = deriveShortTermGoals(reflections, relationships, currentState);
+
+  let goalsSnapshot = null;
+  if (db && typeof db.getLatestEntityGoalSnapshot === 'function') {
+    try {
+      goalsSnapshot = await db.getLatestEntityGoalSnapshot(entityId);
+    } catch (error) {
+      // Keep wiki route resilient if goal snapshots are unavailable.
+      console.warn(`[wiki-public] failed to read goals snapshot for ${entityId}:`, error.message);
+    }
+  } else if (options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object') {
+    goalsSnapshot = options.memoryGoalSnapshot;
+  }
+
+  const longTermGoals = goalsSnapshot
+    ? normalizeGoalEntries(goalsSnapshot.longTermGoals, goalsSnapshot.source || 'persisted')
+    : derivedLongTermGoals;
+  const shortTermGoals = goalsSnapshot
+    ? normalizeGoalEntries(goalsSnapshot.shortTermGoals, goalsSnapshot.source || 'persisted')
+    : derivedShortTermGoals;
+
   const relationshipGraph = buildRelationshipGraph(entityId, relationships);
   const reputationScore = deriveReputation(relationships, recentOwnChats);
   const timeline = buildTimeline(entity, currentState, reflections, recentOwnChats);
@@ -331,7 +370,14 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     timeline,
     meta: {
       generatedAt: new Date().toISOString(),
-      sources: ['entity', 'world-state', 'entity_interests', 'entity_daily_reflections', 'chat_messages'],
+      sources: [
+        'entity',
+        'world-state',
+        'entity_interests',
+        'entity_daily_reflections',
+        'chat_messages',
+        ...(goalsSnapshot ? ['entity_goal_snapshots'] : [])
+      ],
       privacy: 'public'
     }
   };
