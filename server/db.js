@@ -675,6 +675,120 @@ async function getChatMessagesForDateRange(startTimestamp, endTimestamp) {
   }));
 }
 
+// Get recent chat messages authored by a given agent/entity name
+async function getRecentChatMessagesByAgentName(agentName, limit = 300) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 300, 1000));
+  const result = await pool.query(
+    `SELECT agent_id, agent_name, message, timestamp
+     FROM chat_messages
+     WHERE agent_name = $1
+     ORDER BY timestamp DESC
+     LIMIT $2`,
+    [agentName, safeLimit]
+  );
+  return result.rows.map(row => ({
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp, 10)
+  }));
+}
+
+// Public-safe reflections for wiki views
+async function getRecentEntityReflectionsPublic(entityId, limit = 30) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 30, 90));
+  const result = await pool.query(
+    `SELECT summary_date, daily_summary, social_summary, goal_progress, memory_updates, message_count, created_at
+     FROM entity_daily_reflections
+     WHERE entity_id = $1
+     ORDER BY summary_date DESC
+     LIMIT $2`,
+    [entityId, safeLimit]
+  );
+  return result.rows.map(row => ({
+    date: row.summary_date instanceof Date
+      ? row.summary_date.toISOString().slice(0, 10)
+      : String(row.summary_date).slice(0, 10),
+    dailySummary: row.daily_summary,
+    socialSummary: row.social_summary || '',
+    goalProgress: row.goal_progress || {},
+    memoryUpdates: row.memory_updates || {},
+    messageCount: row.message_count || 0,
+    createdAt: row.created_at
+  }));
+}
+
+function parseMentionTargets(message) {
+  if (!message || typeof message !== 'string') return [];
+  const targets = new Set();
+  const regex = /@([a-zA-Z0-9_-]{3,64})/g;
+  let match;
+  while ((match = regex.exec(message)) !== null) {
+    targets.add(match[1]);
+  }
+  return [...targets];
+}
+
+function mentionMatchesName(message, name) {
+  if (!message || !name) return false;
+  const lowered = String(message).toLowerCase();
+  const full = `@${String(name).toLowerCase()}`;
+  if (lowered.includes(full)) return true;
+  const base = String(name).split('-')[0].split('_')[0];
+  if (base.length >= 3 && lowered.includes(`@${base.toLowerCase()}`)) return true;
+  return false;
+}
+
+// Aggregate top relationship candidates from recent chat history
+async function getTopConversationPartnersByAgentName(agentName, limit = 8) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 8, 20));
+  const scanWindow = 1200;
+  const result = await pool.query(
+    `SELECT agent_name, message, timestamp
+     FROM chat_messages
+     ORDER BY timestamp DESC
+     LIMIT $1`,
+    [scanWindow]
+  );
+
+  const partners = new Map();
+  const touch = (partnerName, mode, ts) => {
+    if (!partnerName || partnerName === agentName) return;
+    const slot = partners.get(partnerName) || {
+      entityId: partnerName,
+      messagesExchanged: 0,
+      sentMentions: 0,
+      receivedMentions: 0,
+      lastInteractionAt: 0
+    };
+    slot.messagesExchanged += 1;
+    if (mode === 'sent') slot.sentMentions += 1;
+    if (mode === 'received') slot.receivedMentions += 1;
+    slot.lastInteractionAt = Math.max(slot.lastInteractionAt, Number(ts) || 0);
+    partners.set(partnerName, slot);
+  };
+
+  for (const row of result.rows) {
+    const speaker = row.agent_name;
+    const message = row.message || '';
+    const ts = parseInt(row.timestamp, 10);
+    if (speaker === agentName) {
+      for (const target of parseMentionTargets(message)) {
+        touch(target, 'sent', ts);
+      }
+    } else if (mentionMatchesName(message, agentName)) {
+      touch(speaker, 'received', ts);
+    }
+  }
+
+  return [...partners.values()]
+    .sort((a, b) => {
+      if (b.messagesExchanged !== a.messagesExchanged) return b.messagesExchanged - a.messagesExchanged;
+      return b.lastInteractionAt - a.lastInteractionAt;
+    })
+    .slice(0, safeLimit);
+}
+
 // Save a daily activity summary (aiCompleted = true if AI generated, false if fallback)
 async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents, aiCompleted = false) {
   await pool.query(
@@ -1024,6 +1138,9 @@ module.exports = {
   cleanupRateLimits,
   // Activity summary functions
   getChatMessagesForDateRange,
+  getRecentChatMessagesByAgentName,
+  getRecentEntityReflectionsPublic,
+  getTopConversationPartnersByAgentName,
   saveDailySummary,
   getActivitySummaries,
   hasSummaryForDate,

@@ -7,6 +7,7 @@ const { createEntityRouter, requireSession, optionalSession, encryptIfAuthentica
 const { createRateLimiter, createEntityRateLimiter } = require('./rateLimit');
 const activitySummary = require('./activitySummary');
 const entityReflectionSummary = require('./entityReflectionSummary');
+const { buildEntityWikiPublic } = require('./entityWikiPublic');
 
 const app = express();
 
@@ -734,6 +735,10 @@ const ACTIVITY_LOG_CACHE_TTL = 60_000; // 1 minute
 let _lastCheckTriggerTime = 0;
 const CHECK_THROTTLE_MS = 30_000; // At most one real check every 30s
 
+// Public lobster wiki cache (small TTL to reduce DB aggregation churn)
+const ENTITY_WIKI_CACHE_TTL_MS = 60_000;
+const _entityWikiCache = new Map(); // entityId -> { ts, data }
+
 // Get activity summaries (daily + hourly) for the frontend — cached
 app.get('/activity-log', async (req, res) => {
   try {
@@ -782,6 +787,41 @@ app.post('/activity-log/check', rateLimiters.summaryCheck, async (req, res) => {
   } catch (error) {
     console.error('Error checking activity log:', error);
     res.status(500).json({ triggered: false, message: 'Internal server error' });
+  }
+});
+
+// Public lobster wiki with derived + stored details
+app.get('/entity/:entityId/wiki-public', async (req, res) => {
+  const start = Date.now();
+  try {
+    const { entityId } = req.params;
+    if (!entityId) {
+      return res.status(400).json({ success: false, error: 'entityId is required' });
+    }
+
+    const cached = _entityWikiCache.get(entityId);
+    if (cached && (Date.now() - cached.ts) < ENTITY_WIKI_CACHE_TTL_MS) {
+      return res.json({ success: true, wiki: cached.data, cache: 'hit' });
+    }
+
+    const memoryEntity = getMemoryEntities()?.get(entityId) || null;
+    const memoryInterests = app._memoryInterests?.get(entityId) || [];
+    const dbAdapter = process.env.DATABASE_URL ? db : null;
+
+    const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
+      memoryEntity,
+      memoryInterests
+    });
+    if (!wiki) {
+      return res.status(404).json({ success: false, error: 'Entity not found' });
+    }
+
+    _entityWikiCache.set(entityId, { ts: Date.now(), data: wiki });
+    res.json({ success: true, wiki, cache: 'miss' });
+    console.log(`[wiki-public] entity=${entityId} cache=miss ms=${Date.now() - start}`);
+  } catch (error) {
+    console.error('Error fetching wiki public payload:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
