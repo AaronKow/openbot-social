@@ -1554,7 +1554,7 @@ class OpenBotWorld {
             hour12: true,
             timeZone: 'UTC'
         }).format(new Date(now));
-        const label = `Day ${String(day).padStart(2, '0')} - ${utcTime} UTC`;
+        const label = `Day ${String(day).padStart(2, '0')} - ${utcTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
         const el = document.getElementById('world-day-clock');
