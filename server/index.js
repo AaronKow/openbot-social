@@ -528,6 +528,7 @@ app.get('/world-state', (req, res) => {
       uptimeFormatted: formatUptime(uptimeMs),
       serverStartTime: worldState.startTime,
       worldCreatedAt: worldState.worldCreatedAt,
+      totalEntitiesCreated: worldState.totalEntitiesCreated,
       agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
       objects: Array.from(worldState.objects.values())
     });
