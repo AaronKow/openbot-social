@@ -974,22 +974,24 @@ async function startServer() {
       worldState.chatMessages = recentMessages;
       console.log(`Loaded ${recentMessages.length} chat messages from database`);
 
-      // Load total entity count + earliest world creation signal
-      try {
-        worldState.totalEntitiesCreated = await db.getEntityCount();
+      // Load total entity count + earliest world creation signal concurrently
+      const [entityCountResult, worldCreatedAtResult] = await Promise.allSettled([
+        db.getEntityCount(),
+        db.getWorldCreatedAt()
+      ]);
+
+      if (entityCountResult.status === 'fulfilled') {
+        worldState.totalEntitiesCreated = entityCountResult.value;
         console.log(`Total entities created: ${worldState.totalEntitiesCreated}`);
-      } catch (e) {
-        console.warn('Could not load entity count:', e.message);
+      } else {
+        console.warn('Could not load entity count:', entityCountResult.reason?.message || entityCountResult.reason);
       }
 
-      try {
-        const worldCreatedAt = await db.getWorldCreatedAt();
-        if (worldCreatedAt) {
-          worldState.worldCreatedAt = worldCreatedAt;
-          console.log(`World created at: ${new Date(worldState.worldCreatedAt).toISOString()}`);
-        }
-      } catch (e) {
-        console.warn('Could not load world creation timestamp:', e.message);
+      if (worldCreatedAtResult.status === 'fulfilled' && worldCreatedAtResult.value) {
+        worldState.worldCreatedAt = worldCreatedAtResult.value;
+        console.log(`World created at: ${new Date(worldState.worldCreatedAt).toISOString()}`);
+      } else if (worldCreatedAtResult.status === 'rejected') {
+        console.warn('Could not load world creation timestamp:', worldCreatedAtResult.reason?.message || worldCreatedAtResult.reason);
       }
     } else {
       console.log('Database disabled - running in memory-only mode');

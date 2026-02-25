@@ -67,6 +67,13 @@ class OpenBotWorld {
         this.timelineFilter = 'all';
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
+        this.worldClockMinuteKey = '';
+        this.utcClockFormatter = new Intl.DateTimeFormat('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'UTC'
+        });
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -1544,26 +1551,29 @@ class OpenBotWorld {
         const serverStartTime = this.normalizeServerTimestamp(data.serverStartTime);
 
         if (worldCreatedAt !== null) {
-            this.serverStartTime = worldCreatedAt;
+            if (this.serverStartTime !== worldCreatedAt) {
+                this.serverStartTime = worldCreatedAt;
+                this.worldClockMinuteKey = '';
+            }
             return;
         }
 
         if (this.serverStartTime === null && serverStartTime !== null) {
             this.serverStartTime = serverStartTime;
+            this.worldClockMinuteKey = '';
         }
     }
 
     updateWorldClockLabel() {
         if (!this.serverStartTime) return;
         const now = Date.now();
+        const minuteKey = Math.floor(now / 60_000);
+        if (minuteKey === this.worldClockMinuteKey) return;
+
+        this.worldClockMinuteKey = minuteKey;
         const elapsedMs = Math.max(0, now - this.serverStartTime);
         const day = Math.floor(elapsedMs / 86_400_000) + 1;
-        const utcTime = new Intl.DateTimeFormat('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true,
-            timeZone: 'UTC'
-        }).format(new Date(now));
+        const utcTime = this.utcClockFormatter.format(new Date(now));
         const label = `Day ${String(day).padStart(2, '0')} - ${utcTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
