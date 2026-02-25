@@ -293,6 +293,24 @@
             display: none;
             opacity: 0;
         }
+
+        .status-link-btn {
+            background: transparent;
+            border: 1px solid rgba(0, 255, 204, 0.45);
+            color: #cafff6;
+            border-radius: 6px;
+            padding: 1px 8px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .status-link-btn:hover,
+        .status-link-btn:focus {
+            background: rgba(0, 255, 204, 0.16);
+            color: #ffffff;
+            outline: none;
+        }
+
         
         #agent-list {
             max-width: 500px;
@@ -786,7 +804,7 @@
         }
 
         .wiki-key {
-            color: #88bed0;
+            color: #b8e9f8;
             margin-right: 6px;
         }
 
@@ -848,7 +866,132 @@
 
         .wiki-band {
             font-size: 13px;
-            color: #8dd5e4;
+            color: #c6ecf5;
+        }
+
+
+        .wiki-actions-row {
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        .wiki-nav-btn {
+            background: rgba(0, 255, 204, 0.1);
+            border: 1px solid rgba(0, 255, 204, 0.4);
+            border-radius: 8px;
+            color: #d7fff8;
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+
+        .wiki-nav-btn:hover,
+        .wiki-nav-btn:focus {
+            background: rgba(0, 255, 204, 0.24);
+            color: #fff;
+            outline: none;
+        }
+
+        .wiki-directory-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 12px;
+        }
+
+        .wiki-directory-card {
+            background: rgba(2, 35, 55, 0.9);
+            border: 1px solid rgba(125, 245, 255, 0.45);
+            border-radius: 10px;
+            color: #e3ffff;
+            text-align: left;
+            padding: 10px;
+            cursor: pointer;
+        }
+
+        .wiki-directory-card:hover,
+        .wiki-directory-card:focus {
+            background: rgba(8, 55, 80, 0.95);
+            border-color: #7df5ff;
+            outline: none;
+        }
+
+        .wiki-directory-avatar {
+            font-size: 32px;
+            line-height: 1;
+            margin-bottom: 6px;
+        }
+
+        .wiki-directory-id {
+            color: #9ff7ff;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .wiki-directory-name {
+            font-size: 14px;
+            margin-top: 3px;
+            font-weight: 700;
+            word-break: break-word;
+        }
+
+        .wiki-directory-meta {
+            font-size: 12px;
+            color: #bde3ea;
+            margin-top: 3px;
+        }
+
+        .wiki-avatar-rotator {
+            display: grid;
+            gap: 10px;
+        }
+
+        .wiki-avatar-stage {
+            height: 150px;
+            border-radius: 10px;
+            border: 1px solid rgba(125, 245, 255, 0.4);
+            background: radial-gradient(circle at center, rgba(16, 74, 105, 0.72), rgba(0, 0, 0, 0.35));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            perspective: 600px;
+        }
+
+        .wiki-avatar-card {
+            font-size: 72px;
+            transform-style: preserve-3d;
+            transition: transform 0.15s linear;
+        }
+
+        .wiki-avatar-controls {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .wiki-avatar-controls input[type="range"] {
+            width: 100%;
+        }
+
+        .wiki-graph-controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .wiki-graph-btn {
+            background: rgba(0, 255, 204, 0.12);
+            border: 1px solid rgba(125, 245, 255, 0.6);
+            color: #e4ffff;
+            border-radius: 6px;
+            min-width: 36px;
+            height: 30px;
+            cursor: pointer;
+        }
+
+        .wiki-graph-btn:hover,
+        .wiki-graph-btn:focus {
+            background: rgba(125, 245, 255, 0.3);
+            outline: none;
         }
 
         .wiki-graph-wrap {
@@ -1222,7 +1365,7 @@
                 <p><span id="world-day-clock" aria-live="polite">Day 01 - 12:00 AM</span></p>
                 <p>World: <span id="connection-status" class="status-disconnected" aria-live="polite">Offline</span></p>
                 <p>Active Agents: <span id="agent-count" aria-live="polite">0</span></p>
-                <p>Total Created: <span id="total-entities" aria-live="polite">0</span></p>
+                <p>Total Created: <button id="total-created-link" class="status-link-btn" aria-live="polite">0</button></p>
                 <p>Last update: <span id="uptime-display" aria-live="polite">Waiting for data</span></p>
                 <div id="agent-list" role="list" aria-label="Connected Agents"></div>
             </div>
