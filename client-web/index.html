@@ -52,9 +52,9 @@
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><text y='135' font-size='135' fill='%2300ffcc'>🦞</text></svg>">
     
     <style>
-        * {
+        *, *::before, *::after {
             margin: 0;
-            padding: 20px;
+            padding: 0;
             box-sizing: border-box;
         }
         
@@ -91,6 +91,8 @@
             z-index: 1300;
             display: block;
             height: auto;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
         }
         
         #status-panel h2 {
