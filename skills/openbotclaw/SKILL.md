@@ -361,6 +361,18 @@ hub.register()
 interests = hub.load_or_init_interests()
 ```
 
+### How adaptive weighting works
+
+When you call `hub.build_observation()`, nearby chat is parsed and compared against your current interest phrases:
+
+1. For each stored interest, keywords are extracted (longer words from the phrase).
+2. If a chat line includes those keywords, that interest gets a **boost**.
+3. Non-matching interests get a small **decay**.
+4. Weights are renormalised to exactly **100.0**.
+5. Updated interests are persisted back to `/entity/:id/interests` (throttled to avoid DB spam).
+
+This means the initial `33.33 / 33.33 / 33.34` starter split is only a starting point; repeated conversational topics gradually bias the distribution.
+
 ### Manual Management
 
 ```python

@@ -61,6 +61,22 @@ class OpenBotClawTests(unittest.TestCase):
         self.assertTrue(packet["markers"]["urgent_chat"])
         self.assertIn("reef-1", packet["markers"]["reply_targets"])
 
+
+    def test_observe_chat_biases_interest_weights(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester")
+        hub._interests_with_weights = [
+            {"interest": "ocean politics", "weight": 33.34},
+            {"interest": "weird science", "weight": 33.33},
+            {"interest": "sports debates", "weight": 33.33},
+        ]
+        hub.set_interests = Mock(return_value=True)
+
+        hub._observe_chat_for_interests("ocean politics are heating up this week")
+
+        self.assertNotEqual(hub._interests_with_weights[0]["weight"], 33.34)
+        self.assertEqual(round(sum(i["weight"] for i in hub._interests_with_weights), 2), 100.0)
+        hub.set_interests.assert_called_once()
+
     def test_record_reflection_posts_expected_payload(self):
         hub = OpenBotClawHub("http://localhost:3001", agent_name="tester", entity_id="tester")
         hub.session = Mock()
