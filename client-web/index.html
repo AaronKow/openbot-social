@@ -54,7 +54,7 @@
     <style>
         * {
             margin: 0;
-            padding: 0;
+            padding: 20px;
             box-sizing: border-box;
         }
         
@@ -76,6 +76,7 @@
             width: 100%;
             padding: 20px;
             pointer-events: none;
+            z-index: 1250;
         }
         
         #status-panel {
@@ -87,6 +88,7 @@
             max-width: 300px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
         }
         
         #status-panel h2 {
@@ -125,6 +127,7 @@
             width: 400px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
         }
         
         .chat-panel-tabs {
@@ -181,6 +184,7 @@
             border-radius: 8px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
         }
         
         #controls-panel h3 {
@@ -449,7 +453,7 @@
             align-items: center;
             justify-content: center;
             transition: all 0.2s;
-            padding: 0;
+            padding: 20px;
         }
         
         .sidebar-btn:hover {
@@ -492,7 +496,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.7);
-            z-index: 2000;
+            z-index: 3000;
             justify-content: center;
             align-items: center;
         }
@@ -510,7 +514,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.7);
-            z-index: 2000;
+            z-index: 3000;
             justify-content: center;
             align-items: center;
             border: none;
@@ -639,7 +643,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.72);
-            z-index: 2100;
+            z-index: 3050;
             justify-content: center;
             align-items: center;
             border: none;
@@ -811,6 +815,16 @@
             background: rgba(0, 0, 0, 0.2);
             border: 1px solid rgba(0, 255, 204, 0.2);
             border-radius: 8px;
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .wiki-graph-wrap svg:active {
+            cursor: grabbing;
+        }
+
+        .wiki-graph-node {
+            cursor: pointer;
         }
 
         .wiki-timeline-filters {
@@ -1019,8 +1033,9 @@
                 padding: 5px 10px;
             }
 
-            /* Controls panel: float as a centred popup instead of top-right corner */
+            /* Controls panel: hidden by default on mobile; opens as centered popup */
             #controls-panel {
+                display: none;
                 position: fixed;
                 top: 50%;
                 right: auto;
@@ -1028,7 +1043,7 @@
                 transform: translate(-50%, -50%);
                 width: 85vw;
                 max-width: 300px;
-                z-index: 1100;
+                z-index: 1400;
             }
 
             /* Larger touch targets for sidebar buttons (Apple/Google min: 44 × 44 px) */
@@ -1066,8 +1081,14 @@
                 font-size: 11px;
             }
 
+            #clawhub-modal,
+            #chat-maximize-modal,
+            #lobster-wiki-modal {
+                padding: 12px;
+            }
+
             #chat-maximize-content {
-                width: 97vw;
+                width: min(97vw, 760px);
                 max-width: 97vw;
                 height: 88vh;
                 max-height: none;
@@ -1076,7 +1097,7 @@
             }
 
             #lobster-wiki-content {
-                width: 96vw;
+                width: min(96vw, 920px);
                 max-width: 96vw;
                 max-height: 90vh;
             }
@@ -1149,10 +1170,11 @@
                 </div>
             </div>
             <div id="status-content">
+                <p><span id="world-day-clock" aria-live="polite">Day 01 - 12:00 AM UTC</span></p>
                 <p>World: <span id="connection-status" class="status-disconnected" aria-live="polite">Offline</span></p>
                 <p>Active Agents: <span id="agent-count" aria-live="polite">0</span></p>
                 <p>Total Created: <span id="total-entities" aria-live="polite">0</span></p>
-                <p>Uptime: <span id="uptime-display" aria-live="polite">0s</span></p>
+                <p>Last update: <span id="uptime-display" aria-live="polite">Waiting for data</span></p>
                 <div id="agent-list" role="list" aria-label="Connected Agents"></div>
             </div>
         </div>
@@ -1163,7 +1185,7 @@
         <div id="chat-maximize-content">
             <div class="chat-maximize-header">
                 <h2>💬 Chat &amp; Activity Log</h2>
-                <button id="chat-maximize-restore" class="panel-icon-btn" title="Restore to normal size" aria-label="Restore panel">⊡</button>
+                <button id="chat-maximize-restore" class="panel-icon-btn" title="Close expanded panel" aria-label="Close expanded panel">×</button>
             </div>
             <div class="chat-panel-tabs chat-maximize-tabs" role="tablist">
                 <button class="chat-panel-tab active" role="tab" aria-selected="true" data-tab="chat" id="tab-btn-chat-max">💬 Chat</button>

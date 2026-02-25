@@ -65,6 +65,8 @@ class OpenBotWorld {
         this.wikiCacheTtlMs = 60_000;
         this.currentWiki = null;
         this.timelineFilter = 'all';
+        this.lastWorldUpdateAt = null;
+        this.worldDayLabel = '';
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -381,6 +383,9 @@ class OpenBotWorld {
         // Controls panel close
         const controlsClose = document.getElementById('controls-close');
         const controlsPanel = document.getElementById('controls-panel');
+        if (window.matchMedia('(max-width: 768px)').matches && controlsPanel) {
+            controlsPanel.style.display = 'none';
+        }
         controlsClose.addEventListener('click', () => {
             controlsPanel.style.display = 'none';
         });
@@ -407,16 +412,22 @@ class OpenBotWorld {
         // Sidebar panel toggles
         const statusPanel = document.getElementById('status-panel');
         
+        const togglePanelVisibility = (panel, displayValue = 'block') => {
+            if (!panel) return;
+            const isHidden = panel.style.display === 'none' || getComputedStyle(panel).display === 'none';
+            panel.style.display = isHidden ? displayValue : 'none';
+        };
+
         document.getElementById('sidebar-status-btn').addEventListener('click', () => {
-            statusPanel.style.display = statusPanel.style.display === 'none' ? 'block' : 'none';
+            togglePanelVisibility(statusPanel, 'block');
         });
         
         document.getElementById('sidebar-chat-btn').addEventListener('click', () => {
-            if (chatPanel) chatPanel.style.display = chatPanel.style.display === 'none' ? 'block' : 'none';
+            togglePanelVisibility(chatPanel, 'block');
         });
         
         document.getElementById('sidebar-controls-btn').addEventListener('click', () => {
-            controlsPanel.style.display = controlsPanel.style.display === 'none' ? 'block' : 'none';
+            togglePanelVisibility(controlsPanel, 'block');
         });
         
         // Chat scroll tracking for auto-scroll detection and lazy loading
@@ -618,15 +629,15 @@ class OpenBotWorld {
             return '<div class="wiki-empty">No relationship graph data yet.</div>';
         }
 
-        const width = 760;
-        const height = 240;
+        const width = 1000;
+        const height = 360;
         const cx = width / 2;
         const cy = height / 2;
-        const radius = 80;
+        const partners = nodes.filter(n => n.id !== selfId);
+        const radius = Math.min(140, 80 + partners.length * 8);
         const positionMap = new Map();
         positionMap.set(selfId, { x: cx, y: cy });
 
-        const partners = nodes.filter(n => n.id !== selfId);
         partners.forEach((node, idx) => {
             const angle = (Math.PI * 2 * idx) / Math.max(1, partners.length);
             positionMap.set(node.id, {
@@ -648,18 +659,74 @@ class OpenBotWorld {
             const p = positionMap.get(node.id);
             if (!p) return '';
             const isSelf = node.id === selfId;
-            const r = isSelf ? 13 : 10;
+            const r = isSelf ? 16 : 12;
             const fill = isSelf ? '#00ffcc' : '#4fdfff';
             const textColor = isSelf ? '#003a2f' : '#b8fff5';
+            const safeLabel = (node.label || node.id || '').replace(/[<>&"']/g, '');
+            const safeNodeId = String(node.id || '').replace(/[<>&"']/g, '');
             return `
-                <g>
+                <g class="wiki-graph-node" data-node-id="${safeNodeId}">
+                    <title>${safeLabel}</title>
                     <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" />
-                    <text x="${p.x}" y="${p.y + 4}" text-anchor="middle" font-size="10" fill="${textColor}">${(node.label || node.id).slice(0, 8)}</text>
+                    <text x="${p.x}" y="${p.y + 30}" text-anchor="middle" font-size="12" fill="${textColor}">${safeLabel}</text>
                 </g>
             `;
         }).join('');
 
-        return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph">${edgeSvg}${nodeSvg}</svg>`;
+        return `<svg class="wiki-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph" data-pan-x="0" data-pan-y="0" data-zoom="1"><g class="wiki-graph-viewport">${edgeSvg}${nodeSvg}</g></svg>`;
+    }
+
+    bindRelationshipGraphInteractions() {
+        const graphWrap = document.querySelector('.wiki-graph-wrap');
+        const svg = graphWrap?.querySelector('.wiki-graph-svg');
+        const viewport = svg?.querySelector('.wiki-graph-viewport');
+        if (!graphWrap || !svg || !viewport) return;
+
+        let isDragging = false;
+        let startX = 0;
+        let startY = 0;
+
+        const applyTransform = () => {
+            const zoom = Number(svg.dataset.zoom || 1);
+            const panX = Number(svg.dataset.panX || 0);
+            const panY = Number(svg.dataset.panY || 0);
+            viewport.setAttribute('transform', `translate(${panX}, ${panY}) scale(${zoom})`);
+        };
+
+        svg.onwheel = (event) => {
+            event.preventDefault();
+            const currentZoom = Number(svg.dataset.zoom || 1);
+            const nextZoom = Math.max(0.6, Math.min(2.2, currentZoom + (event.deltaY < 0 ? 0.1 : -0.1)));
+            svg.dataset.zoom = String(nextZoom);
+            applyTransform();
+        };
+
+        svg.onpointerdown = (event) => {
+            isDragging = true;
+            startX = event.clientX;
+            startY = event.clientY;
+            svg.setPointerCapture(event.pointerId);
+        };
+
+        svg.onpointermove = (event) => {
+            if (!isDragging) return;
+            const dx = event.clientX - startX;
+            const dy = event.clientY - startY;
+            startX = event.clientX;
+            startY = event.clientY;
+            svg.dataset.panX = String(Number(svg.dataset.panX || 0) + dx);
+            svg.dataset.panY = String(Number(svg.dataset.panY || 0) + dy);
+            applyTransform();
+        };
+
+        svg.onpointerup = (event) => {
+            isDragging = false;
+            if (svg.hasPointerCapture(event.pointerId)) {
+                svg.releasePointerCapture(event.pointerId);
+            }
+        };
+
+        applyTransform();
     }
 
     renderTimelineItems(items) {
@@ -787,6 +854,13 @@ class OpenBotWorld {
         `;
 
         this.bindTimelineFilters();
+        this.bindRelationshipGraphInteractions();
+    }
+
+    cancelFollowMode() {
+        if (!this.followedAgentId) return;
+        this.followedAgentId = null;
+        this.controls.enabled = true;
     }
 
     setupMouseControls() {
@@ -828,8 +902,7 @@ class OpenBotWorld {
                 const dragDistY = Math.abs(event.clientY - this.mouseDragStartY);
                 
                 if (dragDistX > this.mouseDragThreshold || dragDistY > this.mouseDragThreshold) {
-                    this.followedAgentId = null;
-                    this.controls.enabled = true;
+                    this.cancelFollowMode();
                 }
             }
         });
@@ -870,6 +943,8 @@ class OpenBotWorld {
             canvas.addEventListener('touchstart', (event) => {
                 if (!event.touches || event.touches.length !== 1) return;
                 const touch = event.touches[0];
+                this.mouseDragStartX = touch.clientX;
+                this.mouseDragStartY = touch.clientY;
                 this.longPressMoved = false;
                 this.longPressStart = { x: touch.clientX, y: touch.clientY };
                 this.longPressTargetAgentId = this.getAgentIdFromScreenPoint(touch.clientX, touch.clientY);
@@ -892,6 +967,14 @@ class OpenBotWorld {
                 if (dx > this.longPressMoveThreshold || dy > this.longPressMoveThreshold) {
                     this.longPressMoved = true;
                     clearTimeout(this.longPressTimer);
+                }
+
+                if (this.followedAgentId) {
+                    const dragDistX = Math.abs(touch.clientX - this.mouseDragStartX);
+                    const dragDistY = Math.abs(touch.clientY - this.mouseDragStartY);
+                    if (dragDistX > this.mouseDragThreshold || dragDistY > this.mouseDragThreshold) {
+                        this.cancelFollowMode();
+                    }
                 }
             }, { passive: true });
 
@@ -956,8 +1039,7 @@ class OpenBotWorld {
                 this.keysPressed.arrowLeft || this.keysPressed.arrowRight ||
                 this.keysPressed.w || this.keysPressed.a ||
                 this.keysPressed.s || this.keysPressed.d) {
-                this.followedAgentId = null;
-                this.controls.enabled = true;
+                this.cancelFollowMode();
             }
         }
     }
@@ -968,8 +1050,7 @@ class OpenBotWorld {
 
         // Toggle follow: clicking the same lobster again releases the camera
         if (this.followedAgentId === agentId) {
-            this.followedAgentId = null;
-            this.controls.enabled = true;
+            this.cancelFollowMode();
             return;
         }
 
@@ -1033,11 +1114,14 @@ class OpenBotWorld {
                 console.log('Connected to server');
                 this.connected = true;
                 // Update server info from status endpoint
-                if (data.serverStartTime) this.serverStartTime = data.serverStartTime;
+                const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
+                if (normalizedStart !== null) this.serverStartTime = normalizedStart;
                 if (data.totalEntitiesCreated !== undefined) this.totalEntitiesCreated = data.totalEntitiesCreated;
-                if (data.uptimeMs !== undefined) {
-                    document.getElementById('uptime-display').textContent = this.formatUptime(data.uptimeMs);
+                if (data.uptimeMs !== undefined || data.uptimeFormatted) {
+                    this.lastWorldUpdateAt = Date.now();
+                    this.updateLastUpdateLabel();
                 }
+                this.updateWorldClockLabel();
                 this.updateStatus();
                 // Trigger summarization check once on first successful connection
                 this.triggerSummarizationCheck();
@@ -1100,20 +1184,19 @@ class OpenBotWorld {
     }
     
     handleWorldState(data) {
-        // Update uptime display
-        if (data.uptimeMs !== undefined) {
-            document.getElementById('uptime-display').textContent = this.formatUptime(data.uptimeMs);
-        } else if (data.uptimeFormatted) {
-            document.getElementById('uptime-display').textContent = data.uptimeFormatted;
-        }
+        this.lastWorldUpdateAt = Date.now();
+        this.updateLastUpdateLabel();
         
-        if (data.serverStartTime) {
-            this.serverStartTime = data.serverStartTime;
+        const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
+        if (normalizedStart !== null) {
+            this.serverStartTime = normalizedStart;
+            this.updateWorldClockLabel();
         }
         
         // Get current agent IDs from the server
+        const agents = Array.isArray(data.agents) ? data.agents : [];
         const serverAgentIds = new Set();
-        data.agents.forEach(agent => {
+        agents.forEach(agent => {
             serverAgentIds.add(agent.id);
             
             if (this.agents.has(agent.id)) {
@@ -1430,14 +1513,69 @@ class OpenBotWorld {
         
         return parts.join(' ');
     }
+
+    formatRelativeTimeAgo(msAgo) {
+        if (msAgo < 2000) return 'just now';
+        const seconds = Math.floor(msAgo / 1000);
+        if (seconds < 60) return `${seconds}s ago`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        return `${days}d ago`;
+    }
+
+    normalizeServerTimestamp(value) {
+        if (value === null || value === undefined) return null;
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+        if (typeof value === 'string') {
+            const numeric = Number(value);
+            if (Number.isFinite(numeric) && value.trim() !== '') return numeric;
+            const parsed = Date.parse(value);
+            if (!Number.isNaN(parsed)) return parsed;
+        }
+        if (value instanceof Date && !Number.isNaN(value.getTime())) {
+            return value.getTime();
+        }
+        return null;
+    }
+
+    updateWorldClockLabel() {
+        if (!this.serverStartTime) return;
+        const now = Date.now();
+        const elapsedMs = Math.max(0, now - this.serverStartTime);
+        const day = Math.floor(elapsedMs / 86_400_000) + 1;
+        const utcTime = new Intl.DateTimeFormat('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'UTC'
+        }).format(new Date(now));
+        const label = `Day ${String(day).padStart(2, '0')} - ${utcTime} UTC`;
+        if (label === this.worldDayLabel) return;
+        this.worldDayLabel = label;
+        const el = document.getElementById('world-day-clock');
+        if (el) el.textContent = label;
+    }
+
+    updateLastUpdateLabel() {
+        const el = document.getElementById('uptime-display');
+        if (!el) return;
+        if (!this.lastWorldUpdateAt) {
+            el.textContent = 'Waiting for data';
+            return;
+        }
+        el.textContent = this.formatRelativeTimeAgo(Date.now() - this.lastWorldUpdateAt);
+    }
     
     startUptimeTimer() {
         // Update uptime display every second locally (avoids waiting for server poll)
         setInterval(() => {
-            if (this.serverStartTime && this.connected) {
-                const uptimeMs = Date.now() - this.serverStartTime;
-                document.getElementById('uptime-display').textContent = this.formatUptime(uptimeMs);
-            }
+            this.updateWorldClockLabel();
+            this.updateLastUpdateLabel();
         }, 1000);
     }
 
