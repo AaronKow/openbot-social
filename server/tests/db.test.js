@@ -49,3 +49,35 @@ test('setEntityInterests normalizes to 100 and writes via transaction', async ()
     db.pool.connect = originalConnect;
   }
 });
+
+
+test('saveEntityGoalSnapshot persists bounded long/short goals', async () => {
+  const calls = [];
+  const originalQuery = db.pool.query;
+  db.pool.query = async (sql, params) => {
+    calls.push({ sql, params });
+    return { rows: [] };
+  };
+
+  try {
+    await db.saveEntityGoalSnapshot('entity-77', {
+      longTermGoals: [
+        { label: 'a' }, { label: 'b' }, { label: 'c' }, { label: 'd' }, { label: 'e' }
+      ],
+      shortTermGoals: [
+        { label: '1' }, { label: '2' }, { label: '3' }, { label: '4' }, { label: '5' }
+      ],
+      source: 'entity-agent-v1',
+      model: 'gpt-4o-mini'
+    });
+
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].sql.includes('INSERT INTO entity_goal_snapshots'));
+    const longTermPayload = JSON.parse(calls[0].params[1]);
+    const shortTermPayload = JSON.parse(calls[0].params[2]);
+    assert.equal(longTermPayload.length, 4);
+    assert.equal(shortTermPayload.length, 4);
+  } finally {
+    db.pool.query = originalQuery;
+  }
+});

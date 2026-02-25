@@ -387,6 +387,25 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
   }
 });
 
+
+function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
+  if (!Array.isArray(goals)) return null;
+  const sanitized = [];
+  const seen = new Set();
+  for (const goal of goals) {
+    if (!goal || typeof goal !== 'object') continue;
+    const rawLabel = typeof goal.label === 'string' ? goal.label.trim() : '';
+    if (!rawLabel || seen.has(rawLabel)) continue;
+    sanitized.push({
+      label: rawLabel.slice(0, 280),
+      source: (typeof goal.source === 'string' && goal.source.trim() ? goal.source.trim() : fallbackSource).slice(0, 64)
+    });
+    seen.add(rawLabel);
+    if (sanitized.length >= 4) break;
+  }
+  return sanitized;
+}
+
 // ============= ENTITY INTEREST ROUTES =============
 
 /**
@@ -806,11 +825,13 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
 
     const memoryEntity = getMemoryEntities()?.get(entityId) || null;
     const memoryInterests = app._memoryInterests?.get(entityId) || [];
+    const memoryGoalSnapshot = app._memoryGoalSnapshots?.get(entityId) || null;
     const dbAdapter = process.env.DATABASE_URL ? db : null;
 
     const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
       memoryEntity,
-      memoryInterests
+      memoryInterests,
+      memoryGoalSnapshot
     });
     if (!wiki) {
       return res.status(404).json({ success: false, error: 'Entity not found' });
@@ -875,6 +896,53 @@ app.post('/entity/:entityId/daily-reflections', requireAuth, async (req, res) =>
     res.json({ success: true, entityId, summaryDate });
   } catch (error) {
     console.error('Error saving entity daily reflection:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+// Allow an entity to submit its own goal snapshot (designed for lobster-owned daily scheduler)
+app.post('/entity/:entityId/goal-snapshots', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only write your own goals' });
+    }
+
+    const { longTermGoals, shortTermGoals, source, model } = req.body || {};
+    const safeLongTerm = sanitizeGoalList(longTermGoals, 'entity-agent');
+    const safeShortTerm = sanitizeGoalList(shortTermGoals, 'entity-agent');
+
+    if (!safeLongTerm || !safeShortTerm) {
+      return res.status(400).json({ success: false, error: 'longTermGoals and shortTermGoals must be arrays' });
+    }
+
+    if (safeLongTerm.length === 0 && safeShortTerm.length === 0) {
+      return res.status(400).json({ success: false, error: 'At least one goal is required' });
+    }
+
+    if (process.env.DATABASE_URL) {
+      await db.saveEntityGoalSnapshot(entityId, {
+        longTermGoals: safeLongTerm,
+        shortTermGoals: safeShortTerm,
+        source: typeof source === 'string' && source.trim() ? source.trim().slice(0, 64) : 'entity-agent-v1',
+        model: typeof model === 'string' && model.trim() ? model.trim().slice(0, 128) : 'unknown'
+      });
+    } else {
+      if (!app._memoryGoalSnapshots) app._memoryGoalSnapshots = new Map();
+      app._memoryGoalSnapshots.set(entityId, {
+        longTermGoals: safeLongTerm,
+        shortTermGoals: safeShortTerm,
+        source: typeof source === 'string' && source.trim() ? source.trim().slice(0, 64) : 'entity-agent-v1',
+        model: typeof model === 'string' && model.trim() ? model.trim().slice(0, 128) : 'unknown',
+        generatedAt: new Date().toISOString()
+      });
+    }
+
+    _entityWikiCache.delete(entityId);
+    res.json({ success: true, entityId });
+  } catch (error) {
+    console.error('Error saving entity goals snapshot:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

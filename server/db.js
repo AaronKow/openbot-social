@@ -287,6 +287,25 @@ async function initDatabase() {
       ON entity_interests(entity_id)
     `);
 
+
+    // Create entity_goal_snapshots table for persisted goal state/history
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_goal_snapshots (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        long_term_goals JSONB NOT NULL DEFAULT '[]'::jsonb,
+        short_term_goals JSONB NOT NULL DEFAULT '[]'::jsonb,
+        source VARCHAR(64) NOT NULL DEFAULT 'heuristic-v1',
+        model VARCHAR(128) NOT NULL DEFAULT 'rules',
+        generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_entity_goal_snapshots_entity_generated
+      ON entity_goal_snapshots(entity_id, generated_at DESC)
+    `);
+
     await client.query('COMMIT');
     console.log('Database initialized successfully');
   } catch (error) {
@@ -1016,6 +1035,45 @@ async function isSummaryLockActive() {
   return (Date.now() - triggeredAt.getTime()) < 10 * 60 * 1000;
 }
 
+
+async function getLatestEntityGoalSnapshot(entityId) {
+  const result = await pool.query(
+    `SELECT long_term_goals, short_term_goals, source, model, generated_at
+     FROM entity_goal_snapshots
+     WHERE entity_id = $1
+     ORDER BY generated_at DESC
+     LIMIT 1`,
+    [entityId]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    longTermGoals: Array.isArray(row.long_term_goals) ? row.long_term_goals : [],
+    shortTermGoals: Array.isArray(row.short_term_goals) ? row.short_term_goals : [],
+    source: row.source || 'persisted',
+    model: row.model || null,
+    generatedAt: row.generated_at
+  };
+}
+
+async function saveEntityGoalSnapshot(entityId, payload = {}) {
+  const longTermGoals = Array.isArray(payload.longTermGoals) ? payload.longTermGoals.slice(0, 4) : [];
+  const shortTermGoals = Array.isArray(payload.shortTermGoals) ? payload.shortTermGoals.slice(0, 4) : [];
+
+  await pool.query(
+    `INSERT INTO entity_goal_snapshots (entity_id, long_term_goals, short_term_goals, source, model)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      entityId,
+      JSON.stringify(longTermGoals),
+      JSON.stringify(shortTermGoals),
+      payload.source || 'heuristic-v1',
+      payload.model || 'rules'
+    ]
+  );
+}
+
 // Health check
 async function healthCheck() {
   try {
@@ -1152,6 +1210,8 @@ module.exports = {
   acquireSummaryLock,
   releaseSummaryLock,
   isSummaryLockActive,
+  getLatestEntityGoalSnapshot,
+  saveEntityGoalSnapshot,
   // Entity interest functions
   getEntityInterests,
   setEntityInterests
