@@ -14,7 +14,7 @@ class OpenBotWorld {
         this.pollInterval = config.pollInterval;
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
-        this.serverStartTime = null; // Server start time for uptime
+        this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
@@ -67,6 +67,13 @@ class OpenBotWorld {
         this.timelineFilter = 'all';
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
+        this.worldClockMinuteKey = '';
+        this.utcClockFormatter = new Intl.DateTimeFormat('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'UTC'
+        });
         
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
@@ -1114,8 +1121,7 @@ class OpenBotWorld {
                 console.log('Connected to server');
                 this.connected = true;
                 // Update server info from status endpoint
-                const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
-                if (normalizedStart !== null) this.serverStartTime = normalizedStart;
+                this.updateWorldClockAnchorFromPayload(data);
                 if (data.totalEntitiesCreated !== undefined) this.totalEntitiesCreated = data.totalEntitiesCreated;
                 if (data.uptimeMs !== undefined || data.uptimeFormatted) {
                     this.lastWorldUpdateAt = Date.now();
@@ -1187,11 +1193,8 @@ class OpenBotWorld {
         this.lastWorldUpdateAt = Date.now();
         this.updateLastUpdateLabel();
         
-        const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
-        if (normalizedStart !== null) {
-            this.serverStartTime = normalizedStart;
-            this.updateWorldClockLabel();
-        }
+        this.updateWorldClockAnchorFromPayload(data);
+        this.updateWorldClockLabel();
         
         // Get current agent IDs from the server
         const agents = Array.isArray(data.agents) ? data.agents : [];
@@ -1543,17 +1546,34 @@ class OpenBotWorld {
         return null;
     }
 
+    updateWorldClockAnchorFromPayload(data = {}) {
+        const worldCreatedAt = this.normalizeServerTimestamp(data.worldCreatedAt);
+        const serverStartTime = this.normalizeServerTimestamp(data.serverStartTime);
+
+        if (worldCreatedAt !== null) {
+            if (this.serverStartTime !== worldCreatedAt) {
+                this.serverStartTime = worldCreatedAt;
+                this.worldClockMinuteKey = '';
+            }
+            return;
+        }
+
+        if (this.serverStartTime === null && serverStartTime !== null) {
+            this.serverStartTime = serverStartTime;
+            this.worldClockMinuteKey = '';
+        }
+    }
+
     updateWorldClockLabel() {
         if (!this.serverStartTime) return;
         const now = Date.now();
+        const minuteKey = Math.floor(now / 60_000);
+        if (minuteKey === this.worldClockMinuteKey) return;
+
+        this.worldClockMinuteKey = minuteKey;
         const elapsedMs = Math.max(0, now - this.serverStartTime);
         const day = Math.floor(elapsedMs / 86_400_000) + 1;
-        const utcTime = new Intl.DateTimeFormat('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true,
-            timeZone: 'UTC'
-        }).format(new Date(now));
+        const utcTime = this.utcClockFormatter.format(new Date(now));
         const label = `Day ${String(day).padStart(2, '0')} - ${utcTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
