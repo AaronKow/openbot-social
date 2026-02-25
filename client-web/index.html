@@ -54,7 +54,7 @@
     <style>
         * {
             margin: 0;
-            padding: 0;
+            padding: 20px;
             box-sizing: border-box;
         }
         
@@ -133,7 +133,6 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
-            max-height: min(45vh, 360px);
         }
         
         .chat-panel-tabs {
@@ -262,9 +261,14 @@
         
         #status-content {
             transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
-            max-height: 240px;
+            max-height: none;
             opacity: 1;
             overflow-y: auto;
+        }
+
+        #status-content p {
+            margin: 5px 0;
+            line-height: 1.3;
         }
 
         #status-content p {
@@ -477,7 +481,7 @@
             align-items: center;
             justify-content: center;
             transition: all 0.2s;
-            padding: 0;
+            padding: 20px;
         }
         
         .sidebar-btn:hover {
