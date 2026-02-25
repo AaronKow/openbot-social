@@ -67,6 +67,7 @@ class OpenBotWorld {
         this.currentWiki = null;
         this.currentWikiEntityId = null;
         this.timelineFilter = 'all';
+        this.wikiAvatarRenderers = [];
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
@@ -212,7 +213,7 @@ class OpenBotWorld {
         }
     }
     
-    createLobsterMesh(name) {
+    createLobsterModel() {
         // Lobster body - simplified representation
         const group = new THREE.Group();
         
@@ -262,6 +263,12 @@ class OpenBotWorld {
         rightAntenna.rotation.z = -Math.PI / 6;
         group.add(rightAntenna);
         
+        return group;
+    }
+
+    createLobsterMesh(name) {
+        const group = this.createLobsterModel();
+
         // Name label - positioned above the lobster
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
@@ -280,8 +287,63 @@ class OpenBotWorld {
         label.position.set(0, 1.8, 0);
         label.scale.set(4, 1, 1);
         group.add(label);
-        
+
         return group;
+    }
+
+    cleanupWikiAvatarRenderers() {
+        this.wikiAvatarRenderers.forEach((rendererState) => {
+            if (rendererState?.animationFrame) cancelAnimationFrame(rendererState.animationFrame);
+            if (rendererState?.renderer) rendererState.renderer.dispose();
+        });
+        this.wikiAvatarRenderers = [];
+    }
+
+    createWikiAvatarRenderer(container, { rotationDeg = 0, autoSpin = false } = {}) {
+        if (!container) return null;
+
+        const width = Math.max(72, Math.floor(container.clientWidth || 100));
+        const height = Math.max(72, Math.floor(container.clientHeight || 100));
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+        camera.position.set(2.8, 1.8, 2.8);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(width, height);
+        container.innerHTML = '';
+        container.appendChild(renderer.domElement);
+
+        const keyLight = new THREE.DirectionalLight(0xffffff, 1.1);
+        keyLight.position.set(4, 6, 5);
+        scene.add(keyLight);
+        scene.add(new THREE.AmbientLight(0x90b9ff, 0.8));
+
+        const lobster = this.createLobsterModel();
+        lobster.scale.set(1.15, 1.15, 1.15);
+        lobster.rotation.y = (Number(rotationDeg) * Math.PI) / 180;
+        scene.add(lobster);
+
+        const state = {
+            renderer,
+            lobster,
+            animationFrame: null,
+            setRotation: (deg) => {
+                lobster.rotation.y = (Number(deg || 0) * Math.PI) / 180;
+                renderer.render(scene, camera);
+            }
+        };
+
+        const renderFrame = () => {
+            if (autoSpin) lobster.rotation.y += 0.008;
+            renderer.render(scene, camera);
+            state.animationFrame = requestAnimationFrame(renderFrame);
+        };
+
+        renderFrame();
+        this.wikiAvatarRenderers.push(state);
+        return state;
     }
     
     setupUIControls() {
@@ -579,6 +641,7 @@ class OpenBotWorld {
     closeWikiModal() {
         const modal = document.getElementById('lobster-wiki-modal');
         if (!modal) return;
+        this.cleanupWikiAvatarRenderers();
         modal.classList.remove('visible');
     }
 
@@ -637,6 +700,7 @@ class OpenBotWorld {
     }
 
     renderWikiDirectory(entities) {
+        this.cleanupWikiAvatarRenderers();
         const title = document.getElementById('wiki-title-text');
         const status = document.getElementById('wiki-status-badge');
         const body = document.getElementById('lobster-wiki-body');
@@ -663,7 +727,7 @@ class OpenBotWorld {
             const safeEntityId = escapeHtml(rawEntityId);
             return `
                 <button class="wiki-directory-card" data-entity-id="${safeEntityId}">
-                    <div class="wiki-directory-avatar" aria-hidden="true">🦞</div>
+                    <div class="wiki-directory-avatar" data-avatar-entity-id="${safeEntityId}" aria-hidden="true"></div>
                     <div class="wiki-directory-id">ID ${numeric}</div>
                     <div class="wiki-directory-name">${label}</div>
                     <div class="wiki-directory-meta">Joined ${created}</div>
@@ -685,6 +749,10 @@ class OpenBotWorld {
                 this.openWikiForEntity(card.dataset.entityId);
             });
         });
+
+        body.querySelectorAll('[data-avatar-entity-id]').forEach(avatarEl => {
+            this.createWikiAvatarRenderer(avatarEl, { autoSpin: true });
+        });
     }
 
     async openWikiDirectory() {
@@ -705,6 +773,7 @@ class OpenBotWorld {
     }
 
     renderWikiLoading() {
+        this.cleanupWikiAvatarRenderers();
         const body = document.getElementById('lobster-wiki-body');
         const title = document.getElementById('wiki-title-text');
         const status = document.getElementById('wiki-status-badge');
@@ -718,6 +787,7 @@ class OpenBotWorld {
     }
 
     renderWikiError(message) {
+        this.cleanupWikiAvatarRenderers();
         const modal = document.getElementById('lobster-wiki-modal');
         if (modal) modal.classList.add('visible');
         const body = document.getElementById('lobster-wiki-body');
@@ -777,12 +847,14 @@ class OpenBotWorld {
         }).join('');
 
         return `
-            <div class="wiki-graph-controls">
-                <button class="wiki-graph-btn" data-zoom-action="in" aria-label="Zoom in social graph">+</button>
-                <button class="wiki-graph-btn" data-zoom-action="out" aria-label="Zoom out social graph">−</button>
-                <button class="wiki-graph-btn" data-zoom-action="reset" aria-label="Reset social graph view">Reset</button>
+            <div class="wiki-graph-canvas">
+                <svg class="wiki-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph" data-pan-x="0" data-pan-y="0" data-zoom="1"><g class="wiki-graph-viewport">${edgeSvg}${nodeSvg}</g></svg>
+                <div class="wiki-graph-controls" aria-label="Social graph controls">
+                    <button class="wiki-graph-btn" data-zoom-action="in" aria-label="Zoom in social graph">＋</button>
+                    <button class="wiki-graph-btn" data-zoom-action="out" aria-label="Zoom out social graph">－</button>
+                    <button class="wiki-graph-btn" data-zoom-action="reset" aria-label="Reset social graph view">⌂</button>
+                </div>
             </div>
-            <svg class="wiki-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph" data-pan-x="0" data-pan-y="0" data-zoom="1"><g class="wiki-graph-viewport">${edgeSvg}${nodeSvg}</g></svg>
         `;
     }
 
@@ -876,6 +948,7 @@ class OpenBotWorld {
     }
 
     renderWiki(wiki) {
+        this.cleanupWikiAvatarRenderers();
         const body = document.getElementById('lobster-wiki-body');
         const title = document.getElementById('wiki-title-text');
         const status = document.getElementById('wiki-status-badge');
@@ -898,7 +971,7 @@ class OpenBotWorld {
         const filteredTimeline = this.timelineFilter === 'all'
             ? timeline
             : timeline.filter(t => t.type === this.timelineFilter);
-        const avatarStyle = `style="transform: rotateY(${Number(wiki.avatarRotationDeg || 0)}deg);"`;
+        const initialAvatarRotation = Number(wiki.avatarRotationDeg || 0);
 
         body.innerHTML = `
             <div class="wiki-actions-row">
@@ -909,11 +982,11 @@ class OpenBotWorld {
                 <h3>Lobster Avatar</h3>
                 <div class="wiki-avatar-rotator">
                     <div class="wiki-avatar-stage">
-                        <div class="wiki-avatar-card" id="wiki-avatar-card" ${avatarStyle}>🦞</div>
+                        <div class="wiki-avatar-card" id="wiki-avatar-card"></div>
                     </div>
                     <div class="wiki-avatar-controls">
                         <button class="wiki-nav-btn" id="wiki-avatar-left">↺</button>
-                        <input type="range" id="wiki-avatar-rotation" min="0" max="360" step="5" value="${Number(wiki.avatarRotationDeg || 0)}" aria-label="Rotate lobster avatar" />
+                        <input type="range" id="wiki-avatar-rotation" min="0" max="360" step="5" value="${initialAvatarRotation}" aria-label="Rotate lobster avatar" />
                         <button class="wiki-nav-btn" id="wiki-avatar-right">↻</button>
                     </div>
                 </div>
@@ -1004,10 +1077,11 @@ class OpenBotWorld {
 
         const avatarCard = document.getElementById('wiki-avatar-card');
         const avatarRange = document.getElementById('wiki-avatar-rotation');
+        const avatarRendererState = this.createWikiAvatarRenderer(avatarCard, { rotationDeg: initialAvatarRotation });
         const rotateAvatar = (deg) => {
-            if (!avatarCard || !avatarRange) return;
+            if (!avatarRange) return;
             const normalized = ((deg % 360) + 360) % 360;
-            avatarCard.style.transform = `rotateY(${normalized}deg)`;
+            if (avatarRendererState) avatarRendererState.setRotation(normalized);
             avatarRange.value = String(normalized);
             wiki.avatarRotationDeg = normalized;
         };
@@ -1353,7 +1427,10 @@ class OpenBotWorld {
         
         this.updateWorldClockAnchorFromPayload(data);
         this.updateWorldClockLabel();
-        
+        if (data.totalEntitiesCreated !== undefined) {
+            this.totalEntitiesCreated = data.totalEntitiesCreated;
+        }
+
         // Get current agent IDs from the server
         const agents = Array.isArray(data.agents) ? data.agents : [];
         const serverAgentIds = new Set();
@@ -1652,7 +1729,7 @@ class OpenBotWorld {
         document.getElementById('agent-count').textContent = this.agents.size;
         
         // Update total entities created count (if available)
-        const totalEl = document.getElementById('total-entities');
+        const totalEl = document.getElementById('total-created-link');
         if (totalEl) totalEl.textContent = this.totalEntitiesCreated;
     }
     
