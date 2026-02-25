@@ -60,7 +60,7 @@
         
         body {
             font-family: 'Arial', sans-serif;
-            overflow: hidden;
+            overflow-y: auto;
             background: #000;
         }
         
@@ -76,6 +76,7 @@
             width: 100%;
             padding: 20px;
             pointer-events: none;
+            z-index: 1250;
         }
         
         #status-panel {
@@ -87,6 +88,9 @@
             max-width: 300px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
+            display: block;
+            height: auto;
         }
         
         #status-panel h2 {
@@ -125,6 +129,11 @@
             width: 400px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: min(45vh, 360px);
         }
         
         .chat-panel-tabs {
@@ -164,6 +173,11 @@
         .chat-tab-content.active {
             display: block;
         }
+
+        #chat-tab,
+        #activity-log-tab {
+            min-height: 0;
+        }
         
         .chat-message {
             margin: 5px 0;
@@ -181,6 +195,8 @@
             border-radius: 8px;
             pointer-events: auto;
             border: 2px solid #00ffcc;
+            z-index: 1300;
+            display: block;
         }
         
         #controls-panel h3 {
@@ -191,6 +207,12 @@
         #controls-panel p {
             margin: 5px 0;
             font-size: 12px;
+        }
+
+
+        #controls-content p {
+            margin: 5px 0;
+            line-height: 1.3;
         }
         
         #controls-close {
@@ -240,19 +262,24 @@
         
         #status-content {
             transition: max-height 0.3s ease-out, opacity 0.3s ease-out;
-            max-height: 500px;
+            max-height: 240px;
             opacity: 1;
-            overflow: hidden;
+            overflow-y: auto;
+        }
+
+        #status-content p {
+            margin: 5px 0;
+            line-height: 1.3;
         }
         
         #status-content.hidden {
-            max-height: 0;
+            display: none;
             opacity: 0;
         }
         
         #agent-list {
             max-width: 500px;
-            max-height: 300px;
+            max-height: 120px;
             overflow-y: auto;
             display: none;
         }
@@ -401,8 +428,9 @@
             gap: 12px;
         }
         
-        .panel-header h2, .panel-header h3 {
+        .panel-header h1, .panel-header h2, .panel-header h3 {
             margin: 0;
+            line-height: 1.15;
         }
         
         .panel-icons {
@@ -492,7 +520,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.7);
-            z-index: 2000;
+            z-index: 3000;
             justify-content: center;
             align-items: center;
         }
@@ -510,7 +538,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.7);
-            z-index: 2000;
+            z-index: 3000;
             justify-content: center;
             align-items: center;
             border: none;
@@ -555,7 +583,7 @@
         #chat-tab-max,
         #activity-log-tab-max {
             flex: 1;
-            overflow: hidden;
+            overflow-y: auto;
             display: none;
         }
 
@@ -604,7 +632,7 @@
             border: 1px solid #00ffcc;
             border-radius: 8px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-            overflow: hidden;
+            overflow-y: auto;
             pointer-events: auto;
         }
 
@@ -639,7 +667,7 @@
             width: 100%;
             height: 100%;
             background: rgba(0, 0, 0, 0.72);
-            z-index: 2100;
+            z-index: 3050;
             justify-content: center;
             align-items: center;
             border: none;
@@ -656,7 +684,7 @@
             width: 920px;
             max-width: 95vw;
             max-height: 88vh;
-            overflow: hidden;
+            overflow-y: auto;
             border: 2px solid #00ffcc;
             border-radius: 12px;
             display: flex;
@@ -811,6 +839,16 @@
             background: rgba(0, 0, 0, 0.2);
             border: 1px solid rgba(0, 255, 204, 0.2);
             border-radius: 8px;
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .wiki-graph-wrap svg:active {
+            cursor: grabbing;
+        }
+
+        .wiki-graph-node {
+            cursor: pointer;
         }
 
         .wiki-timeline-filters {
@@ -983,8 +1021,10 @@
 
             /* The h1 inside the panel has no matching h2 rule; target it directly */
             #status-panel h1 {
-                font-size: 14px;
-            }
+            margin: 0;
+            font-size: 18px;
+            line-height: 1.15;
+        }
 
             #status-panel p {
                 margin: 3px 0;
@@ -1019,8 +1059,9 @@
                 padding: 5px 10px;
             }
 
-            /* Controls panel: float as a centred popup instead of top-right corner */
+            /* Controls panel: hidden by default on mobile; opens as centered popup */
             #controls-panel {
+                display: none;
                 position: fixed;
                 top: 50%;
                 right: auto;
@@ -1028,7 +1069,7 @@
                 transform: translate(-50%, -50%);
                 width: 85vw;
                 max-width: 300px;
-                z-index: 1100;
+                z-index: 1400;
             }
 
             /* Larger touch targets for sidebar buttons (Apple/Google min: 44 × 44 px) */
@@ -1066,17 +1107,23 @@
                 font-size: 11px;
             }
 
+            #clawhub-modal,
+            #chat-maximize-modal,
+            #lobster-wiki-modal {
+                padding: 12px;
+            }
+
             #chat-maximize-content {
-                width: 97vw;
+                width: min(97vw, 760px);
                 max-width: 97vw;
                 height: 88vh;
-                max-height: none;
+                max-height: 240px;
                 padding: 14px 16px;
                 border-radius: 8px;
             }
 
             #lobster-wiki-content {
-                width: 96vw;
+                width: min(96vw, 920px);
                 max-width: 96vw;
                 max-height: 90vh;
             }
@@ -1103,8 +1150,10 @@
             }
 
             #status-panel h1 {
-                font-size: 12px;
-            }
+            margin: 0;
+            font-size: 18px;
+            line-height: 1.15;
+        }
 
             .panel-header {
                 gap: 6px;
@@ -1149,10 +1198,11 @@
                 </div>
             </div>
             <div id="status-content">
+                <p><span id="world-day-clock" aria-live="polite">Day 01 - 12:00 AM</span></p>
                 <p>World: <span id="connection-status" class="status-disconnected" aria-live="polite">Offline</span></p>
                 <p>Active Agents: <span id="agent-count" aria-live="polite">0</span></p>
                 <p>Total Created: <span id="total-entities" aria-live="polite">0</span></p>
-                <p>Uptime: <span id="uptime-display" aria-live="polite">0s</span></p>
+                <p>Last update: <span id="uptime-display" aria-live="polite">Waiting for data</span></p>
                 <div id="agent-list" role="list" aria-label="Connected Agents"></div>
             </div>
         </div>
@@ -1163,7 +1213,7 @@
         <div id="chat-maximize-content">
             <div class="chat-maximize-header">
                 <h2>💬 Chat &amp; Activity Log</h2>
-                <button id="chat-maximize-restore" class="panel-icon-btn" title="Restore to normal size" aria-label="Restore panel">⊡</button>
+                <button id="chat-maximize-restore" class="panel-icon-btn" title="Close expanded panel" aria-label="Close expanded panel">×</button>
             </div>
             <div class="chat-panel-tabs chat-maximize-tabs" role="tablist">
                 <button class="chat-panel-tab active" role="tab" aria-selected="true" data-tab="chat" id="tab-btn-chat-max">💬 Chat</button>
@@ -1228,12 +1278,12 @@
             <button id="controls-close" class="panel-icon-btn" title="Close controls panel" aria-label="Close">×</button>
         </div>
         <div id="controls-content">
-            <p class="hint-desktop">🖱️ Drag: Rotate camera</p>
-            <p class="hint-desktop">🔄 Scroll: Zoom in/out</p>
-            <p class="hint-desktop">➡️ Right-drag: Pan view</p>
-            <p class="hint-mobile">👆 Drag: Rotate camera</p>
-            <p class="hint-mobile">🤏 Pinch: Zoom in/out</p>
-            <p class="hint-mobile">✌️ Two-finger drag: Pan view</p>
+            <p class="hint-desktop">Mouse drag: Rotate camera</p>
+            <p class="hint-desktop">Mouse wheel: Zoom in/out</p>
+            <p class="hint-desktop">Right drag: Pan view</p>
+            <p class="hint-mobile">One-finger drag: Rotate camera</p>
+            <p class="hint-mobile">Pinch: Zoom in/out</p>
+            <p class="hint-mobile">Two-finger drag: Pan view</p>
         </div>
     </div>
     

@@ -536,6 +536,25 @@ async function getEntityCount() {
   return parseInt(result.rows[0].count);
 }
 
+async function getWorldCreatedAt() {
+  const result = await pool.query(`
+    SELECT MIN(ts) AS world_created_at
+    FROM (
+      SELECT MIN(timestamp)::bigint AS ts FROM chat_messages
+      UNION ALL
+      SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM entities
+      UNION ALL
+      SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM agents
+    ) AS world_signals
+    WHERE ts IS NOT NULL
+  `);
+
+  const value = result.rows?.[0]?.world_created_at;
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 // Get active agent count (requires checking spawned agents - not a DB operation, handled in index.js)
 
 // Get entity by entity_id
@@ -1182,6 +1201,7 @@ module.exports = {
   entityNameExists,
   listEntities,
   getEntityCount,
+  getWorldCreatedAt,
   // Conversation functions
   saveConversationMessage,
   loadConversationMessages,
