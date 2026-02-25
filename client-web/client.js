@@ -63,7 +63,9 @@ class OpenBotWorld {
         this.longPressMoveThreshold = 10;
         this.wikiCache = new Map(); // entityId -> { ts, data }
         this.wikiCacheTtlMs = 60_000;
+        this.wikiDirectoryCache = { ts: 0, data: [] };
         this.currentWiki = null;
+        this.currentWikiEntityId = null;
         this.timelineFilter = 'all';
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
@@ -478,6 +480,14 @@ class OpenBotWorld {
         const wikiClose = document.getElementById('wiki-close');
         const wikiModal = document.getElementById('lobster-wiki-modal');
         if (wikiClose) wikiClose.addEventListener('click', () => this.closeWikiModal());
+
+        const totalCreatedLink = document.getElementById('total-created-link');
+        if (totalCreatedLink) {
+            totalCreatedLink.addEventListener('click', (event) => {
+                event.preventDefault();
+                this.openWikiDirectory();
+            });
+        }
         if (wikiModal) {
             wikiModal.addEventListener('click', (e) => {
                 if (e.target === wikiModal) this.closeWikiModal();
@@ -576,10 +586,12 @@ class OpenBotWorld {
         const agent = this.agents.get(agentId);
         if (!agent) return;
         const entityId = agent.data.entityId || agent.data.entityName || agent.data.name;
-        if (!entityId) {
-            this.renderWikiError('No public entity id is available for this lobster.');
-            return;
-        }
+        if (!entityId) return this.renderWikiError('No public entity id is available for this lobster.');
+        return this.openWikiForEntity(entityId);
+    }
+
+    async openWikiForEntity(entityId) {
+        if (!entityId) return;
 
         const modal = document.getElementById('lobster-wiki-modal');
         if (!modal) return;
@@ -601,11 +613,94 @@ class OpenBotWorld {
                 this.wikiCache.set(entityId, { ts: Date.now(), data: wiki });
             }
             this.currentWiki = wiki;
+            this.currentWikiEntityId = entityId;
             this.timelineFilter = 'all';
             this.renderWiki(wiki);
         } catch (error) {
             console.error('Wiki fetch error:', error);
             this.renderWikiError('Could not load lobster details right now.');
+        }
+    }
+
+    async fetchLobsterDirectory() {
+        if ((Date.now() - this.wikiDirectoryCache.ts) < this.wikiCacheTtlMs && this.wikiDirectoryCache.data.length) {
+            return this.wikiDirectoryCache.data;
+        }
+
+        const response = await fetch(`${this.apiBase}/entities?type=lobster`);
+        if (!response.ok) throw new Error(`Failed to list entities (${response.status})`);
+        const data = await response.json();
+        const entities = Array.isArray(data.entities) ? data.entities : [];
+        entities.sort((a, b) => Number(a.numeric_id || Number.MAX_SAFE_INTEGER) - Number(b.numeric_id || Number.MAX_SAFE_INTEGER));
+        this.wikiDirectoryCache = { ts: Date.now(), data: entities };
+        return entities;
+    }
+
+    renderWikiDirectory(entities) {
+        const title = document.getElementById('wiki-title-text');
+        const status = document.getElementById('wiki-status-badge');
+        const body = document.getElementById('lobster-wiki-body');
+        if (!body) return;
+        if (title) title.textContent = 'Lobster Wiki Directory';
+        if (status) {
+            status.textContent = `${entities.length} Total`;
+            status.classList.remove('online', 'offline');
+        }
+
+        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+
+        const cards = entities.map(entity => {
+            const rawEntityId = entity.entity_id || '';
+            const label = escapeHtml(entity.entity_name || entity.entity_id || 'Unknown Lobster');
+            const numeric = escapeHtml(entity.numeric_id ?? 'N/A');
+            const created = escapeHtml(entity.created_at ? new Date(entity.created_at).toLocaleDateString() : 'Unknown');
+            const safeEntityId = escapeHtml(rawEntityId);
+            return `
+                <button class="wiki-directory-card" data-entity-id="${safeEntityId}">
+                    <div class="wiki-directory-avatar" aria-hidden="true">🦞</div>
+                    <div class="wiki-directory-id">ID ${numeric}</div>
+                    <div class="wiki-directory-name">${label}</div>
+                    <div class="wiki-directory-meta">Joined ${created}</div>
+                </button>
+            `;
+        }).join('');
+
+        body.innerHTML = `
+            <section class="wiki-section">
+                <h3>Lobster Directory</h3>
+                <div class="wiki-directory-grid">
+                    ${cards || '<div class="wiki-empty">No lobsters found yet.</div>'}
+                </div>
+            </section>
+        `;
+
+        body.querySelectorAll('.wiki-directory-card').forEach(card => {
+            card.addEventListener('click', () => {
+                this.openWikiForEntity(card.dataset.entityId);
+            });
+        });
+    }
+
+    async openWikiDirectory() {
+        const modal = document.getElementById('lobster-wiki-modal');
+        if (!modal) return;
+        modal.classList.add('visible');
+        this.renderWikiLoading();
+        this.currentWiki = null;
+        this.currentWikiEntityId = null;
+
+        try {
+            const entities = await this.fetchLobsterDirectory();
+            this.renderWikiDirectory(entities);
+        } catch (error) {
+            console.error('Wiki directory fetch error:', error);
+            this.renderWikiError('Could not load lobster directory right now.');
         }
     }
 
@@ -657,9 +752,9 @@ class OpenBotWorld {
             const a = positionMap.get(edge.source);
             const b = positionMap.get(edge.target);
             if (!a || !b) return '';
-            const opacity = Math.max(0.25, Math.min(0.9, Number(edge.weight || 0.3)));
+            const opacity = Math.max(0.45, Math.min(0.9, Number(edge.weight || 0.3)));
             const widthPx = (Number(edge.weight || 0.3) * 3 + 1).toFixed(2);
-            return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="rgba(0,255,204,${opacity})" stroke-width="${widthPx}" />`;
+            return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="rgba(125,245,255,${opacity})" stroke-width="${widthPx}" />`;
         }).join('');
 
         const nodeSvg = nodes.map(node => {
@@ -667,20 +762,28 @@ class OpenBotWorld {
             if (!p) return '';
             const isSelf = node.id === selfId;
             const r = isSelf ? 16 : 12;
-            const fill = isSelf ? '#00ffcc' : '#4fdfff';
-            const textColor = isSelf ? '#003a2f' : '#b8fff5';
+            const fill = isSelf ? '#00ffcc' : '#0f3f57';
+            const stroke = isSelf ? '#eaffff' : '#7df5ff';
+            const textColor = '#d6ffff';
             const safeLabel = (node.label || node.id || '').replace(/[<>&"']/g, '');
             const safeNodeId = String(node.id || '').replace(/[<>&"']/g, '');
             return `
                 <g class="wiki-graph-node" data-node-id="${safeNodeId}">
                     <title>${safeLabel}</title>
-                    <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" />
+                    <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2" />
                     <text x="${p.x}" y="${p.y + 30}" text-anchor="middle" font-size="12" fill="${textColor}">${safeLabel}</text>
                 </g>
             `;
         }).join('');
 
-        return `<svg class="wiki-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph" data-pan-x="0" data-pan-y="0" data-zoom="1"><g class="wiki-graph-viewport">${edgeSvg}${nodeSvg}</g></svg>`;
+        return `
+            <div class="wiki-graph-controls">
+                <button class="wiki-graph-btn" data-zoom-action="in" aria-label="Zoom in social graph">+</button>
+                <button class="wiki-graph-btn" data-zoom-action="out" aria-label="Zoom out social graph">−</button>
+                <button class="wiki-graph-btn" data-zoom-action="reset" aria-label="Reset social graph view">Reset</button>
+            </div>
+            <svg class="wiki-graph-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Relationship graph" data-pan-x="0" data-pan-y="0" data-zoom="1"><g class="wiki-graph-viewport">${edgeSvg}${nodeSvg}</g></svg>
+        `;
     }
 
     bindRelationshipGraphInteractions() {
@@ -700,13 +803,7 @@ class OpenBotWorld {
             viewport.setAttribute('transform', `translate(${panX}, ${panY}) scale(${zoom})`);
         };
 
-        svg.onwheel = (event) => {
-            event.preventDefault();
-            const currentZoom = Number(svg.dataset.zoom || 1);
-            const nextZoom = Math.max(0.6, Math.min(2.2, currentZoom + (event.deltaY < 0 ? 0.1 : -0.1)));
-            svg.dataset.zoom = String(nextZoom);
-            applyTransform();
-        };
+        svg.onwheel = (event) => event.preventDefault();
 
         svg.onpointerdown = (event) => {
             isDragging = true;
@@ -732,6 +829,26 @@ class OpenBotWorld {
                 svg.releasePointerCapture(event.pointerId);
             }
         };
+
+        svg.ongesturestart = (event) => event.preventDefault();
+        svg.addEventListener('touchmove', (event) => {
+            if (event.touches.length > 1) event.preventDefault();
+        }, { passive: false });
+
+        graphWrap.querySelectorAll('.wiki-graph-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const action = btn.dataset.zoomAction;
+                const currentZoom = Number(svg.dataset.zoom || 1);
+                if (action === 'in') svg.dataset.zoom = String(Math.min(2.2, currentZoom + 0.2));
+                if (action === 'out') svg.dataset.zoom = String(Math.max(0.6, currentZoom - 0.2));
+                if (action === 'reset') {
+                    svg.dataset.zoom = '1';
+                    svg.dataset.panX = '0';
+                    svg.dataset.panY = '0';
+                }
+                applyTransform();
+            });
+        });
 
         applyTransform();
     }
@@ -781,8 +898,27 @@ class OpenBotWorld {
         const filteredTimeline = this.timelineFilter === 'all'
             ? timeline
             : timeline.filter(t => t.type === this.timelineFilter);
+        const avatarStyle = `style="transform: rotateY(${Number(wiki.avatarRotationDeg || 0)}deg);"`;
 
         body.innerHTML = `
+            <div class="wiki-actions-row">
+                <button class="wiki-nav-btn" id="wiki-back-directory">← Back to directory</button>
+            </div>
+
+            <section class="wiki-section">
+                <h3>Lobster Avatar</h3>
+                <div class="wiki-avatar-rotator">
+                    <div class="wiki-avatar-stage">
+                        <div class="wiki-avatar-card" id="wiki-avatar-card" ${avatarStyle}>🦞</div>
+                    </div>
+                    <div class="wiki-avatar-controls">
+                        <button class="wiki-nav-btn" id="wiki-avatar-left">↺</button>
+                        <input type="range" id="wiki-avatar-rotation" min="0" max="360" step="5" value="${Number(wiki.avatarRotationDeg || 0)}" aria-label="Rotate lobster avatar" />
+                        <button class="wiki-nav-btn" id="wiki-avatar-right">↻</button>
+                    </div>
+                </div>
+            </section>
+
             <section class="wiki-section">
                 <h3>Identity</h3>
                 <div class="wiki-grid">
@@ -862,6 +998,28 @@ class OpenBotWorld {
 
         this.bindTimelineFilters();
         this.bindRelationshipGraphInteractions();
+
+        const backBtn = document.getElementById('wiki-back-directory');
+        if (backBtn) backBtn.addEventListener('click', () => this.openWikiDirectory());
+
+        const avatarCard = document.getElementById('wiki-avatar-card');
+        const avatarRange = document.getElementById('wiki-avatar-rotation');
+        const rotateAvatar = (deg) => {
+            if (!avatarCard || !avatarRange) return;
+            const normalized = ((deg % 360) + 360) % 360;
+            avatarCard.style.transform = `rotateY(${normalized}deg)`;
+            avatarRange.value = String(normalized);
+            wiki.avatarRotationDeg = normalized;
+        };
+
+        if (avatarRange) {
+            avatarRange.addEventListener('input', () => rotateAvatar(Number(avatarRange.value || 0)));
+        }
+
+        const leftBtn = document.getElementById('wiki-avatar-left');
+        const rightBtn = document.getElementById('wiki-avatar-right');
+        if (leftBtn) leftBtn.addEventListener('click', () => rotateAvatar(Number(avatarRange?.value || 0) - 45));
+        if (rightBtn) rightBtn.addEventListener('click', () => rotateAvatar(Number(avatarRange?.value || 0) + 45));
     }
 
     cancelFollowMode() {
@@ -1495,9 +1653,7 @@ class OpenBotWorld {
         
         // Update total entities created count (if available)
         const totalEl = document.getElementById('total-entities');
-        if (totalEl && this.totalEntitiesCreated > 0) {
-            totalEl.textContent = this.totalEntitiesCreated;
-        }
+        if (totalEl) totalEl.textContent = this.totalEntitiesCreated;
     }
     
     formatUptime(ms) {
