@@ -139,6 +139,9 @@ INTEREST_POOL = [
 # ── Interest constants ─────────────────────────────────────────────
 INTEREST_MAX_COUNT = 5
 INTEREST_MIN_COUNT = 2
+INTEREST_MATCH_BOOST = 3.0
+INTEREST_NON_MATCH_DECAY = 0.35
+INTEREST_SYNC_MIN_INTERVAL_S = 20
 
 
 def normalize_interest_weights(interests: List[Dict]) -> List[Dict]:
@@ -406,6 +409,7 @@ class OpenBotClawHub:
         self._topic_tick: int = 0
         self._interests: List[str] = random.sample(INTEREST_POOL, k=min(3, len(INTEREST_POOL)))
         self._interests_with_weights: List[Dict[str, Any]] = []  # server-backed weighted interests
+        self._last_interest_sync_ts: float = 0.0
         self._cached_news: List[str] = []
         self._seen_msg_keys: set = set()
         self._new_senders: List[str] = []
@@ -1403,18 +1407,54 @@ class OpenBotClawHub:
         return []
 
     def _observe_chat_for_interests(self, chat_text: str) -> None:
-        """Bump transient interest engagement score when keywords match."""
+        """Bias persistent interest weights based on observed conversation content."""
         if not chat_text or not chat_text.strip():
             return
         chat_lower = chat_text.lower()
-        for interest in self._interests:
+
+        # Build mutable weights map from server-backed interests if available.
+        if self._interests_with_weights:
+            weighted = [
+                {"interest": i["interest"], "weight": float(i.get("weight", 0.0))}
+                for i in self._interests_with_weights
+                if i.get("interest")
+            ]
+        else:
+            weighted = normalize_interest_weights([
+                {"interest": name, "weight": 1.0}
+                for name in self._interests[:INTEREST_MAX_COUNT]
+            ])
+
+        if not weighted:
+            return
+
+        matched_any = False
+        for item in weighted:
+            interest = item["interest"]
             keywords = [
                 w for w in interest.replace("(", "").replace(")", "").split()
                 if len(w) > 4
             ]
-            if any(kw in chat_lower for kw in keywords):
-                # Transient score — can be used by external evolution logic
-                pass  # External agents implement their own evolution
+            matched = any(kw in chat_lower for kw in keywords)
+            if matched:
+                item["weight"] = max(0.01, item["weight"] + INTEREST_MATCH_BOOST)
+                matched_any = True
+            else:
+                item["weight"] = max(0.01, item["weight"] - INTEREST_NON_MATCH_DECAY)
+
+        if not matched_any:
+            return
+
+        weighted = normalize_interest_weights(weighted)
+        self._interests_with_weights = weighted
+        self._interests = [i["interest"] for i in weighted]
+
+        # Persist with throttling to avoid writing on every nearby chat line.
+        now = time.time()
+        if now - self._last_interest_sync_ts < INTEREST_SYNC_MIN_INTERVAL_S:
+            return
+        if self.set_interests(weighted):
+            self._last_interest_sync_ts = now
 
     def register_callback(self, event_type: str, callback: Callable) -> None:
         """
