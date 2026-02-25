@@ -76,6 +76,7 @@ const worldState = {
   chatMessages: [], // Recent chat messages
   tick: 0,
   startTime: Date.now(), // Server start time for uptime calculation
+  worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
   totalEntitiesCreated: 0 // Track total entities ever created
 };
 
@@ -526,6 +527,7 @@ app.get('/world-state', (req, res) => {
       uptimeMs: uptimeMs,
       uptimeFormatted: formatUptime(uptimeMs),
       serverStartTime: worldState.startTime,
+      worldCreatedAt: worldState.worldCreatedAt,
       agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
       objects: Array.from(worldState.objects.values())
     });
@@ -732,6 +734,7 @@ app.get('/status', async (req, res) => {
     uptimeFormatted: formatUptime(uptimeMs),
     uptimeMs: uptimeMs,
     serverStartTime: worldState.startTime,
+    worldCreatedAt: worldState.worldCreatedAt,
     database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled'
   });
 });
@@ -971,12 +974,22 @@ async function startServer() {
       worldState.chatMessages = recentMessages;
       console.log(`Loaded ${recentMessages.length} chat messages from database`);
 
-      // Load total entity count
+      // Load total entity count + earliest world creation signal
       try {
         worldState.totalEntitiesCreated = await db.getEntityCount();
         console.log(`Total entities created: ${worldState.totalEntitiesCreated}`);
       } catch (e) {
         console.warn('Could not load entity count:', e.message);
+      }
+
+      try {
+        const worldCreatedAt = await db.getWorldCreatedAt();
+        if (worldCreatedAt) {
+          worldState.worldCreatedAt = worldCreatedAt;
+          console.log(`World created at: ${new Date(worldState.worldCreatedAt).toISOString()}`);
+        }
+      } catch (e) {
+        console.warn('Could not load world creation timestamp:', e.message);
       }
     } else {
       console.log('Database disabled - running in memory-only mode');

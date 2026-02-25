@@ -14,7 +14,7 @@ class OpenBotWorld {
         this.pollInterval = config.pollInterval;
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
-        this.serverStartTime = null; // Server start time for uptime
+        this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
@@ -1114,8 +1114,7 @@ class OpenBotWorld {
                 console.log('Connected to server');
                 this.connected = true;
                 // Update server info from status endpoint
-                const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
-                if (normalizedStart !== null) this.serverStartTime = normalizedStart;
+                this.updateWorldClockAnchorFromPayload(data);
                 if (data.totalEntitiesCreated !== undefined) this.totalEntitiesCreated = data.totalEntitiesCreated;
                 if (data.uptimeMs !== undefined || data.uptimeFormatted) {
                     this.lastWorldUpdateAt = Date.now();
@@ -1187,11 +1186,8 @@ class OpenBotWorld {
         this.lastWorldUpdateAt = Date.now();
         this.updateLastUpdateLabel();
         
-        const normalizedStart = this.normalizeServerTimestamp(data.serverStartTime);
-        if (normalizedStart !== null) {
-            this.serverStartTime = normalizedStart;
-            this.updateWorldClockLabel();
-        }
+        this.updateWorldClockAnchorFromPayload(data);
+        this.updateWorldClockLabel();
         
         // Get current agent IDs from the server
         const agents = Array.isArray(data.agents) ? data.agents : [];
@@ -1541,6 +1537,20 @@ class OpenBotWorld {
             return value.getTime();
         }
         return null;
+    }
+
+    updateWorldClockAnchorFromPayload(data = {}) {
+        const worldCreatedAt = this.normalizeServerTimestamp(data.worldCreatedAt);
+        const serverStartTime = this.normalizeServerTimestamp(data.serverStartTime);
+
+        if (worldCreatedAt !== null) {
+            this.serverStartTime = worldCreatedAt;
+            return;
+        }
+
+        if (this.serverStartTime === null && serverStartTime !== null) {
+            this.serverStartTime = serverStartTime;
+        }
     }
 
     updateWorldClockLabel() {
