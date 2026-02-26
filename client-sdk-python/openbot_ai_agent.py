@@ -684,6 +684,9 @@ class AIAgent:
         }
         self._daily_reflection_rollup: Dict[str, Dict[str, Any]] = {}
         self._last_reflection_day: Optional[str] = None
+        # Compatibility guard: if production server does not expose goal-snapshots yet,
+        # disable further attempts after the first 404/405 to avoid noisy logs.
+        self._goal_snapshot_sync_supported: bool = True
         self._cognitive_loop = CognitiveLoop(self)
 
     # ── Entity lifecycle ──────────────────────────────────────────
@@ -1336,6 +1339,7 @@ class AIAgent:
             f"{rollup['tag_replies']} direct mention reply/replies. "
             f"Latest learning: {note}."
         )
+        goals_payload = self._build_goal_snapshot_payload(prev_day, rollup)
 
         try:
             auth_h = self.entity_manager.get_auth_header(self.entity_id)
@@ -1351,8 +1355,77 @@ class AIAgent:
             )
             if resp.status_code != 200:
                 print(f"[{self.entity_id}] ⚠️ daily reflection sync failed: {resp.status_code} {resp.text[:200]}")
+
+            if self._goal_snapshot_sync_supported:
+                goal_resp = self.client.session.post(
+                    f"{self.server_url}/entity/{self.entity_id}/goal-snapshots",
+                    headers={**auth_h, "Content-Type": "application/json"},
+                    json=goals_payload,
+                    timeout=10,
+                )
+                if goal_resp.status_code in (404, 405):
+                    self._goal_snapshot_sync_supported = False
+                    print(f"[{self.entity_id}] ℹ️ goal snapshot endpoint unavailable ({goal_resp.status_code}); disabling future sync attempts")
+                elif goal_resp.status_code != 200:
+                    print(f"[{self.entity_id}] ⚠️ goal snapshot sync failed: {goal_resp.status_code} {goal_resp.text[:200]}")
         except Exception as exc:
-            print(f"[{self.entity_id}] ⚠️ daily reflection sync error: {exc}")
+            print(f"[{self.entity_id}] ⚠️ reflection/goal sync error: {exc}")
+
+    def _build_goal_snapshot_payload(self, day_str: str, rollup: Dict[str, Any]) -> Dict[str, Any]:
+        profile = self.identity_profile()
+        profile_objectives = profile.get("long_term_objectives") if isinstance(profile, dict) else []
+        long_term_goals: List[Dict[str, str]] = []
+        for obj in profile_objectives or []:
+            if isinstance(obj, str) and obj.strip():
+                label = obj.strip().rstrip(".")
+                long_term_goals.append({"label": label[:140], "source": "entity-agent-v1"})
+
+        if not long_term_goals:
+            long_term_goals = [
+                {"label": "Sustain engaging conversation", "source": "entity-agent-v1"},
+                {"label": "Stay responsive to direct mentions", "source": "entity-agent-v1"},
+                {"label": "Adapt topics from social feedback", "source": "entity-agent-v1"},
+            ]
+
+        message_count = int(rollup.get("message_count", 0))
+        tag_replies = int(rollup.get("tag_replies", 0))
+        top_interest = self._interests[0] if self._interests else "current social topics"
+        latest_note = (rollup.get("notes") or ["steady activity"])[-1]
+
+        short_term_goals: List[Dict[str, str]] = [
+            {
+                "label": f"Respond quickly to tagged chats on {day_str}",
+                "source": "entity-agent-v1",
+            },
+            {
+                "label": f"Send at least {max(2, min(6, message_count + 1))} social messages next cycle",
+                "source": "entity-agent-v1",
+            },
+            {
+                "label": f"Steer one conversation toward {top_interest}",
+                "source": "entity-agent-v1",
+            },
+        ]
+
+        if tag_replies == 0:
+            short_term_goals.append({
+                "label": "Prioritize direct @replies before new outbound chats",
+                "source": "entity-agent-v1",
+            })
+
+        if isinstance(latest_note, str) and latest_note.strip():
+            short_term_goals.append({
+                "label": f"Apply latest learning: {latest_note.strip()[:90]}",
+                "source": "entity-agent-v1",
+            })
+
+        # Bound list sizes for server/db constraints.
+        return {
+            "longTermGoals": long_term_goals[:4],
+            "shortTermGoals": short_term_goals[:4],
+            "source": "entity-agent-v1",
+            "model": self.model,
+        }
 
     def reflect(
         self,
