@@ -850,6 +850,63 @@
             font-weight: bold;
         }
 
+
+        .wiki-action-sequence-list {
+            list-style: none;
+            margin: 8px 0 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .wiki-action-sequence-list li {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(0, 255, 204, 0.08);
+            border: 1px solid rgba(0, 255, 204, 0.25);
+        }
+
+        .wiki-action-step-index {
+            color: #81ffe7;
+            font-weight: 700;
+            min-width: 30px;
+        }
+
+        .wiki-action-status {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+        }
+
+        .wiki-action-status-running {
+            color: #ffe08a;
+            border-color: rgba(255, 224, 138, 0.65);
+        }
+
+        .wiki-action-status-completed {
+            color: #96ffb1;
+            border-color: rgba(150, 255, 177, 0.65);
+        }
+
+        .wiki-action-status-pending {
+            color: #c6ecf5;
+            border-color: rgba(198, 236, 245, 0.45);
+        }
+
+        .wiki-action-status-cancelled,
+        .wiki-action-status-failed {
+            color: #ff9ea3;
+            border-color: rgba(255, 158, 163, 0.65);
+        }
+
         .wiki-reputation {
             display: flex;
             align-items: center;

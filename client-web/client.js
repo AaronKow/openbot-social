@@ -947,6 +947,27 @@ class OpenBotWorld {
         });
     }
 
+    renderActionSequence(actionSequence) {
+        if (!actionSequence || !Array.isArray(actionSequence.sequence) || actionSequence.sequence.length === 0) {
+            return '<div class="wiki-empty">No queued action sequence.</div>';
+        }
+
+        const status = actionSequence.status || 'unknown';
+        const currentAction = actionSequence.currentAction?.type || 'none';
+        return `
+            <div class="wiki-band">Queue: <strong>${status}</strong> • Current: <strong>${currentAction}</strong> • Remaining ticks: <strong>${Number(actionSequence.remainingTicks || 0)}</strong></div>
+            <ul class="wiki-action-sequence-list">
+                ${actionSequence.sequence.map(step => `
+                    <li>
+                        <span class="wiki-action-step-index">#${Number(step.index) + 1}</span>
+                        <span><strong>${step.type}</strong> <span class="wiki-band">(${Number(step.requiredTicks || 1)} tick${Number(step.requiredTicks || 1) === 1 ? '' : 's'})</span></span>
+                        <span class="wiki-action-status wiki-action-status-${String(step.status || 'pending').replace(/[^a-z]/g, '')}">${step.status || 'pending'}</span>
+                    </li>
+                `).join('')}
+            </ul>
+        `;
+    }
+
     renderWiki(wiki) {
         this.cleanupWikiAvatarRenderers();
         const body = document.getElementById('lobster-wiki-body');
@@ -1010,6 +1031,11 @@ class OpenBotWorld {
                     <div><span class="wiki-key">State:</span>${currentState.state || 'unknown'}</div>
                     <div><span class="wiki-key">Agent ID:</span>${currentState.agentId || 'N/A'}</div>
                     <div><span class="wiki-key">Last Action:</span>${currentState.lastAction?.type || 'N/A'}</div>
+                </div>
+                <div style="height:10px"></div>
+                <div>
+                    <strong>Action Sequence</strong>
+                    ${this.renderActionSequence(currentState.actionSequence)}
                 </div>
             </section>
 
