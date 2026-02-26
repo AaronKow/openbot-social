@@ -187,3 +187,40 @@ test('buildEntityWikiPublic uses in-memory goal snapshot fallback when DB is una
   assert.deepEqual(wiki.cognition.longTermGoals, [{ label: 'Expand reef diplomacy', source: 'entity-agent' }]);
   assert.deepEqual(wiki.cognition.shortTermGoals, [{ label: 'Check in with reef-bot', source: 'entity-agent' }]);
 });
+
+
+test('buildEntityWikiPublic includes current action sequence for lobster queue', async () => {
+  const now = Date.now();
+  const memoryEntity = {
+    entity_id: 'alpha-lobster',
+    entity_name: 'alpha-lobster',
+    entity_type: 'lobster',
+    created_at: new Date(now - 1000).toISOString()
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, null, {
+    memoryEntity,
+    memoryInterests: [{ interest: 'currents', weight: 100 }],
+    runtimeActionQueue: {
+      queueId: 'queue-1',
+      status: 'running',
+      currentIndex: 1,
+      remainingTicks: 2,
+      totalRequiredTicks: 5,
+      totalItems: 3,
+      actions: [
+        { type: 'jump', requiredTicks: 1 },
+        { type: 'dance', requiredTicks: 3 },
+        { type: 'emoji', requiredTicks: 1 }
+      ]
+    }
+  });
+
+  assert.equal(wiki.currentState.actionSequence.queueId, 'queue-1');
+  assert.equal(wiki.currentState.actionSequence.currentAction.type, 'dance');
+  assert.equal(wiki.currentState.actionSequence.sequence.length, 3);
+  assert.equal(wiki.currentState.actionSequence.sequence[0].status, 'completed');
+  assert.equal(wiki.currentState.actionSequence.sequence[1].status, 'running');
+  assert.equal(wiki.currentState.actionSequence.sequence[2].status, 'pending');
+  assert.ok(wiki.meta.sources.includes('entity_action_queues'));
+});

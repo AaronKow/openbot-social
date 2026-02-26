@@ -253,6 +253,36 @@ function buildTimeline(entity, currentState, reflections, recentOwnChats) {
     .slice(0, 20);
 }
 
+
+function summarizeActionQueue(queue) {
+  if (!queue || typeof queue !== 'object' || !Array.isArray(queue.actions)) {
+    return null;
+  }
+
+  const current = queue.actions[queue.currentIndex] || null;
+  return {
+    queueId: queue.queueId || null,
+    status: queue.status || 'unknown',
+    currentIndex: Number(queue.currentIndex || 0),
+    totalItems: Number(queue.totalItems || queue.actions.length || 0),
+    remainingTicks: Number(queue.remainingTicks || 0),
+    totalRequiredTicks: Number(queue.totalRequiredTicks || 0),
+    currentAction: current ? { type: current.type, requiredTicks: Number(current.requiredTicks || 1) } : null,
+    sequence: queue.actions.map((a, idx) => ({
+      index: idx,
+      type: a.type,
+      requiredTicks: Number(a.requiredTicks || 1),
+      status: idx < Number(queue.currentIndex || 0)
+        ? 'completed'
+        : idx === Number(queue.currentIndex || 0) && queue.status === 'running'
+          ? 'running'
+          : (queue.status === 'cancelled' || queue.status === 'failed') && idx === Number(queue.currentIndex || 0)
+            ? queue.status
+            : 'pending'
+    }))
+  };
+}
+
 async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   let entity = options.memoryEntity || null;
   if (!entity && db && typeof db.getEntity === 'function') {
@@ -263,6 +293,8 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   const onlineAgent = Array.from((worldState && worldState.agents ? worldState.agents.values() : []))
     .find(a => a.entityId === entityId);
 
+  const actionSequence = summarizeActionQueue(options.runtimeActionQueue || null);
+
   const currentState = {
     online: Boolean(onlineAgent),
     agentId: onlineAgent ? onlineAgent.id : null,
@@ -272,7 +304,8 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
         ...(typeof onlineAgent.lastAction === 'object' && onlineAgent.lastAction ? onlineAgent.lastAction : { type: onlineAgent.lastAction || 'none' }),
         timestamp: onlineAgent.lastUpdate || Date.now()
       }
-      : null
+      : null,
+    actionSequence
   };
 
   let interests = [];
@@ -376,7 +409,8 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
         'entity_interests',
         'entity_daily_reflections',
         'chat_messages',
-        ...(goalsSnapshot ? ['entity_goal_snapshots'] : [])
+        ...(goalsSnapshot ? ['entity_goal_snapshots'] : []),
+        ...(actionSequence ? ['entity_action_queues'] : [])
       ],
       privacy: 'public'
     }
@@ -389,6 +423,7 @@ module.exports = {
   _private: {
     deriveRelationships,
     deriveReputation,
-    mentionMatchesName
+    mentionMatchesName,
+    summarizeActionQueue
   }
 };

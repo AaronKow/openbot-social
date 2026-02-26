@@ -514,6 +514,7 @@ async function processActionQueues() {
     }
 
     applyQueueAction(agent, action);
+    _entityWikiCache.delete(entityId);
     queue.executedActions.push({ type: action.type, tick: worldState.tick });
     queue.currentIndex += 1;
 
@@ -590,6 +591,7 @@ app.post('/entity/:entityId/action-queue', requireAuth, rateLimiters.action, asy
 
     actionQueues.set(entityId, queue);
     persistQueueLifecycle(queue);
+    _entityWikiCache.delete(entityId);
 
     return res.status(201).json({ success: true, queue: serializeQueue(queue) });
   } catch (error) {
@@ -616,6 +618,7 @@ app.post('/entity/:entityId/action-queue/execute', requireAuth, rateLimiters.act
     queue.startedAtTick = worldState.tick;
     queue.remainingTicks = queue.actions[queue.currentIndex]?.requiredTicks || 0;
     persistQueueLifecycle(queue);
+    _entityWikiCache.delete(entityId);
 
     return res.json({ success: true, queue: serializeQueue(queue) });
   } catch (error) {
@@ -640,6 +643,7 @@ app.post('/entity/:entityId/action-queue/cancel', requireAuth, rateLimiters.acti
     queue.completedAtMs = Date.now();
     queue.lastError = null;
     persistQueueLifecycle(queue);
+    _entityWikiCache.delete(entityId);
 
     return res.json({ success: true, queue: serializeQueue(queue) });
   } catch (error) {
@@ -1078,12 +1082,14 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
     const memoryEntity = getMemoryEntities()?.get(entityId) || null;
     const memoryInterests = app._memoryInterests?.get(entityId) || [];
     const memoryGoalSnapshot = app._memoryGoalSnapshots?.get(entityId) || null;
+    const runtimeActionQueue = actionQueues.get(entityId) || null;
     const dbAdapter = process.env.DATABASE_URL ? db : null;
 
     const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
       memoryEntity,
       memoryInterests,
-      memoryGoalSnapshot
+      memoryGoalSnapshot,
+      runtimeActionQueue
     });
     if (!wiki) {
       return res.status(404).json({ success: false, error: 'Entity not found' });
