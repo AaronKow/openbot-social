@@ -306,6 +306,29 @@ async function initDatabase() {
       ON entity_goal_snapshots(entity_id, generated_at DESC)
     `);
 
+    // Create entity_action_queues table for durable queued action execution
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_action_queues (
+        queue_id UUID PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        status VARCHAR(32) NOT NULL DEFAULT 'created',
+        queue_spec JSONB NOT NULL,
+        total_items INTEGER NOT NULL DEFAULT 0,
+        total_required_ticks INTEGER NOT NULL DEFAULT 0,
+        current_index INTEGER NOT NULL DEFAULT 0,
+        executed_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_entity_action_queues_entity_created
+      ON entity_action_queues(entity_id, created_at DESC)
+    `);
+
     await client.query('COMMIT');
     console.log('Database initialized successfully');
   } catch (error) {
@@ -1104,6 +1127,62 @@ async function healthCheck() {
   }
 }
 
+
+
+// Save action queue lifecycle row
+async function saveEntityActionQueue(queue) {
+  await pool.query(
+    `INSERT INTO entity_action_queues (
+       queue_id, entity_id, status, queue_spec, total_items, total_required_ticks,
+       current_index, executed_count, last_error, started_at, completed_at
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (queue_id) DO UPDATE SET
+       status = EXCLUDED.status,
+       current_index = EXCLUDED.current_index,
+       executed_count = EXCLUDED.executed_count,
+       last_error = EXCLUDED.last_error,
+       started_at = COALESCE(EXCLUDED.started_at, entity_action_queues.started_at),
+       completed_at = EXCLUDED.completed_at`,
+    [
+      queue.queueId,
+      queue.entityId,
+      queue.status,
+      JSON.stringify({ actions: queue.actions || [] }),
+      Number(queue.totalItems || 0),
+      Number(queue.totalRequiredTicks || 0),
+      Number(queue.currentIndex || 0),
+      Number((queue.executedActions || []).length),
+      queue.lastError || null,
+      queue.startedAt ? new Date(queue.startedAt) : null,
+      queue.completedAt ? new Date(queue.completedAt) : null,
+    ]
+  );
+}
+
+async function getRecentEntityActionQueues(entityId, limit = 10) {
+  const result = await pool.query(
+    `SELECT queue_id, status, total_items, total_required_ticks, current_index, executed_count, last_error, created_at, started_at, completed_at
+     FROM entity_action_queues
+     WHERE entity_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [entityId, limit]
+  );
+  return result.rows.map((row) => ({
+    queueId: row.queue_id,
+    status: row.status,
+    totalItems: row.total_items,
+    totalRequiredTicks: row.total_required_ticks,
+    currentIndex: row.current_index,
+    executedCount: row.executed_count,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  }));
+}
+
 // ── Entity Interest functions ─────────────────────────────────────────────
 
 /**
@@ -1232,6 +1311,9 @@ module.exports = {
   isSummaryLockActive,
   getLatestEntityGoalSnapshot,
   saveEntityGoalSnapshot,
+  // Action queue functions
+  saveEntityActionQueue,
+  getRecentEntityActionQueues,
   // Entity interest functions
   getEntityInterests,
   setEntityInterests

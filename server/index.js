@@ -8,6 +8,7 @@ const { createRateLimiter, createEntityRateLimiter } = require('./rateLimit');
 const activitySummary = require('./activitySummary');
 const entityReflectionSummary = require('./entityReflectionSummary');
 const { buildEntityWikiPublic } = require('./entityWikiPublic');
+const { createRuntimeQueue, MAX_QUEUE_ACTIONS, MAX_QUEUE_TOTAL_TICKS } = require('./actionQueue');
 
 const app = express();
 
@@ -79,6 +80,10 @@ const worldState = {
   worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
   totalEntitiesCreated: 0 // Track total entities ever created
 };
+
+const actionQueues = new Map(); // entityId -> runtime queue
+const queueLifecyclePersistBuffer = new Map(); // queueId -> snapshot
+const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RETENTION_MS || 120000);
 
 // Maximum movement distance per move request (prevents teleporting)
 const MAX_MOVE_DISTANCE = 5.0; // Max units an agent can move per request
@@ -389,6 +394,142 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
 });
 
 
+function serializeQueue(queue) {
+  if (!queue) return null;
+  return {
+    queueId: queue.queueId,
+    entityId: queue.entityId,
+    status: queue.status,
+    totalItems: queue.totalItems,
+    totalRequiredTicks: queue.totalRequiredTicks,
+    currentIndex: queue.currentIndex,
+    remainingTicks: queue.remainingTicks,
+    startedAtTick: queue.startedAtTick,
+    completedAtTick: queue.completedAtTick,
+    lastError: queue.lastError,
+    executedActions: queue.executedActions,
+    limits: {
+      maxActions: MAX_QUEUE_ACTIONS,
+      maxTotalTicks: MAX_QUEUE_TOTAL_TICKS
+    }
+  };
+}
+
+function queueLifecycleSnapshot(queue) {
+  return {
+    ...queue,
+    startedAt: queue.startedAtTick !== null ? Date.now() : null,
+    completedAt: queue.completedAtTick !== null ? Date.now() : null,
+  };
+}
+
+function persistQueueLifecycle(queue) {
+  if (!process.env.DATABASE_URL || !queue) return;
+  queueLifecyclePersistBuffer.set(queue.queueId, queueLifecycleSnapshot(queue));
+}
+
+async function flushQueueLifecyclePersistBuffer() {
+  if (!process.env.DATABASE_URL || queueLifecyclePersistBuffer.size === 0) return;
+  const snapshots = Array.from(queueLifecyclePersistBuffer.values());
+  queueLifecyclePersistBuffer.clear();
+
+  for (const snapshot of snapshots) {
+    try {
+      await db.saveEntityActionQueue(snapshot);
+    } catch (error) {
+      console.error('Error persisting action queue lifecycle:', error);
+      queueLifecyclePersistBuffer.set(snapshot.queueId, snapshot);
+    }
+  }
+}
+
+function findAgentByEntityId(entityId) {
+  for (const agent of worldState.agents.values()) {
+    if (agent.entityId === entityId) return agent;
+  }
+  return null;
+}
+
+function applyQueueAction(agent, action) {
+  if (!agent || !action) return;
+
+  if (action.type === 'move') {
+    agent.position = clampMovement(agent.position, {
+      x: action.x,
+      y: action.y ?? agent.position.y,
+      z: action.z
+    });
+    if (action.rotation !== undefined) {
+      agent.rotation = Number(action.rotation) || 0;
+    }
+    agent.state = 'moving';
+    agent.lastAction = { type: 'move', x: action.x, z: action.z };
+    return;
+  }
+
+  if (action.type === 'talk') {
+    addChatMessage(agent.id, agent.name, action.message, agent.entityId);
+    agent.state = 'chatting';
+    agent.lastAction = { type: 'talk', message: action.message };
+    return;
+  }
+
+  const payload = { ...action };
+  delete payload.requiredTicks;
+  agent.lastAction = payload;
+  agent.state = 'acting';
+}
+
+async function processActionQueues() {
+  if (actionQueues.size === 0) return;
+  const now = Date.now();
+  for (const [entityId, queue] of actionQueues.entries()) {
+    if (queue.status !== 'running') {
+      if (queue.completedAtMs && now - queue.completedAtMs > QUEUE_TERMINAL_RETENTION_MS) {
+        actionQueues.delete(entityId);
+      }
+      continue;
+    }
+
+    if (queue.currentIndex >= queue.actions.length) {
+      queue.status = 'completed';
+      queue.completedAtTick = worldState.tick;
+      queue.completedAtMs = Date.now();
+      persistQueueLifecycle(queue);
+      continue;
+    }
+
+    queue.remainingTicks -= 1;
+    if (queue.remainingTicks > 0) continue;
+
+    const action = queue.actions[queue.currentIndex];
+    const agent = findAgentByEntityId(entityId);
+    if (!agent) {
+      queue.status = 'failed';
+      queue.lastError = 'No active agent for entity';
+      queue.completedAtTick = worldState.tick;
+      queue.completedAtMs = Date.now();
+      persistQueueLifecycle(queue);
+      continue;
+    }
+
+    applyQueueAction(agent, action);
+    queue.executedActions.push({ type: action.type, tick: worldState.tick });
+    queue.currentIndex += 1;
+
+    if (queue.currentIndex >= queue.actions.length) {
+      queue.status = 'completed';
+      queue.completedAtTick = worldState.tick;
+      queue.completedAtMs = Date.now();
+      queue.remainingTicks = 0;
+      persistQueueLifecycle(queue);
+      continue;
+    }
+
+    queue.remainingTicks = queue.actions[queue.currentIndex].requiredTicks;
+  }
+}
+
 function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
   if (!Array.isArray(goals)) return null;
   const sanitized = [];
@@ -406,6 +547,106 @@ function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
   }
   return sanitized;
 }
+
+// ============= ACTION QUEUE ROUTES =============
+app.get('/entity/:entityId/action-queue', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const runtimeQueue = actionQueues.get(entityId);
+    let recent = [];
+    if (process.env.DATABASE_URL) {
+      recent = await db.getRecentEntityActionQueues(entityId, 10);
+    }
+
+    return res.json({ success: true, queue: serializeQueue(runtimeQueue), recent });
+  } catch (error) {
+    console.error('Error reading action queue:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/entity/:entityId/action-queue', requireAuth, rateLimiters.action, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const agent = findAgentByEntityId(entityId);
+    if (!agent) {
+      return res.status(409).json({ success: false, error: 'Entity must be spawned before creating a queue' });
+    }
+
+    const { actions, mode } = req.body || {};
+    const queue = createRuntimeQueue(entityId, actions, worldState.tick);
+
+    if (mode !== 'replace' && actionQueues.has(entityId)) {
+      return res.status(409).json({ success: false, error: 'Queue already exists. Use mode=replace to overwrite.' });
+    }
+
+    actionQueues.set(entityId, queue);
+    persistQueueLifecycle(queue);
+
+    return res.status(201).json({ success: true, queue: serializeQueue(queue) });
+  } catch (error) {
+    console.error('Error creating action queue:', error);
+    return res.status(400).json({ success: false, error: error.message || 'Invalid queue request' });
+  }
+});
+
+app.post('/entity/:entityId/action-queue/execute', requireAuth, rateLimiters.action, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const queue = actionQueues.get(entityId);
+    if (!queue) {
+      return res.status(404).json({ success: false, error: 'No queue found' });
+    }
+    if (queue.status === 'running') {
+      return res.json({ success: true, queue: serializeQueue(queue) });
+    }
+
+    queue.status = 'running';
+    queue.startedAtTick = worldState.tick;
+    queue.remainingTicks = queue.actions[queue.currentIndex]?.requiredTicks || 0;
+    persistQueueLifecycle(queue);
+
+    return res.json({ success: true, queue: serializeQueue(queue) });
+  } catch (error) {
+    console.error('Error starting action queue:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/entity/:entityId/action-queue/cancel', requireAuth, rateLimiters.action, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const queue = actionQueues.get(entityId);
+    if (!queue) {
+      return res.status(404).json({ success: false, error: 'No queue found' });
+    }
+
+    queue.status = 'cancelled';
+    queue.completedAtTick = worldState.tick;
+    queue.completedAtMs = Date.now();
+    queue.lastError = null;
+    persistQueueLifecycle(queue);
+
+    return res.json({ success: true, queue: serializeQueue(queue) });
+  } catch (error) {
+    console.error('Error cancelling action queue:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
 
 // ============= ENTITY INTEREST ROUTES =============
 
@@ -640,6 +881,8 @@ app.delete('/disconnect/:agentId', (req, res) => {
 async function gameLoop() {
   worldState.tick++;
 
+  await processActionQueues();
+
   // Clean up inactive agents (no updates for AGENT_TIMEOUT ms)
   const now = Date.now();
   for (const [agentId, agent] of worldState.agents.entries()) {
@@ -673,6 +916,11 @@ async function persistState() {
   
   persistenceCounter++;
   
+  // Flush queued lifecycle updates every second
+  if (persistenceCounter % 30 === 0) { // 30 ticks ~= 1 second
+    await flushQueueLifecyclePersistBuffer();
+  }
+
   // Save all agents to database every 5 seconds
   if (persistenceCounter % 150 === 0) { // 150 ticks = 5 seconds at 30 tick rate
     try {
