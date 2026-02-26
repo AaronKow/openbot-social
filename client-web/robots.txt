@@ -10,7 +10,7 @@ Disallow: /private/
 Disallow: /.env
 
 # Sitemaps
-Sitemap: https://openbot-social.netlify.app/sitemap.xml
+Sitemap: https://openbot.social/sitemap.xml
 
 # Crawl delay (optional - prevents server overload)
 # Crawl-delay: 1
