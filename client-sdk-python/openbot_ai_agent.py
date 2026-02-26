@@ -628,6 +628,8 @@ class AIAgent:
         self.TICK_INTERVAL = tick_interval
         self._cognitive_loop_enabled = _env_bool("COGNITIVE_LOOP_ENABLED", True)
         self._reflection_sync_enabled = _env_bool("REFLECTION_SYNC_ENABLED", True)
+        self._goal_snapshot_sync_enabled = _env_bool("GOAL_SNAPSHOT_SYNC_ENABLED", True)
+        self._goal_snapshot_endpoint_available: Optional[bool] = None
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -1336,6 +1338,7 @@ class AIAgent:
             f"{rollup['tag_replies']} direct mention reply/replies. "
             f"Latest learning: {note}."
         )
+        goals_payload = self._build_goal_snapshot_payload(prev_day, rollup)
 
         try:
             auth_h = self.entity_manager.get_auth_header(self.entity_id)
@@ -1351,8 +1354,54 @@ class AIAgent:
             )
             if resp.status_code != 200:
                 print(f"[{self.entity_id}] ⚠️ daily reflection sync failed: {resp.status_code} {resp.text[:200]}")
+
+            if self._goal_snapshot_sync_enabled and self._goal_snapshot_endpoint_available is not False:
+                goal_resp = self.client.session.post(
+                    f"{self.server_url}/entity/{self.entity_id}/goal-snapshots",
+                    headers={**auth_h, "Content-Type": "application/json"},
+                    json=goals_payload,
+                    timeout=10,
+                )
+                if goal_resp.status_code == 200:
+                    self._goal_snapshot_endpoint_available = True
+                elif goal_resp.status_code in (404, 405, 501):
+                    self._goal_snapshot_endpoint_available = False
+                    print(f"[{self.entity_id}] ℹ️ goal snapshot endpoint unavailable ({goal_resp.status_code}); continuing without goal sync")
+                else:
+                    print(f"[{self.entity_id}] ⚠️ goal snapshot sync failed: {goal_resp.status_code} {goal_resp.text[:200]}")
         except Exception as exc:
-            print(f"[{self.entity_id}] ⚠️ daily reflection sync error: {exc}")
+            print(f"[{self.entity_id}] ⚠️ reflection/goal sync error: {exc}")
+
+    def _build_goal_snapshot_payload(self, day_str: str, rollup: Dict[str, Any]) -> Dict[str, Any]:
+        long_term_goals = [
+            {"label": "Sustain engaging conversation", "source": "entity-agent-v1"},
+            {"label": "Stay responsive to direct mentions", "source": "entity-agent-v1"},
+            {"label": "Adapt topics from social feedback", "source": "entity-agent-v1"},
+        ]
+
+        short_term_goals = [
+            {
+                "label": f"Respond quickly to tagged chats on {day_str}",
+                "source": "entity-agent-v1",
+            },
+            {
+                "label": f"Send at least {max(2, min(6, int(rollup.get('message_count', 0)) + 1))} social messages next cycle",
+                "source": "entity-agent-v1",
+            },
+        ]
+
+        if int(rollup.get("tag_replies", 0)) == 0:
+            short_term_goals.append({
+                "label": "Prioritize direct @replies before new outbound chats",
+                "source": "entity-agent-v1",
+            })
+
+        return {
+            "longTermGoals": long_term_goals,
+            "shortTermGoals": short_term_goals[:4],
+            "source": "entity-agent-v1",
+            "model": self.model,
+        }
 
     def reflect(
         self,
@@ -1542,6 +1591,7 @@ class AIAgent:
         print(f"   Interests: {', '.join(interests_display)}")
         print(f"   Cognitive loop: {'enabled' if self._cognitive_loop_enabled else 'disabled'}")
         print(f"   Reflection sync: {'enabled' if self._reflection_sync_enabled else 'disabled'}")
+        print(f"   Goal snapshot sync: {'enabled' if self._goal_snapshot_sync_enabled else 'disabled'}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
 
