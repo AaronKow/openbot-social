@@ -293,7 +293,39 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   const onlineAgent = Array.from((worldState && worldState.agents ? worldState.agents.values() : []))
     .find(a => a.entityId === entityId);
 
-  const actionSequence = summarizeActionQueue(options.runtimeActionQueue || null);
+  const runtimeActionQueue = options.runtimeActionQueue || null;
+  let actionSequence = summarizeActionQueue(runtimeActionQueue);
+
+  if (!actionSequence && db && typeof db.getRecentEntityActionQueues === 'function') {
+    try {
+      const recentQueues = await db.getRecentEntityActionQueues(entityId, 1);
+      const latestQueue = Array.isArray(recentQueues) ? recentQueues[0] : null;
+      const persistedActions = Array.isArray(latestQueue?.queueSpec?.actions) ? latestQueue.queueSpec.actions : null;
+      if (latestQueue && persistedActions && persistedActions.length > 0) {
+        actionSequence = {
+          queueId: latestQueue.queueId || null,
+          status: latestQueue.status || 'unknown',
+          currentIndex: Number(latestQueue.currentIndex || 0),
+          totalItems: Number(latestQueue.totalItems || persistedActions.length || 0),
+          remainingTicks: 0,
+          totalRequiredTicks: Number(latestQueue.totalRequiredTicks || 0),
+          currentAction: null,
+          sequence: persistedActions.map((a, idx) => ({
+            index: idx,
+            type: a.type,
+            requiredTicks: Number(a.requiredTicks || 1),
+            status: idx < Number(latestQueue.currentIndex || 0)
+              ? 'completed'
+              : idx === Number(latestQueue.currentIndex || 0)
+                ? (latestQueue.status === 'running' ? 'running' : (latestQueue.status || 'pending'))
+                : 'pending'
+          }))
+        };
+      }
+    } catch (error) {
+      console.warn(`[wiki-public] failed to read recent action queues for ${entityId}:`, error.message);
+    }
+  }
 
   const currentState = {
     online: Boolean(onlineAgent),

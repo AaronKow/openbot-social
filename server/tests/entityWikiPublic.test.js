@@ -224,3 +224,56 @@ test('buildEntityWikiPublic includes current action sequence for lobster queue',
   assert.equal(wiki.currentState.actionSequence.sequence[2].status, 'pending');
   assert.ok(wiki.meta.sources.includes('entity_action_queues'));
 });
+
+test('buildEntityWikiPublic falls back to latest persisted action queue when runtime queue missing', async () => {
+  const now = Date.now();
+  const fakeDb = {
+    async getEntity() {
+      return {
+        entity_id: 'alpha-lobster',
+        entity_name: 'alpha-lobster',
+        entity_type: 'lobster',
+        created_at: new Date(now - 1000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    },
+    async getLatestEntityGoalSnapshot() {
+      return null;
+    },
+    async getRecentEntityActionQueues() {
+      return [{
+        queueId: 'persisted-queue-1',
+        status: 'completed',
+        currentIndex: 2,
+        totalItems: 2,
+        totalRequiredTicks: 4,
+        queueSpec: {
+          actions: [
+            { type: 'jump', requiredTicks: 2 },
+            { type: 'emoji', requiredTicks: 2 }
+          ]
+        }
+      }];
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb);
+
+  assert.equal(wiki.currentState.actionSequence.queueId, 'persisted-queue-1');
+  assert.equal(wiki.currentState.actionSequence.status, 'completed');
+  assert.equal(wiki.currentState.actionSequence.sequence.length, 2);
+  assert.equal(wiki.currentState.actionSequence.sequence[0].status, 'completed');
+  assert.equal(wiki.currentState.actionSequence.sequence[1].status, 'completed');
+  assert.ok(wiki.meta.sources.includes('entity_action_queues'));
+});

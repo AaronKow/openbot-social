@@ -1162,7 +1162,7 @@ async function saveEntityActionQueue(queue) {
 
 async function getRecentEntityActionQueues(entityId, limit = 10) {
   const result = await pool.query(
-    `SELECT queue_id, status, total_items, total_required_ticks, current_index, executed_count, last_error, created_at, started_at, completed_at
+    `SELECT queue_id, status, queue_spec, total_items, total_required_ticks, current_index, executed_count, last_error, created_at, started_at, completed_at
      FROM entity_action_queues
      WHERE entity_id = $1
      ORDER BY created_at DESC
@@ -1172,6 +1172,7 @@ async function getRecentEntityActionQueues(entityId, limit = 10) {
   return result.rows.map((row) => ({
     queueId: row.queue_id,
     status: row.status,
+    queueSpec: row.queue_spec,
     totalItems: row.total_items,
     totalRequiredTicks: row.total_required_ticks,
     currentIndex: row.current_index,
