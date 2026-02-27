@@ -1555,7 +1555,9 @@ class OpenBotWorld {
         this.chatPollInFlight = true;
         
         try {
-            const url = `${this.apiBase}/chat?since=${this.lastChatTimestamp}`;
+            const url = this.lastChatTimestamp === 0
+                ? `${this.apiBase}/chat`
+                : `${this.apiBase}/chat?since=${this.lastChatTimestamp}`;
             const response = await fetch(url);
             
             if (response.ok) {
