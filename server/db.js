@@ -173,62 +173,6 @@ async function initDatabase() {
       ON CONFLICT (id) DO NOTHING
     `);
 
-    // Create index for faster queries
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp 
-      ON chat_messages(timestamp DESC)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp_id
-      ON chat_messages(timestamp DESC, id DESC)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_agents_updated_at 
-      ON agents(updated_at DESC)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entities_type 
-      ON entities(entity_type)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entities_fingerprint 
-      ON entities(public_key_fingerprint)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entities_name 
-      ON entities(entity_name)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_conversation_messages_entity 
-      ON conversation_messages(entity_id, timestamp DESC)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_sessions_entity_id 
-      ON sessions(entity_id)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_sessions_expires_at 
-      ON sessions(expires_at)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier 
-      ON rate_limits(identifier, action_type)
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_activity_summaries_date 
-      ON activity_summaries(summary_date DESC)
-    `);
-
     // Create entity_daily_reflections table for per-lobster daily summaries
     await client.query(`
       CREATE TABLE IF NOT EXISTS entity_daily_reflections (
@@ -266,11 +210,6 @@ async function initDatabase() {
       END $$
     `);
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entity_daily_reflections_entity_date
-      ON entity_daily_reflections(entity_id, summary_date DESC)
-    `);
-
     // Create entity_interests table — stores evolving weighted interests per entity
     await client.query(`
       CREATE TABLE IF NOT EXISTS entity_interests (
@@ -287,11 +226,6 @@ async function initDatabase() {
       )
     `);
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entity_interests_entity_id
-      ON entity_interests(entity_id)
-    `);
-
 
     // Create entity_goal_snapshots table for persisted goal state/history
     await client.query(`
@@ -304,11 +238,6 @@ async function initDatabase() {
         model VARCHAR(128) NOT NULL DEFAULT 'rules',
         generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
-    `);
-
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entity_goal_snapshots_entity_generated
-      ON entity_goal_snapshots(entity_id, generated_at DESC)
     `);
 
     // Create entity_action_queues table for durable queued action execution
@@ -329,12 +258,11 @@ async function initDatabase() {
       )
     `);
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_entity_action_queues_entity_created
-      ON entity_action_queues(entity_id, created_at DESC)
-    `);
-
     await client.query('COMMIT');
+    console.log('Database bootstrap transaction completed');
+
+    await runPostBootstrapMigrations();
+
     console.log('Database initialized successfully');
   } catch (error) {
     await client.query('ROLLBACK');
@@ -342,6 +270,81 @@ async function initDatabase() {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+const indexMigrations = [
+  // Rollout order for live production upgrades (minimize impact on lobster traffic):
+  // 1) Deploy code that keeps bootstrap DDL/schema checks inside BEGIN/COMMIT.
+  // 2) After COMMIT, run this idempotent index migration list in small batches.
+  // 3) High-traffic read paths are first and use CONCURRENTLY to avoid blocking writes.
+  // 4) Lower-traffic indexes follow and can safely re-run on every deploy.
+  {
+    name: 'idx_chat_messages_timestamp',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp DESC)'
+  },
+  {
+    name: 'idx_chat_messages_timestamp_id',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chat_messages_timestamp_id ON chat_messages(timestamp DESC, id DESC)'
+  },
+  {
+    name: 'idx_conversation_messages_entity',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_conversation_messages_entity ON conversation_messages(entity_id, timestamp DESC)'
+  },
+  {
+    name: 'idx_sessions_entity_id',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_entity_id ON sessions(entity_id)'
+  },
+  {
+    name: 'idx_sessions_expires_at',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)'
+  },
+  {
+    name: 'idx_rate_limits_identifier',
+    query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rate_limits_identifier ON rate_limits(identifier, action_type)'
+  },
+  {
+    name: 'idx_agents_updated_at',
+    query: 'CREATE INDEX IF NOT EXISTS idx_agents_updated_at ON agents(updated_at DESC)'
+  },
+  {
+    name: 'idx_entities_type',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)'
+  },
+  {
+    name: 'idx_entities_fingerprint',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entities_fingerprint ON entities(public_key_fingerprint)'
+  },
+  {
+    name: 'idx_entities_name',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(entity_name)'
+  },
+  {
+    name: 'idx_activity_summaries_date',
+    query: 'CREATE INDEX IF NOT EXISTS idx_activity_summaries_date ON activity_summaries(summary_date DESC)'
+  },
+  {
+    name: 'idx_entity_daily_reflections_entity_date',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_daily_reflections_entity_date ON entity_daily_reflections(entity_id, summary_date DESC)'
+  },
+  {
+    name: 'idx_entity_interests_entity_id',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_interests_entity_id ON entity_interests(entity_id)'
+  },
+  {
+    name: 'idx_entity_goal_snapshots_entity_generated',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_goal_snapshots_entity_generated ON entity_goal_snapshots(entity_id, generated_at DESC)'
+  },
+  {
+    name: 'idx_entity_action_queues_entity_created',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_action_queues_entity_created ON entity_action_queues(entity_id, created_at DESC)'
+  }
+];
+
+async function runPostBootstrapMigrations() {
+  for (const migration of indexMigrations) {
+    await pool.query(migration.query);
+    console.log(`Applied index migration: ${migration.name}`);
   }
 }
 
