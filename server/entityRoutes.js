@@ -754,6 +754,20 @@ function encryptIfAuthenticated(db, memoryEntitiesGetter) {
 
     res.json = async function(data) {
       try {
+        const alreadyEncryptedEnvelope = Boolean(
+          data
+          && typeof data === 'object'
+          && data.encrypted === true
+          && data.encryptedData
+          && data.encryptedKey
+          && data.iv
+          && data.authTag
+        );
+
+        if (alreadyEncryptedEnvelope) {
+          return originalJson(data);
+        }
+
         // Look up entity's public key
         let entity;
         if (process.env.DATABASE_URL) {

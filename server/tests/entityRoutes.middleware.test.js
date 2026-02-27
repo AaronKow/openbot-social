@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const http = require('node:http');
+const express = require('express');
 
 const { requireSession, optionalSession, encryptIfAuthenticated } = require('../entityRoutes');
 const serverCrypto = require('../crypto');
@@ -118,4 +120,137 @@ test('encryptIfAuthenticated falls back to plain json when encryption is disable
   const out = await res.json({ success: true });
 
   assert.deepEqual(out, { success: true });
+});
+
+
+async function withServer(app, run) {
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  }
+}
+
+test('authenticated route returns encrypted envelope when X-Encrypt-Response is true', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' });
+  const entityId = 'entity-route-enc';
+  const token = serverCrypto.createSessionToken(entityId).token;
+
+  const sessions = new Map([
+    [token, { revoked: false, expires_at: new Date(Date.now() + 60_000).toISOString() }]
+  ]);
+  const entities = new Map([
+    [entityId, { public_key: pubPem }]
+  ]);
+
+  const app = express();
+  app.use(requireSession({}, () => sessions));
+  app.use(encryptIfAuthenticated({}, () => entities));
+  app.get('/secure', (req, res) => res.json({ success: true, entityId: req.entityId }));
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/secure`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Encrypt-Response': 'true'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.encrypted, true);
+    assert.ok(body.encryptedData);
+    assert.ok(body.encryptedKey);
+    assert.ok(body.iv);
+    assert.ok(body.authTag);
+
+    const aesKey = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256'
+      },
+      Buffer.from(body.encryptedKey, 'base64')
+    );
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, Buffer.from(body.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(body.authTag, 'base64'));
+    let plaintext = decipher.update(body.encryptedData, 'base64', 'utf8');
+    plaintext += decipher.final('utf8');
+
+    assert.deepEqual(JSON.parse(plaintext), { success: true, entityId });
+  });
+});
+
+test('same authenticated route returns plain JSON when X-Encrypt-Response header is absent', async () => {
+  const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' });
+  const entityId = 'entity-route-plain';
+  const token = serverCrypto.createSessionToken(entityId).token;
+
+  const sessions = new Map([
+    [token, { revoked: false, expires_at: new Date(Date.now() + 60_000).toISOString() }]
+  ]);
+  const entities = new Map([
+    [entityId, { public_key: pubPem }]
+  ]);
+
+  const app = express();
+  app.use(requireSession({}, () => sessions));
+  app.use(encryptIfAuthenticated({}, () => entities));
+  app.get('/secure', (req, res) => res.json({ success: true, entityId: req.entityId }));
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/secure`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body, { success: true, entityId });
+  });
+});
+
+test('encryptIfAuthenticated does not double-wrap responses that are already encrypted envelopes', async () => {
+  const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pubPem = publicKey.export({ type: 'spki', format: 'pem' });
+  const entityId = 'entity-double-wrap';
+  const token = serverCrypto.createSessionToken(entityId).token;
+
+  const sessions = new Map([
+    [token, { revoked: false, expires_at: new Date(Date.now() + 60_000).toISOString() }]
+  ]);
+  const entities = new Map([
+    [entityId, { public_key: pubPem }]
+  ]);
+
+  const envelope = {
+    encrypted: true,
+    encryptedData: 'ciphertext',
+    encryptedKey: 'key',
+    iv: 'iv',
+    authTag: 'tag'
+  };
+
+  const app = express();
+  app.use(requireSession({}, () => sessions));
+  app.use(encryptIfAuthenticated({}, () => entities));
+  app.get('/secure', (req, res) => res.json(envelope));
+
+  await withServer(app, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/secure`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Encrypt-Response': 'true'
+      }
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.deepEqual(body, envelope);
+  });
 });
