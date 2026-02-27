@@ -277,3 +277,136 @@ test('buildEntityWikiPublic falls back to latest persisted action queue when run
   assert.equal(wiki.currentState.actionSequence.sequence[1].status, 'completed');
   assert.ok(wiki.meta.sources.includes('entity_action_queues'));
 });
+
+
+test('buildEntityWikiPublic preserves payload parity with sequential composition', async () => {
+  const now = Date.now();
+  const { _private } = require('../entityWikiPublic');
+
+  const entityId = 'alpha-lobster';
+  const worldState = {
+    agents: new Map([
+      ['a1', { id: 'a1', entityId, state: 'chatting', lastAction: { type: 'chat' }, lastUpdate: now }]
+    ])
+  };
+
+  const fakeDb = {
+    async getEntity(requestedEntityId) {
+      return {
+        entity_id: requestedEntityId,
+        entity_name: requestedEntityId,
+        entity_type: 'lobster',
+        numeric_id: 42,
+        created_at: new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [
+        { interest: 'ocean politics', weight: 40 },
+        { interest: 'deep-sea mysteries', weight: 35 }
+      ];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [
+        {
+          createdAt: new Date(now - 60_000).toISOString(),
+          dailySummary: 'Coordinated reef outreach',
+          goalProgress: { responsiveness: 0.8 },
+          memoryUpdates: { nextFocus: 'organize reef summit' }
+        }
+      ];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [
+        { message: '@reef-bot hello', timestamp: now - 30_000 },
+        { message: '@tidal-friend sync?', timestamp: now - 10_000 }
+      ];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [
+        {
+          entityId: 'reef-bot',
+          messagesExchanged: 10,
+          sentMentions: 5,
+          receivedMentions: 4,
+          lastInteractionAt: now - 20_000
+        }
+      ];
+    },
+    async getLatestEntityGoalSnapshot() {
+      return {
+        longTermGoals: [{ label: 'Build a coral coalition', source: 'gpt-4o-mini' }],
+        shortTermGoals: [{ label: 'Send 3 outreach pings', source: 'gpt-4o-mini' }],
+        source: 'ai-v1'
+      };
+    },
+    async getRecentEntityActionQueues() {
+      return [{
+        queueId: 'persisted-queue-1',
+        status: 'running',
+        currentIndex: 0,
+        totalItems: 1,
+        totalRequiredTicks: 2,
+        queueSpec: { actions: [{ type: 'jump', requiredTicks: 2 }] }
+      }];
+    }
+  };
+
+  const fixedNow = now + 1234;
+  const originalDateNow = Date.now;
+  Date.now = () => fixedNow;
+
+  try {
+    const actual = await buildEntityWikiPublic(entityId, worldState, fakeDb);
+
+    const entity = await fakeDb.getEntity(entityId);
+    const interests = await fakeDb.getEntityInterests(entityId);
+    const reflections = await fakeDb.getRecentEntityReflectionsPublic(entityId, 30);
+    const recentOwnChats = await fakeDb.getRecentChatMessagesByAgentName(entity.entity_name, 300);
+    const rawPartners = await fakeDb.getTopConversationPartnersByAgentName(entity.entity_name, 8);
+    const goalsSnapshot = await fakeDb.getLatestEntityGoalSnapshot(entityId);
+    const recentQueues = await fakeDb.getRecentEntityActionQueues(entityId, 1);
+    const latestQueue = recentQueues[0];
+    const actionSequence = {
+      queueId: latestQueue.queueId || null,
+      status: latestQueue.status || 'unknown',
+      currentIndex: Number(latestQueue.currentIndex || 0),
+      totalItems: Number(latestQueue.totalItems || latestQueue.queueSpec.actions.length || 0),
+      remainingTicks: 0,
+      totalRequiredTicks: Number(latestQueue.totalRequiredTicks || 0),
+      currentAction: null,
+      sequence: latestQueue.queueSpec.actions.map((a, idx) => ({
+        index: idx,
+        type: a.type,
+        requiredTicks: Number(a.requiredTicks || 1),
+        status: idx < Number(latestQueue.currentIndex || 0)
+          ? 'completed'
+          : idx === Number(latestQueue.currentIndex || 0)
+            ? (latestQueue.status === 'running' ? 'running' : (latestQueue.status || 'pending'))
+            : 'pending'
+      }))
+    };
+
+    const expected = _private.composeEntityWikiPublic({
+      entityId,
+      entity,
+      currentState: {
+        online: true,
+        agentId: 'a1',
+        state: 'chatting',
+        lastAction: { type: 'chat', timestamp: now },
+        actionSequence
+      },
+      interests,
+      reflections,
+      recentOwnChats,
+      rawPartners,
+      goalsSnapshot,
+      actionSequence
+    });
+
+    assert.deepEqual({ ...actual, meta: { ...actual.meta, generatedAt: '<redacted>' } }, { ...expected, meta: { ...expected.meta, generatedAt: '<redacted>' } });
+  } finally {
+    Date.now = originalDateNow;
+  }
+});

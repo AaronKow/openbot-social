@@ -294,75 +294,71 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     .find(a => a.entityId === entityId);
 
   const runtimeActionQueue = options.runtimeActionQueue || null;
-  let actionSequence = summarizeActionQueue(runtimeActionQueue);
-
-  if (!actionSequence && db && typeof db.getRecentEntityActionQueues === 'function') {
-    try {
-      const recentQueues = await db.getRecentEntityActionQueues(entityId, 1);
-      const latestQueue = Array.isArray(recentQueues) ? recentQueues[0] : null;
-      const persistedActions = Array.isArray(latestQueue?.queueSpec?.actions) ? latestQueue.queueSpec.actions : null;
-      if (latestQueue && persistedActions && persistedActions.length > 0) {
-        actionSequence = {
-          queueId: latestQueue.queueId || null,
-          status: latestQueue.status || 'unknown',
-          currentIndex: Number(latestQueue.currentIndex || 0),
-          totalItems: Number(latestQueue.totalItems || persistedActions.length || 0),
-          remainingTicks: 0,
-          totalRequiredTicks: Number(latestQueue.totalRequiredTicks || 0),
-          currentAction: null,
-          sequence: persistedActions.map((a, idx) => ({
-            index: idx,
-            type: a.type,
-            requiredTicks: Number(a.requiredTicks || 1),
-            status: idx < Number(latestQueue.currentIndex || 0)
-              ? 'completed'
-              : idx === Number(latestQueue.currentIndex || 0)
-                ? (latestQueue.status === 'running' ? 'running' : (latestQueue.status || 'pending'))
-                : 'pending'
-          }))
-        };
-      }
-    } catch (error) {
-      console.warn(`[wiki-public] failed to read recent action queues for ${entityId}:`, error.message);
-    }
-  }
-
-  const currentState = {
-    online: Boolean(onlineAgent),
-    agentId: onlineAgent ? onlineAgent.id : null,
-    state: onlineAgent ? onlineAgent.state : 'offline',
-    lastAction: onlineAgent
-      ? {
-        ...(typeof onlineAgent.lastAction === 'object' && onlineAgent.lastAction ? onlineAgent.lastAction : { type: onlineAgent.lastAction || 'none' }),
-        timestamp: onlineAgent.lastUpdate || Date.now()
-      }
-      : null,
-    actionSequence
-  };
-
-  let interests = [];
-  if (db && typeof db.getEntityInterests === 'function') {
-    interests = await db.getEntityInterests(entityId);
-  } else if (Array.isArray(options.memoryInterests)) {
-    interests = options.memoryInterests;
-  }
-
-  let reflections = [];
-  if (db && typeof db.getRecentEntityReflectionsPublic === 'function') {
-    reflections = await db.getRecentEntityReflectionsPublic(entityId, 30);
-  }
-
+  const runtimeActionSequence = summarizeActionQueue(runtimeActionQueue);
   const agentName = entity.entity_name || entity.entity_id || entityId;
-  let recentOwnChats = [];
-  if (db && typeof db.getRecentChatMessagesByAgentName === 'function') {
-    recentOwnChats = await db.getRecentChatMessagesByAgentName(agentName, 300);
-  }
+  const interestsPromise = db && typeof db.getEntityInterests === 'function'
+    ? db.getEntityInterests(entityId)
+    : Promise.resolve(Array.isArray(options.memoryInterests) ? options.memoryInterests : []);
+  const reflectionsPromise = db && typeof db.getRecentEntityReflectionsPublic === 'function'
+    ? db.getRecentEntityReflectionsPublic(entityId, 30)
+    : Promise.resolve([]);
+  const recentOwnChatsPromise = db && typeof db.getRecentChatMessagesByAgentName === 'function'
+    ? db.getRecentChatMessagesByAgentName(agentName, 300)
+    : Promise.resolve([]);
+  const rawPartnersPromise = db && typeof db.getTopConversationPartnersByAgentName === 'function'
+    ? db.getTopConversationPartnersByAgentName(agentName, 8)
+    : Promise.resolve(null);
+  const goalsSnapshotPromise = db && typeof db.getLatestEntityGoalSnapshot === 'function'
+    ? db.getLatestEntityGoalSnapshot(entityId).catch(error => {
+      // Keep wiki route resilient if goal snapshots are unavailable.
+      console.warn(`[wiki-public] failed to read goals snapshot for ${entityId}:`, error.message);
+      return null;
+    })
+    : Promise.resolve(options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object' ? options.memoryGoalSnapshot : null);
+  const actionSequencePromise = runtimeActionSequence
+    ? Promise.resolve(runtimeActionSequence)
+    : (db && typeof db.getRecentEntityActionQueues === 'function'
+      ? db.getRecentEntityActionQueues(entityId, 1)
+        .then(recentQueues => {
+          const latestQueue = Array.isArray(recentQueues) ? recentQueues[0] : null;
+          const persistedActions = Array.isArray(latestQueue?.queueSpec?.actions) ? latestQueue.queueSpec.actions : null;
+          if (!latestQueue || !persistedActions || persistedActions.length === 0) return null;
+          return {
+            queueId: latestQueue.queueId || null,
+            status: latestQueue.status || 'unknown',
+            currentIndex: Number(latestQueue.currentIndex || 0),
+            totalItems: Number(latestQueue.totalItems || persistedActions.length || 0),
+            remainingTicks: 0,
+            totalRequiredTicks: Number(latestQueue.totalRequiredTicks || 0),
+            currentAction: null,
+            sequence: persistedActions.map((a, idx) => ({
+              index: idx,
+              type: a.type,
+              requiredTicks: Number(a.requiredTicks || 1),
+              status: idx < Number(latestQueue.currentIndex || 0)
+                ? 'completed'
+                : idx === Number(latestQueue.currentIndex || 0)
+                  ? (latestQueue.status === 'running' ? 'running' : (latestQueue.status || 'pending'))
+                  : 'pending'
+            }))
+          };
+        })
+        .catch(error => {
+          console.warn(`[wiki-public] failed to read recent action queues for ${entityId}:`, error.message);
+          return null;
+        })
+      : Promise.resolve(null));
 
-  let rawPartners = [];
-  if (db && typeof db.getTopConversationPartnersByAgentName === 'function') {
-    rawPartners = await db.getTopConversationPartnersByAgentName(agentName, 8);
-  } else {
-    // fallback from available chat messages
+  let [interests, reflections, recentOwnChats, rawPartners, goalsSnapshot, actionSequence] = await Promise.all([
+    interestsPromise,
+    reflectionsPromise,
+    recentOwnChatsPromise,
+    rawPartnersPromise,
+    goalsSnapshotPromise,
+    actionSequencePromise
+  ]);
+
+  if (!Array.isArray(rawPartners)) {
     const relMap = new Map();
     for (const msg of recentOwnChats) {
       for (const target of parseMentionTargets(msg.message)) {
@@ -382,22 +378,47 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     rawPartners = [...relMap.values()];
   }
 
+  const currentState = {
+    online: Boolean(onlineAgent),
+    agentId: onlineAgent ? onlineAgent.id : null,
+    state: onlineAgent ? onlineAgent.state : 'offline',
+    lastAction: onlineAgent
+      ? {
+        ...(typeof onlineAgent.lastAction === 'object' && onlineAgent.lastAction ? onlineAgent.lastAction : { type: onlineAgent.lastAction || 'none' }),
+        timestamp: onlineAgent.lastUpdate || Date.now()
+      }
+      : null,
+    actionSequence
+  };
+
+  return composeEntityWikiPublic({
+    entityId,
+    entity,
+    currentState,
+    interests,
+    reflections,
+    recentOwnChats,
+    rawPartners,
+    goalsSnapshot,
+    actionSequence
+  });
+}
+
+function composeEntityWikiPublic({
+  entityId,
+  entity,
+  currentState,
+  interests,
+  reflections,
+  recentOwnChats,
+  rawPartners,
+  goalsSnapshot,
+  actionSequence
+}) {
   const relationships = deriveRelationships(rawPartners);
 
   const derivedLongTermGoals = deriveLongTermGoals(interests, reflections, recentOwnChats);
   const derivedShortTermGoals = deriveShortTermGoals(reflections, relationships, currentState);
-
-  let goalsSnapshot = null;
-  if (db && typeof db.getLatestEntityGoalSnapshot === 'function') {
-    try {
-      goalsSnapshot = await db.getLatestEntityGoalSnapshot(entityId);
-    } catch (error) {
-      // Keep wiki route resilient if goal snapshots are unavailable.
-      console.warn(`[wiki-public] failed to read goals snapshot for ${entityId}:`, error.message);
-    }
-  } else if (options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object') {
-    goalsSnapshot = options.memoryGoalSnapshot;
-  }
 
   const longTermGoals = goalsSnapshot
     ? normalizeGoalEntries(goalsSnapshot.longTermGoals, goalsSnapshot.source || 'persisted')
@@ -456,6 +477,7 @@ module.exports = {
     deriveRelationships,
     deriveReputation,
     mentionMatchesName,
-    summarizeActionQueue
+    summarizeActionQueue,
+    composeEntityWikiPublic
   }
 };
