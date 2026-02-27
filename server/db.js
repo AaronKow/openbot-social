@@ -518,9 +518,9 @@ async function getChatMessagesBefore(beforeTimestamp, limit = 20) {
   })).reverse(); // Return in chronological order (oldest first)
 }
 
-// Clean up old chat messages (keep only last 1000)
+// Clean up old chat messages (keep only last 10000)
 async function cleanupOldChatMessages() {
-  const retainedRows = 1000;
+  const retainedRows = 10000;
   const deleteBatchSize = 5000;
 
   const cutoffResult = await pool.query(
