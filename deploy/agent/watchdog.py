@@ -14,6 +14,7 @@ import hashlib
 import os
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,12 @@ MODEL        = os.getenv("OPENAI_MODEL", "gpt-5-nano")
 DURATION     = os.getenv("DURATION", "0")
 USER_PROMPT  = os.getenv("USER_PROMPT", "")
 TICK_INTERVAL = os.getenv("TICK_INTERVAL", "4.0")
+try:
+    PARSED_TICK_INTERVAL = float(TICK_INTERVAL)
+except ValueError:
+    print(f"[watchdog] ⚠️ invalid TICK_INTERVAL={TICK_INTERVAL!r}; defaulting to 4.0")
+    PARSED_TICK_INTERVAL = 4.0
+
 DEBUG        = os.getenv("DEBUG", "")
 OPENBOT_URL  = os.getenv("OPENBOT_URL", "http://localhost:3001")
 COGNITIVE_LOOP_ENABLED = os.getenv("COGNITIVE_LOOP_ENABLED", "true")
@@ -262,7 +269,7 @@ def build_agent_cmd() -> list:
     cmd += ["--url", OPENBOT_URL]
     cmd += ["--model", MODEL]
     cmd += ["--duration", DURATION]
-    cmd += ["--tick-interval", TICK_INTERVAL]
+    cmd += ["--tick-interval", str(PARSED_TICK_INTERVAL)]
     if USER_PROMPT:
         cmd += ["--user-prompt", USER_PROMPT]
     if DEBUG:
@@ -272,7 +279,9 @@ def build_agent_cmd() -> list:
 
 def spawn_agent() -> subprocess.Popen:
     cmd = build_agent_cmd()
-    print(f"\n[watchdog] 🚀 spawning agent: {' '.join(cmd)}\n")
+    print(f"\n[watchdog] 🚀 spawning agent command: {shlex.join(cmd)}")
+    print(f"[watchdog] ⏱️  TICK_INTERVAL raw={TICK_INTERVAL!r} parsed={PARSED_TICK_INTERVAL}")
+
     return subprocess.Popen(cmd)
 
 
@@ -304,6 +313,7 @@ def main():
     print(f"  Key dir   : {KEY_DIR}")
     print(f"  Cognitive : {COGNITIVE_LOOP_ENABLED}")
     print(f"  Reflect   : {REFLECTION_SYNC_ENABLED}")
+    print(f"  Tick env  : raw={TICK_INTERVAL!r} parsed={PARSED_TICK_INTERVAL}")
     print("=" * 60)
 
     # ── Initial download + validation before first start ─────────
