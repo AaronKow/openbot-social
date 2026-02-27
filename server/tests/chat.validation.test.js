@@ -5,6 +5,7 @@ const { once } = require('node:events');
 const { app, worldState, getMemorySessions } = require('../index');
 const serverCrypto = require('../crypto');
 const { MAX_CHAT_MESSAGE_LENGTH } = require('../chatMessage');
+const db = require('../db');
 
 async function withServer(run) {
   const server = app.listen(0);
@@ -155,4 +156,77 @@ test('chat clamps before pagination limit to safe range', async () => {
     assert.equal(capped.json.messages.length, 3);
     assert.equal(capped.json.hasMore, false);
   });
+});
+
+
+test('chat rejects invalid since query values', async () => {
+  worldState.chatMessages = [];
+
+  await withServer(async (baseUrl) => {
+    for (const badSince of ['abc', '-1', '12.5']) {
+      const { status, json } = await getChat(baseUrl, `?since=${encodeURIComponent(badSince)}`);
+      assert.equal(status, 400);
+      assert.equal(json.success, false);
+      assert.match(json.error, /Invalid `since`/);
+    }
+  });
+});
+
+test('chat since falls back to bounded in-memory results when DB mode is disabled', async () => {
+  worldState.chatMessages = Array.from({ length: 150 }, (_, index) => ({
+    id: `msg-${index + 1}`,
+    timestamp: index + 1,
+    message: `m-${index + 1}`
+  }));
+
+  await withServer(async (baseUrl) => {
+    const { status, json } = await getChat(baseUrl, '?since=0');
+    assert.equal(status, 200);
+    assert.equal(json.messages.length, 100);
+    assert.equal(json.messages[0].timestamp, 51);
+    assert.equal(json.messages.at(-1).timestamp, 150);
+  });
+});
+
+
+test('chat since uses DB canonical results when DATABASE_URL is set', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  const originalGetChatMessagesAfter = db.getChatMessagesAfter;
+
+  worldState.chatMessages = [
+    { id: 'msg-90', timestamp: 90, message: 'ninety' },
+    { id: 'msg-100', timestamp: 100, message: 'one-hundred' }
+  ];
+
+  process.env.DATABASE_URL = 'postgres://unit-test';
+  let capturedSince = null;
+  let capturedLimit = null;
+  db.getChatMessagesAfter = async (sinceTimestamp, limit) => {
+    capturedSince = sinceTimestamp;
+    capturedLimit = limit;
+    return [
+      { timestamp: 95, message: 'db-95' },
+      { timestamp: 101, message: 'db-101' }
+    ];
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const { status, json } = await getChat(baseUrl, '?since=90&limit=9999');
+      assert.equal(status, 200);
+      assert.equal(capturedSince, 90);
+      assert.equal(capturedLimit, 1000);
+      assert.deepEqual(
+        json.messages.map(m => m.timestamp),
+        [95, 101]
+      );
+    });
+  } finally {
+    db.getChatMessagesAfter = originalGetChatMessagesAfter;
+    if (originalDatabaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+  }
 });

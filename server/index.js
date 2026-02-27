@@ -1130,18 +1130,54 @@ app.get('/chat', async (req, res) => {
     }
 
     // ---- Normal polling: return messages after `since` ----
+    const defaultSinceLimit = 100;
+    const maxSinceLimit = 1000;
+    let sinceLimit = defaultSinceLimit;
+
+    if (limit !== undefined) {
+      const limitRaw = String(limit).trim();
+      const parsedLimit = Number.parseInt(limitRaw, 10);
+
+      if (!Number.isFinite(parsedLimit) || !/^\d+$/.test(limitRaw)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid `limit` query parameter: expected a numeric value'
+        });
+      }
+
+      sinceLimit = Math.min(Math.max(parsedLimit, 1), maxSinceLimit);
+    }
+
     let messages = worldState.chatMessages;
-    if (since) {
-      const sinceTime = parseInt(since);
-      messages = messages.filter(msg => msg.timestamp > sinceTime);
+    if (since !== undefined) {
+      const sinceRaw = String(since).trim();
+      const sinceTime = Number.parseInt(sinceRaw, 10);
+      if (!Number.isFinite(sinceTime) || sinceTime < 0 || !/^\d+$/.test(sinceRaw)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid `since` query parameter: expected a non-negative integer timestamp'
+        });
+      }
+
+      const memoryMessages = worldState.chatMessages.filter(msg => msg.timestamp > sinceTime);
+      if (process.env.DATABASE_URL) {
+        try {
+          messages = await db.getChatMessagesAfter(sinceTime, sinceLimit);
+        } catch (e) {
+          console.error('Error fetching recent chat from DB:', e);
+          messages = memoryMessages.slice(-sinceLimit);
+        }
+      } else {
+        messages = memoryMessages.slice(-sinceLimit);
+      }
     }
 
     res.json({ messages });
   } catch (error) {
     console.error('Error getting chat messages:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Internal server error' 
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
     });
   }
 });
