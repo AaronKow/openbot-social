@@ -79,6 +79,7 @@ const encryptResponses = encryptIfAuthenticated(db, getMemoryEntities);
 // Configuration
 const PORT = process.env.PORT || 3001;
 const TICK_RATE = 30; // 30 updates per second
+const TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
@@ -1077,59 +1078,161 @@ async function gameLoop() {
   }
 }
 
-// Periodic state persistence to database (every 5 seconds)
-let persistenceCounter = 0;
-async function persistState() {
-  if (!process.env.DATABASE_URL) return;
-  
-  persistenceCounter++;
-  
-  // Flush queued lifecycle updates every second
-  if (persistenceCounter % 30 === 0) { // 30 ticks ~= 1 second
-    await flushQueueLifecyclePersistBuffer();
+const PERSIST_FLUSH_INTERVAL_MS = 1000;
+const PERSIST_AGENT_SAVE_INTERVAL_MS = 5000;
+const PERSIST_CHAT_CLEANUP_INTERVAL_MS = 60000;
+const PERSIST_SESSION_CLEANUP_INTERVAL_MS = 300000;
+
+const tickSchedulerMetrics = {
+  lastTickDurationMs: 0,
+  maxTickDurationMs: 0,
+  skippedTicks: 0
+};
+
+const persistenceSchedulerMetrics = {
+  lastRunDurationMs: 0,
+  maxRunDurationMs: 0,
+  skippedRuns: 0,
+  lastAgentSaveAt: 0,
+  lastChatCleanupAt: 0,
+  lastSessionCleanupAt: 0
+};
+
+let isTickRunning = false;
+let nextTickAt = Date.now() + TICK_INTERVAL_MS;
+let tickTimer = null;
+
+let isPersistRunning = false;
+let persistTimer = null;
+
+function scheduleNextTick() {
+  const delayMs = Math.max(0, nextTickAt - Date.now());
+  tickTimer = setTimeout(runScheduledTick, delayMs);
+
+  if (typeof tickTimer.unref === 'function') {
+    tickTimer.unref();
+  }
+}
+
+function schedulePersistRun() {
+  persistTimer = setTimeout(runPersistenceCycle, PERSIST_FLUSH_INTERVAL_MS);
+
+  if (typeof persistTimer.unref === 'function') {
+    persistTimer.unref();
+  }
+}
+
+async function runPersistenceCycle() {
+  if (isPersistRunning) {
+    persistenceSchedulerMetrics.skippedRuns++;
+    schedulePersistRun();
+    return;
   }
 
-  // Save all agents to database every 5 seconds
-  if (persistenceCounter % 150 === 0) { // 150 ticks = 5 seconds at 30 tick rate
+  isPersistRunning = true;
+  const startedAt = Date.now();
+
+  try {
+    await persistState();
+  } catch (error) {
+    console.error('Error during persistence cycle:', error);
+  } finally {
+    const runDurationMs = Date.now() - startedAt;
+    persistenceSchedulerMetrics.lastRunDurationMs = runDurationMs;
+    persistenceSchedulerMetrics.maxRunDurationMs = Math.max(persistenceSchedulerMetrics.maxRunDurationMs, runDurationMs);
+    isPersistRunning = false;
+  }
+
+  schedulePersistRun();
+}
+
+async function runScheduledTick() {
+  if (isTickRunning) {
+    tickSchedulerMetrics.skippedTicks++;
+    nextTickAt += TICK_INTERVAL_MS;
+    scheduleNextTick();
+    return;
+  }
+
+  isTickRunning = true;
+  const tickStartedAt = Date.now();
+
+  try {
+    await gameLoop();
+  } catch (error) {
+    console.error('Error during scheduled tick:', error);
+  } finally {
+    const tickDurationMs = Date.now() - tickStartedAt;
+    tickSchedulerMetrics.lastTickDurationMs = tickDurationMs;
+    tickSchedulerMetrics.maxTickDurationMs = Math.max(tickSchedulerMetrics.maxTickDurationMs, tickDurationMs);
+    isTickRunning = false;
+  }
+
+  const now = Date.now();
+  nextTickAt += TICK_INTERVAL_MS;
+
+  if (now > nextTickAt) {
+    const missedTicks = Math.floor((now - nextTickAt) / TICK_INTERVAL_MS) + 1;
+    tickSchedulerMetrics.skippedTicks += missedTicks;
+    nextTickAt += missedTicks * TICK_INTERVAL_MS;
+  }
+
+  if (worldState.tick > 0 && worldState.tick % (TICK_RATE * 10) === 0) {
+    console.log(
+      `[tick-scheduler] tick=${worldState.tick} lastDurationMs=${tickSchedulerMetrics.lastTickDurationMs} maxDurationMs=${tickSchedulerMetrics.maxTickDurationMs} skippedTicks=${tickSchedulerMetrics.skippedTicks}`
+    );
+  }
+
+  scheduleNextTick();
+}
+
+// Periodic state persistence
+async function persistState() {
+  if (!process.env.DATABASE_URL) return;
+
+  const now = Date.now();
+
+  // Flush queued lifecycle updates every second.
+  await flushQueueLifecyclePersistBuffer();
+
+  // Save all agents to database every 5 seconds.
+  if (!persistenceSchedulerMetrics.lastAgentSaveAt || now - persistenceSchedulerMetrics.lastAgentSaveAt >= PERSIST_AGENT_SAVE_INTERVAL_MS) {
     try {
       for (const agent of worldState.agents.values()) {
         await db.saveAgent(agent);
       }
+      persistenceSchedulerMetrics.lastAgentSaveAt = now;
       console.log(`Persisted ${worldState.agents.size} agents to database`);
     } catch (error) {
       console.error('Error persisting state:', error);
     }
   }
-  
-  // Clean up old chat messages every minute
-  if (persistenceCounter % 1800 === 0) { // 1800 ticks = 60 seconds
+
+  // Clean up old chat messages every minute.
+  if (!persistenceSchedulerMetrics.lastChatCleanupAt || now - persistenceSchedulerMetrics.lastChatCleanupAt >= PERSIST_CHAT_CLEANUP_INTERVAL_MS) {
     try {
       await db.cleanupOldChatMessages();
+      persistenceSchedulerMetrics.lastChatCleanupAt = now;
     } catch (error) {
       console.error('Error cleaning up chat messages:', error);
     }
   }
 
-  // Clean up expired sessions every 5 minutes
-  if (persistenceCounter % 9000 === 0) { // 9000 ticks = 5 minutes
+  // Clean up expired sessions every 5 minutes.
+  if (!persistenceSchedulerMetrics.lastSessionCleanupAt || now - persistenceSchedulerMetrics.lastSessionCleanupAt >= PERSIST_SESSION_CLEANUP_INTERVAL_MS) {
     try {
       await db.cleanupExpiredSessions();
       await db.cleanupRateLimits();
+      persistenceSchedulerMetrics.lastSessionCleanupAt = now;
     } catch (error) {
       console.error('Error cleaning up sessions/rate limits:', error);
     }
   }
 }
 
-// Start game loop
-const gameLoopInterval = setInterval(() => {
-  gameLoop();
-  persistState();
-}, 1000 / TICK_RATE);
-
-if (typeof gameLoopInterval.unref === 'function') {
-  gameLoopInterval.unref();
-}
+// Start game loop and persistence with non-overlapping async schedulers
+scheduleNextTick();
+schedulePersistRun();
 
 // Status API endpoint
 app.get('/status', async (req, res) => {
@@ -1156,7 +1259,24 @@ app.get('/status', async (req, res) => {
     uptimeMs: uptimeMs,
     serverStartTime: worldState.startTime,
     worldCreatedAt: worldState.worldCreatedAt,
-    database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled'
+    database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled',
+    tickScheduler: {
+      intervalMs: TICK_INTERVAL_MS,
+      isTickRunning,
+      lastTickDurationMs: tickSchedulerMetrics.lastTickDurationMs,
+      maxTickDurationMs: tickSchedulerMetrics.maxTickDurationMs,
+      skippedTicks: tickSchedulerMetrics.skippedTicks
+    },
+    persistenceScheduler: {
+      intervalMs: PERSIST_FLUSH_INTERVAL_MS,
+      isRunning: isPersistRunning,
+      lastRunDurationMs: persistenceSchedulerMetrics.lastRunDurationMs,
+      maxRunDurationMs: persistenceSchedulerMetrics.maxRunDurationMs,
+      skippedRuns: persistenceSchedulerMetrics.skippedRuns,
+      lastAgentSaveAt: persistenceSchedulerMetrics.lastAgentSaveAt,
+      lastChatCleanupAt: persistenceSchedulerMetrics.lastChatCleanupAt,
+      lastSessionCleanupAt: persistenceSchedulerMetrics.lastSessionCleanupAt
+    }
   });
 });
 
