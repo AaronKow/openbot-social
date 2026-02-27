@@ -29,11 +29,64 @@ app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Enable CORS for all routes
+function parseCorsAllowedOrigins(value) {
+  if (!value || !value.trim()) {
+    return null;
+  }
+
+  return new Set(
+    value
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(Boolean)
+  );
+}
+
+const corsAllowedOrigins = parseCorsAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
+
+function isNonPublicCorsPath(req) {
+  const { method, path: reqPath } = req;
+  const normalizedMethod = method.toUpperCase();
+
+  if (normalizedMethod === 'OPTIONS') {
+    if (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action') return true;
+    if (reqPath.startsWith('/disconnect/')) return true;
+    if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots)(?:\/.*)?$/.test(reqPath)) return true;
+    return false;
+  }
+
+  if (normalizedMethod === 'POST' && (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action')) return true;
+  if (normalizedMethod === 'DELETE' && reqPath.startsWith('/disconnect/')) return true;
+
+  if (
+    /^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots)(?:\/.*)?$/.test(reqPath)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+// Enable CORS with optional allowlist support
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Encrypt-Response');
+  const requestOrigin = req.headers.origin;
+  const allowAllOrigins = corsAllowedOrigins === null;
+  const originAllowed = allowAllOrigins || (requestOrigin && corsAllowedOrigins.has(requestOrigin));
+
+  if (originAllowed) {
+    res.header('Access-Control-Allow-Origin', allowAllOrigins ? '*' : requestOrigin);
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Encrypt-Response');
+    if (!allowAllOrigins) {
+      res.header('Vary', 'Origin');
+    }
+  } else if (requestOrigin && isNonPublicCorsPath(req)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Origin not allowed'
+    });
+  }
+
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
