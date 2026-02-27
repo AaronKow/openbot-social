@@ -166,6 +166,21 @@ class OpenBotWorld {
         // Handle window resize
         window.addEventListener('resize', () => this.onWindowResize());
     }
+
+    escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    safeClassToken(value, fallback = 'unknown') {
+        const normalized = String(value ?? fallback).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+        return normalized || fallback;
+    }
     
     createOceanFloor() {
         // Sand floor - smooth and even (now with thickness)
@@ -722,20 +737,12 @@ class OpenBotWorld {
             status.classList.remove('online', 'offline');
         }
 
-        const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
-            '&': '&amp;',
-            '<': '&lt;',
-            '>': '&gt;',
-            '"': '&quot;',
-            "'": '&#39;'
-        }[char]));
-
         const cards = entities.map(entity => {
             const rawEntityId = entity.entity_id || '';
-            const label = escapeHtml(entity.entity_name || entity.entity_id || 'Unknown Lobster');
-            const numeric = escapeHtml(entity.numeric_id ?? 'N/A');
-            const created = escapeHtml(entity.created_at ? new Date(entity.created_at).toLocaleDateString() : 'Unknown');
-            const safeEntityId = escapeHtml(rawEntityId);
+            const label = this.escapeHtml(entity.entity_name || entity.entity_id || 'Unknown Lobster');
+            const numeric = this.escapeHtml(entity.numeric_id ?? 'N/A');
+            const created = this.escapeHtml(entity.created_at ? new Date(entity.created_at).toLocaleDateString() : 'Unknown');
+            const safeEntityId = this.escapeHtml(rawEntityId);
             return `
                 <button class="wiki-directory-card" data-entity-id="${safeEntityId}">
                     <div class="wiki-directory-avatar" data-avatar-entity-id="${safeEntityId}" aria-hidden="true"></div>
@@ -802,7 +809,7 @@ class OpenBotWorld {
         const modal = document.getElementById('lobster-wiki-modal');
         if (modal) modal.classList.add('visible');
         const body = document.getElementById('lobster-wiki-body');
-        if (body) body.innerHTML = `<div class="wiki-error">${message}</div>`;
+        if (body) body.innerHTML = `<div class="wiki-error">${this.escapeHtml(message)}</div>`;
     }
 
     renderRelationshipGraph(graph, selfId) {
@@ -846,8 +853,8 @@ class OpenBotWorld {
             const fill = isSelf ? '#00ffcc' : '#0f3f57';
             const stroke = isSelf ? '#eaffff' : '#7df5ff';
             const textColor = '#d6ffff';
-            const safeLabel = (node.label || node.id || '').replace(/[<>&"']/g, '');
-            const safeNodeId = String(node.id || '').replace(/[<>&"']/g, '');
+            const safeLabel = this.escapeHtml(node.label || node.id || '');
+            const safeNodeId = this.escapeHtml(node.id || '');
             return `
                 <g class="wiki-graph-node" data-node-id="${safeNodeId}">
                     <title>${safeLabel}</title>
@@ -938,13 +945,19 @@ class OpenBotWorld {
 
     renderTimelineItems(items) {
         if (!items.length) return '<div class="wiki-empty">No timeline events yet.</div>';
-        return `<ul class="wiki-timeline">${items.map(item => `
+        return `<ul class="wiki-timeline">${items.map(item => {
+            const title = this.escapeHtml(item.title || 'Event');
+            const when = this.escapeHtml(item.ts ? new Date(item.ts).toLocaleString() : 'Unknown time');
+            const type = this.escapeHtml(item.type || 'event');
+            const detail = this.escapeHtml(item.detail || '');
+            return `
             <li>
-                <div><strong>${item.title || 'Event'}</strong></div>
-                <div class="wiki-band">${new Date(item.ts).toLocaleString()} • ${(item.type || 'event')}</div>
-                <div>${item.detail || ''}</div>
+                <div><strong>${title}</strong></div>
+                <div class="wiki-band">${when} • ${type}</div>
+                <div>${detail}</div>
             </li>
-        `).join('')}</ul>`;
+        `;
+        }).join('')}</ul>`;
     }
 
     bindTimelineFilters() {
@@ -963,18 +976,24 @@ class OpenBotWorld {
             return '<div class="wiki-empty">No queued action sequence.</div>';
         }
 
-        const status = actionSequence.status || 'unknown';
-        const currentAction = actionSequence.currentAction?.type || 'none';
+        const status = this.escapeHtml(actionSequence.status || 'unknown');
+        const currentAction = this.escapeHtml(actionSequence.currentAction?.type || 'none');
         return `
             <div class="wiki-band">Queue: <strong>${status}</strong> • Current: <strong>${currentAction}</strong> • Remaining ticks: <strong>${Number(actionSequence.remainingTicks || 0)}</strong></div>
             <ul class="wiki-action-sequence-list">
-                ${actionSequence.sequence.map(step => `
+                ${actionSequence.sequence.map(step => {
+                    const stepType = this.escapeHtml(step.type || 'unknown');
+                    const stepStatus = this.escapeHtml(step.status || 'pending');
+                    const statusClass = this.safeClassToken(step.status || 'pending', 'pending');
+                    const requiredTicks = Number(step.requiredTicks || 1);
+                    return `
                     <li>
                         <span class="wiki-action-step-index">#${Number(step.index) + 1}</span>
-                        <span><strong>${step.type}</strong> <span class="wiki-band">(${Number(step.requiredTicks || 1)} tick${Number(step.requiredTicks || 1) === 1 ? '' : 's'})</span></span>
-                        <span class="wiki-action-status wiki-action-status-${String(step.status || 'pending').replace(/[^a-z]/g, '')}">${step.status || 'pending'}</span>
+                        <span><strong>${stepType}</strong> <span class="wiki-band">(${requiredTicks} tick${requiredTicks === 1 ? '' : 's'})</span></span>
+                        <span class="wiki-action-status wiki-action-status-${statusClass}">${stepStatus}</span>
                     </li>
-                `).join('')}
+                `;
+                }).join('')}
             </ul>
         `;
     }
@@ -1004,6 +1023,43 @@ class OpenBotWorld {
             ? timeline
             : timeline.filter(t => t.type === this.timelineFilter);
         const initialAvatarRotation = Number(wiki.avatarRotationDeg || 0);
+        const safeIdentityEntityId = this.escapeHtml(identity.entityId || 'Unknown');
+        const safeIdentityName = this.escapeHtml(identity.entityName || 'Unknown');
+        const safeIdentityNumericId = this.escapeHtml(identity.numericId ?? 'N/A');
+        const safeIdentityType = this.escapeHtml(identity.entityType || 'lobster');
+        const safeIdentityCreatedAt = this.escapeHtml(identity.createdAt ? new Date(identity.createdAt).toLocaleString() : 'Unknown');
+        const safeState = this.escapeHtml(currentState.state || 'unknown');
+        const safeAgentId = this.escapeHtml(currentState.agentId || 'N/A');
+        const safeLastAction = this.escapeHtml(currentState.lastAction?.type || 'N/A');
+        const interestChips = (cognition.interests || []).map(i => {
+            const interest = this.escapeHtml(i.interest || 'Unknown');
+            const weight = Number(i.weight || 0).toFixed(1);
+            return `<span class="wiki-chip">${interest}<span class="wiki-chip-weight">${weight}%</span></span>`;
+        }).join('') || '<span class="wiki-empty">No interests yet.</span>';
+        const longTermGoals = (cognition.longTermGoals || []).map(g => {
+            const label = this.escapeHtml(g.label || 'Untitled goal');
+            const source = this.escapeHtml(g.source || 'derived');
+            return `<li>${label} <span class="wiki-band">(${source})</span></li>`;
+        }).join('') || '<li>No long-term goals inferred yet.</li>';
+        const shortTermGoals = (cognition.shortTermGoals || []).map(g => {
+            const label = this.escapeHtml(g.label || 'Untitled goal');
+            const source = this.escapeHtml(g.source || 'derived');
+            return `<li>${label} <span class="wiki-band">(${source})</span></li>`;
+        }).join('') || '<li>No short-term goals inferred yet.</li>';
+        const relationshipItems = relationships.map(r => {
+            const entityId = this.escapeHtml(r.entityId || 'Unknown');
+            const messageCount = Number(r.messagesExchanged || 0);
+            const lastAt = this.escapeHtml(r.lastInteractionAt ? new Date(r.lastInteractionAt).toLocaleString() : 'N/A');
+            return `
+                        <li>
+                            <div><strong>${entityId}</strong> <span class="wiki-band">score ${Number(r.score || 0).toFixed(2)}</span></div>
+                            <div class="wiki-band">messages: ${messageCount} • last: ${lastAt}</div>
+                        </li>
+                    `;
+        }).join('') || '<li>No relationship signals yet.</li>';
+        const reputationValue = this.escapeHtml(social.reputationScore?.value ?? 0);
+        const reputationBand = this.escapeHtml(social.reputationScore?.band || 'Low');
+        const reputationExplain = this.escapeHtml(social.reputationScore?.explain || 'Derived from public behavior signals');
 
         body.innerHTML = `
             <div class="wiki-actions-row">
@@ -1027,11 +1083,11 @@ class OpenBotWorld {
             <section class="wiki-section">
                 <h3>Identity</h3>
                 <div class="wiki-grid">
-                    <div><span class="wiki-key">Entity ID:</span>${identity.entityId || 'Unknown'}</div>
-                    <div><span class="wiki-key">Name:</span>${identity.entityName || 'Unknown'}</div>
-                    <div><span class="wiki-key">Numeric ID:</span>${identity.numericId ?? 'N/A'}</div>
-                    <div><span class="wiki-key">Type:</span>${identity.entityType || 'lobster'}</div>
-                    <div><span class="wiki-key">Created:</span>${identity.createdAt ? new Date(identity.createdAt).toLocaleString() : 'Unknown'}</div>
+                    <div><span class="wiki-key">Entity ID:</span>${safeIdentityEntityId}</div>
+                    <div><span class="wiki-key">Name:</span>${safeIdentityName}</div>
+                    <div><span class="wiki-key">Numeric ID:</span>${safeIdentityNumericId}</div>
+                    <div><span class="wiki-key">Type:</span>${safeIdentityType}</div>
+                    <div><span class="wiki-key">Created:</span>${safeIdentityCreatedAt}</div>
                 </div>
             </section>
 
@@ -1039,9 +1095,9 @@ class OpenBotWorld {
                 <h3>Current State</h3>
                 <div class="wiki-grid">
                     <div><span class="wiki-key">Online:</span>${currentState.online ? 'Yes' : 'No'}</div>
-                    <div><span class="wiki-key">State:</span>${currentState.state || 'unknown'}</div>
-                    <div><span class="wiki-key">Agent ID:</span>${currentState.agentId || 'N/A'}</div>
-                    <div><span class="wiki-key">Last Action:</span>${currentState.lastAction?.type || 'N/A'}</div>
+                    <div><span class="wiki-key">State:</span>${safeState}</div>
+                    <div><span class="wiki-key">Agent ID:</span>${safeAgentId}</div>
+                    <div><span class="wiki-key">Last Action:</span>${safeLastAction}</div>
                 </div>
                 <div style="height:10px"></div>
                 <div>
@@ -1053,17 +1109,17 @@ class OpenBotWorld {
             <section class="wiki-section">
                 <h3>Cognition</h3>
                 <div class="wiki-interest-chips">
-                    ${(cognition.interests || []).map(i => `<span class="wiki-chip">${i.interest}<span class="wiki-chip-weight">${Number(i.weight || 0).toFixed(1)}%</span></span>`).join('') || '<span class="wiki-empty">No interests yet.</span>'}
+                    ${interestChips}
                 </div>
                 <div style="height:10px"></div>
                 <div class="wiki-grid">
                     <div>
                         <strong>Long-term goals</strong>
-                        <ul class="wiki-goals">${(cognition.longTermGoals || []).map(g => `<li>${g.label} <span class="wiki-band">(${g.source || 'derived'})</span></li>`).join('') || '<li>No long-term goals inferred yet.</li>'}</ul>
+                        <ul class="wiki-goals">${longTermGoals}</ul>
                     </div>
                     <div>
                         <strong>Short-term goals</strong>
-                        <ul class="wiki-goals">${(cognition.shortTermGoals || []).map(g => `<li>${g.label} <span class="wiki-band">(${g.source || 'derived'})</span></li>`).join('') || '<li>No short-term goals inferred yet.</li>'}</ul>
+                        <ul class="wiki-goals">${shortTermGoals}</ul>
                     </div>
                 </div>
             </section>
@@ -1071,12 +1127,7 @@ class OpenBotWorld {
             <section class="wiki-section">
                 <h3>Social</h3>
                 <ul class="wiki-relationship-list">
-                    ${relationships.map(r => `
-                        <li>
-                            <div><strong>${r.entityId}</strong> <span class="wiki-band">score ${Number(r.score || 0).toFixed(2)}</span></div>
-                            <div class="wiki-band">messages: ${r.messagesExchanged || 0} • last: ${r.lastInteractionAt ? new Date(r.lastInteractionAt).toLocaleString() : 'N/A'}</div>
-                        </li>
-                    `).join('') || '<li>No relationship signals yet.</li>'}
+                    ${relationshipItems}
                 </ul>
                 <div style="height:10px"></div>
                 <div class="wiki-graph-wrap">
@@ -1087,10 +1138,10 @@ class OpenBotWorld {
             <section class="wiki-section">
                 <h3>Reputation</h3>
                 <div class="wiki-reputation">
-                    <div class="wiki-score">${social.reputationScore?.value ?? 0}</div>
+                    <div class="wiki-score">${reputationValue}</div>
                     <div>
-                        <div><strong>${social.reputationScore?.band || 'Low'}</strong></div>
-                        <div class="wiki-band">${social.reputationScore?.explain || 'Derived from public behavior signals'}</div>
+                        <div><strong>${reputationBand}</strong></div>
+                        <div class="wiki-band">${reputationExplain}</div>
                     </div>
                 </div>
             </section>
