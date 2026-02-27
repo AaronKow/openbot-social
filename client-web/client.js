@@ -1676,6 +1676,13 @@ class OpenBotWorld {
     removeAgent(agentId) {
         const agent = this.agents.get(agentId);
         if (agent) {
+            if (this.chatBubbles.has(agentId)) {
+                const { bubble } = this.chatBubbles.get(agentId);
+                agent.mesh.remove(bubble);
+                this.disposeBubble(bubble);
+                this.chatBubbles.delete(agentId);
+            }
+
             this.scene.remove(agent.mesh);
             this.agents.delete(agentId);
             
@@ -1838,6 +1845,7 @@ class OpenBotWorld {
         if (this.chatBubbles.has(agentId)) {
             const oldBubble = this.chatBubbles.get(agentId).bubble;
             agent.mesh.remove(oldBubble);
+            this.disposeBubble(oldBubble);
         }
         
         // Create canvas texture for chat bubble
@@ -1898,6 +1906,18 @@ class OpenBotWorld {
         
         this.chatBubbles.set(agentId, { bubble, createdAt: Date.now() });
     }
+
+    disposeBubble(bubble) {
+        if (!bubble?.material) {
+            return;
+        }
+
+        if (bubble.material.map) {
+            bubble.material.map.dispose();
+        }
+
+        bubble.material.dispose();
+    }
     
     updateChatBubbles() {
         const now = Date.now();
@@ -1909,6 +1929,7 @@ class OpenBotWorld {
                 if (agent) {
                     agent.mesh.remove(data.bubble);
                 }
+                this.disposeBubble(data.bubble);
                 this.chatBubbles.delete(agentId);
             }
         }
