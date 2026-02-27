@@ -1260,13 +1260,12 @@ async function persistState() {
   // Save all agents to database every 5 seconds.
   if (!persistenceSchedulerMetrics.lastAgentSaveAt || now - persistenceSchedulerMetrics.lastAgentSaveAt >= PERSIST_AGENT_SAVE_INTERVAL_MS) {
     try {
-      for (const agent of worldState.agents.values()) {
-        await db.saveAgent(agent);
-      }
+      const agentsToPersist = Array.from(worldState.agents.values());
+      await db.saveAgentsBatch(agentsToPersist);
       persistenceSchedulerMetrics.lastAgentSaveAt = now;
-      console.log(`Persisted ${worldState.agents.size} agents to database`);
+      console.log(`Persisted ${agentsToPersist.length} agents to database`);
     } catch (error) {
-      console.error('Error persisting state:', error);
+      console.error('Error persisting state via batch save:', error);
     }
   }
 
