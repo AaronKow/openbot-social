@@ -9,6 +9,7 @@ const activitySummary = require('./activitySummary');
 const entityReflectionSummary = require('./entityReflectionSummary');
 const { buildEntityWikiPublic } = require('./entityWikiPublic');
 const { createRuntimeQueue, MAX_QUEUE_ACTIONS, MAX_QUEUE_TOTAL_TICKS } = require('./actionQueue');
+const { normalizeChatMessage, truncateForLog } = require('./chatMessage');
 
 const app = express();
 
@@ -444,10 +445,20 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
   try {
     const { agentId, message } = req.body;
     
-    if (!agentId || !message) {
+    if (!agentId) {
       return res.status(400).json({ 
         success: false, 
-        error: 'agentId and message are required' 
+        error: 'agentId is required' 
+      });
+    }
+
+    let normalizedMessage;
+    try {
+      normalizedMessage = normalizeChatMessage(message);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
       });
     }
     
@@ -455,8 +466,8 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     if (!agent) return;
     
     // Add chat message to history (with entity link for conversation tracking)
-    addChatMessage(agentId, agent.name, message, agent.entityId);
-    console.log(`${agent.name}: ${message}`);
+    addChatMessage(agentId, agent.name, normalizedMessage, agent.entityId);
+    console.log(`${agent.name}: ${truncateForLog(normalizedMessage)}`);
     
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
@@ -576,9 +587,22 @@ function applyQueueAction(agent, action) {
   }
 
   if (action.type === 'talk') {
-    addChatMessage(agent.id, agent.name, action.message, agent.entityId);
+    let normalizedMessage;
+    try {
+      normalizedMessage = normalizeChatMessage(action.message);
+    } catch (error) {
+      normalizedMessage = null;
+    }
+
+    if (!normalizedMessage) {
+      agent.lastAction = { type: 'talk', skipped: true, reason: 'invalid_message' };
+      markAgentUpdated(agent);
+      return;
+    }
+
+    addChatMessage(agent.id, agent.name, normalizedMessage, agent.entityId);
     agent.state = 'chatting';
-    agent.lastAction = { type: 'talk', message: action.message };
+    agent.lastAction = { type: 'talk', message: normalizedMessage };
     markAgentUpdated(agent);
     return;
   }
