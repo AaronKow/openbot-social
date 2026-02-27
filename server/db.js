@@ -733,64 +733,48 @@ async function cleanupExpiredSessions() {
 
 // Check and increment rate limit (returns { allowed: bool, remaining: int, resetAt: Date })
 async function checkRateLimit(identifier, actionType, maxRequests, windowSeconds) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    
-    const result = await client.query(
-      `SELECT request_count, window_start FROM rate_limits 
-       WHERE identifier = $1 AND action_type = $2`,
-      [identifier, actionType]
-    );
-    
-    const now = new Date();
-    
-    if (result.rows.length === 0) {
-      // First request - create entry
-      await client.query(
-        `INSERT INTO rate_limits (identifier, action_type, request_count, window_start)
-         VALUES ($1, $2, 1, $3)`,
-        [identifier, actionType, now]
-      );
-      await client.query('COMMIT');
-      return { allowed: true, remaining: maxRequests - 1, resetAt: new Date(now.getTime() + windowSeconds * 1000) };
-    }
-    
-    const row = result.rows[0];
-    const windowStart = new Date(row.window_start);
-    const windowEnd = new Date(windowStart.getTime() + windowSeconds * 1000);
-    
-    if (now > windowEnd) {
-      // Window expired - reset
-      await client.query(
-        `UPDATE rate_limits SET request_count = 1, window_start = $3
-         WHERE identifier = $1 AND action_type = $2`,
-        [identifier, actionType, now]
-      );
-      await client.query('COMMIT');
-      return { allowed: true, remaining: maxRequests - 1, resetAt: new Date(now.getTime() + windowSeconds * 1000) };
-    }
-    
-    if (row.request_count >= maxRequests) {
-      // Rate limit exceeded
-      await client.query('COMMIT');
-      return { allowed: false, remaining: 0, resetAt: windowEnd };
-    }
-    
-    // Increment counter
-    await client.query(
-      `UPDATE rate_limits SET request_count = request_count + 1
-       WHERE identifier = $1 AND action_type = $2`,
-      [identifier, actionType]
-    );
-    await client.query('COMMIT');
-    return { allowed: true, remaining: maxRequests - row.request_count - 1, resetAt: windowEnd };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+  const now = new Date();
+  const result = await pool.query(
+    `WITH attempt AS (
+      INSERT INTO rate_limits (identifier, action_type, request_count, window_start)
+      VALUES ($1, $2, 1, $3)
+      ON CONFLICT (identifier, action_type)
+      DO UPDATE SET
+        request_count = CASE
+          WHEN rate_limits.window_start <= ($3 - ($5 * INTERVAL '1 second')) THEN 1
+          ELSE rate_limits.request_count + 1
+        END,
+        window_start = CASE
+          WHEN rate_limits.window_start <= ($3 - ($5 * INTERVAL '1 second')) THEN $3
+          ELSE rate_limits.window_start
+        END
+      WHERE rate_limits.window_start <= ($3 - ($5 * INTERVAL '1 second'))
+         OR rate_limits.request_count < $4
+      RETURNING request_count, window_start, TRUE AS allowed
+    ),
+    blocked AS (
+      SELECT request_count, window_start, FALSE AS allowed
+      FROM rate_limits
+      WHERE identifier = $1
+        AND action_type = $2
+        AND NOT EXISTS (SELECT 1 FROM attempt)
+    )
+    SELECT request_count, window_start, allowed FROM attempt
+    UNION ALL
+    SELECT request_count, window_start, allowed FROM blocked
+    LIMIT 1`,
+    [identifier, actionType, now, maxRequests, windowSeconds]
+  );
+
+  const row = result.rows[0];
+  const windowStart = new Date(row.window_start);
+  const resetAt = new Date(windowStart.getTime() + windowSeconds * 1000);
+
+  return {
+    allowed: row.allowed,
+    remaining: row.allowed ? Math.max(0, maxRequests - row.request_count) : 0,
+    resetAt
+  };
 }
 
 // Clean up old rate limit entries
