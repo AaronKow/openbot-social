@@ -74,6 +74,7 @@ const PORT = process.env.PORT || 3001;
 const TICK_RATE = 30; // 30 updates per second
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
+const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
 
 // World State
 const worldState = {
@@ -83,8 +84,102 @@ const worldState = {
   tick: 0,
   startTime: Date.now(), // Server start time for uptime calculation
   worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
-  totalEntitiesCreated: 0 // Track total entities ever created
+  totalEntitiesCreated: 0, // Track total entities ever created
+  agentChangeHistory: new Map(), // tick -> { changed: Set<agentId>, removed: Set<agentId> }
+  deltaHistoryMinTick: 0
 };
+
+function getTickChangeBucket(tick) {
+  let bucket = worldState.agentChangeHistory.get(tick);
+  if (!bucket) {
+    bucket = {
+      changed: new Set(),
+      removed: new Set()
+    };
+    worldState.agentChangeHistory.set(tick, bucket);
+  }
+  return bucket;
+}
+
+function markAgentUpdated(agent) {
+  if (!agent) return;
+  agent.updatedAtTick = worldState.tick;
+  const bucket = getTickChangeBucket(worldState.tick);
+  bucket.removed.delete(agent.id);
+  bucket.changed.add(agent.id);
+}
+
+function markAgentRemoved(agentId) {
+  if (!agentId) return;
+  const bucket = getTickChangeBucket(worldState.tick);
+  bucket.changed.delete(agentId);
+  bucket.removed.add(agentId);
+}
+
+function pruneWorldStateDeltaHistory() {
+  const cutoffTick = Math.max(0, worldState.tick - WORLD_STATE_DELTA_TICK_WINDOW + 1);
+  for (const tick of worldState.agentChangeHistory.keys()) {
+    if (tick < cutoffTick) {
+      worldState.agentChangeHistory.delete(tick);
+    }
+  }
+  worldState.deltaHistoryMinTick = cutoffTick;
+}
+
+function getWorldStateMeta() {
+  const uptimeMs = Date.now() - worldState.startTime;
+  return {
+    tick: worldState.tick,
+    uptimeMs,
+    uptimeFormatted: formatUptime(uptimeMs),
+    serverStartTime: worldState.startTime,
+    worldCreatedAt: worldState.worldCreatedAt,
+    totalEntitiesCreated: worldState.totalEntitiesCreated,
+    objects: Array.from(worldState.objects.values())
+  };
+}
+
+function buildWorldStateDelta(sinceTick, limit) {
+  const changeTicks = Array.from(worldState.agentChangeHistory.keys())
+    .filter(tick => tick > sinceTick)
+    .sort((a, b) => a - b);
+
+  const changedAgentIds = new Set();
+  const removedAgentIds = new Set();
+
+  for (const tick of changeTicks) {
+    const bucket = worldState.agentChangeHistory.get(tick);
+    if (!bucket) continue;
+
+    for (const removedId of bucket.removed) {
+      changedAgentIds.delete(removedId);
+      removedAgentIds.add(removedId);
+    }
+    for (const changedId of bucket.changed) {
+      removedAgentIds.delete(changedId);
+      changedAgentIds.add(changedId);
+    }
+  }
+
+  const allChangedAgents = Array.from(changedAgentIds)
+    .map(agentId => worldState.agents.get(agentId))
+    .filter(Boolean)
+    .map(agent => agent.toJSON());
+
+  const limitedAgents = limit ? allChangedAgents.slice(0, limit) : allChangedAgents;
+
+  return {
+    ...getWorldStateMeta(),
+    agents: limitedAgents,
+    removedAgentIds: Array.from(removedAgentIds),
+    isDelta: true,
+    deltaFromTick: sinceTick,
+    deltaToTick: worldState.tick,
+    deltaHistoryMinTick: worldState.deltaHistoryMinTick,
+    changedAgentsTotal: allChangedAgents.length,
+    deltaTruncated: Boolean(limit && allChangedAgents.length > limit)
+  };
+}
 
 const actionQueues = new Map(); // entityId -> runtime queue
 const queueLifecyclePersistBuffer = new Map(); // queueId -> snapshot
@@ -113,6 +208,7 @@ class Agent {
     this.entityType = null; // Entity type (lobster, crab, etc.)
     this.entityName = null; // Unique entity name
     this.numericId = null; // Incremented numeric ID
+    this.updatedAtTick = 0;
   }
 
   toJSON() {
@@ -127,7 +223,8 @@ class Agent {
       entityId: this.entityId,
       entityType: this.entityType,
       entityName: this.entityName,
-      numericId: this.numericId
+      numericId: this.numericId,
+      updatedAtTick: this.updatedAtTick
     };
   }
 }
@@ -277,12 +374,14 @@ app.post('/spawn', requireAuth, async (req, res) => {
       agent.entityName = entity.entity_name || null;
       agent.numericId = entity.numeric_id || null;
       worldState.agents.set(agentId, agent);
+      markAgentUpdated(agent);
       
       console.log(`Entity spawned: ${entityId} as agent ${agentId}`);
     } else {
       // Update existing agent
       agent.lastUpdate = Date.now();
       agent.connected = true;
+      markAgentUpdated(agent);
       console.log(`Entity reconnected: ${entityId}`);
     }
     
@@ -328,6 +427,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     }
     agent.state = 'moving';
     agent.lastUpdate = Date.now();
+    markAgentUpdated(agent);
     
     res.json({ success: true });
   } catch (error) {
@@ -359,6 +459,7 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     console.log(`${agent.name}: ${message}`);
     
     agent.lastUpdate = Date.now();
+    markAgentUpdated(agent);
     
     res.json({ success: true });
   } catch (error) {
@@ -387,6 +488,7 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
     
     agent.lastAction = action;
     agent.lastUpdate = Date.now();
+    markAgentUpdated(agent);
     
     res.json({ success: true });
   } catch (error) {
@@ -469,6 +571,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'moving';
     agent.lastAction = { type: 'move', x: action.x, z: action.z };
+    markAgentUpdated(agent);
     return;
   }
 
@@ -476,6 +579,7 @@ function applyQueueAction(agent, action) {
     addChatMessage(agent.id, agent.name, action.message, agent.entityId);
     agent.state = 'chatting';
     agent.lastAction = { type: 'talk', message: action.message };
+    markAgentUpdated(agent);
     return;
   }
 
@@ -483,6 +587,7 @@ function applyQueueAction(agent, action) {
   delete payload.requiredTicks;
   agent.lastAction = payload;
   agent.state = 'acting';
+  markAgentUpdated(agent);
 }
 
 async function processActionQueues() {
@@ -761,8 +866,8 @@ app.get('/ping', (req, res) => {
 // Get world state
 app.get('/world-state', (req, res) => {
   try {
-    const { agentId } = req.query;
-    
+    const { agentId, sinceTick, delta, limit } = req.query;
+
     // Update agent's last seen time if provided
     if (agentId) {
       const agent = worldState.agents.get(agentId);
@@ -770,17 +875,35 @@ app.get('/world-state', (req, res) => {
         agent.lastUpdate = Date.now();
       }
     }
-    
-    const uptimeMs = Date.now() - worldState.startTime;
+
+    const wantsDelta = String(delta).toLowerCase() === 'true' || sinceTick !== undefined;
+    const parsedSinceTick = Number.parseInt(String(sinceTick), 10);
+    const hasValidSinceTick = Number.isFinite(parsedSinceTick) && parsedSinceTick >= 0;
+    const parsedLimit = Number.parseInt(String(limit), 10);
+    const effectiveLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
+
+    if (wantsDelta && hasValidSinceTick) {
+      const windowMissed = parsedSinceTick < worldState.deltaHistoryMinTick;
+      if (!windowMissed) {
+        return res.json(buildWorldStateDelta(parsedSinceTick, effectiveLimit));
+      }
+
+      const fullPayload = {
+        ...getWorldStateMeta(),
+        agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
+        isDelta: false,
+        deltaRequested: true,
+        deltaFromTick: parsedSinceTick,
+        deltaWindowMissed: true,
+        deltaHistoryMinTick: worldState.deltaHistoryMinTick,
+        removedAgentIds: []
+      };
+      return res.json(fullPayload);
+    }
+
     res.json({
-      tick: worldState.tick,
-      uptimeMs: uptimeMs,
-      uptimeFormatted: formatUptime(uptimeMs),
-      serverStartTime: worldState.startTime,
-      worldCreatedAt: worldState.worldCreatedAt,
-      totalEntitiesCreated: worldState.totalEntitiesCreated,
-      agents: Array.from(worldState.agents.values()).map(a => a.toJSON()),
-      objects: Array.from(worldState.objects.values())
+      ...getWorldStateMeta(),
+      agents: Array.from(worldState.agents.values()).map(a => a.toJSON())
     });
   } catch (error) {
     console.error('Error getting world state:', error);
@@ -877,6 +1000,7 @@ app.delete('/disconnect/:agentId', requireAuth, (req, res) => {
     }
 
     console.log(`Agent disconnected: ${agent.name} (${agentId})`);
+    markAgentRemoved(agentId);
     worldState.agents.delete(agentId);
     res.json({ success: true });
   } catch (error) {
@@ -891,6 +1015,7 @@ app.delete('/disconnect/:agentId', requireAuth, (req, res) => {
 // Game loop - Update world state periodically
 async function gameLoop() {
   worldState.tick++;
+  pruneWorldStateDeltaHistory();
 
   await processActionQueues();
 
@@ -899,6 +1024,7 @@ async function gameLoop() {
   for (const [agentId, agent] of worldState.agents.entries()) {
     if (now - agent.lastUpdate > AGENT_TIMEOUT) {
       console.log(`Cleaning up inactive agent: ${agent.name} (${agentId})`);
+      markAgentRemoved(agentId);
       worldState.agents.delete(agentId);
       
       // Delete from database if enabled
@@ -914,8 +1040,9 @@ async function gameLoop() {
 
   // Update agent states (idle if no recent actions)
   for (const agent of worldState.agents.values()) {
-    if (now - agent.lastUpdate > 1000) {
+    if (now - agent.lastUpdate > 1000 && agent.state !== 'idle') {
       agent.state = 'idle';
+      markAgentUpdated(agent);
     }
   }
 }

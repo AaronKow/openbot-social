@@ -12,6 +12,8 @@ class OpenBotWorld {
         this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
         this.pollInterval = config.pollInterval;
+        this.worldTick = null; // Last successfully applied world tick
+        this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
@@ -1402,9 +1404,15 @@ class OpenBotWorld {
             await this.testConnection();
             return;
         }
-        
+
         try {
-            const response = await fetch(`${this.apiBase}/world-state`);
+            const params = new URLSearchParams();
+            if (this.worldDeltaEnabled && Number.isFinite(this.worldTick)) {
+                params.set('sinceTick', String(this.worldTick));
+                params.set('delta', 'true');
+            }
+            const url = `${this.apiBase}/world-state${params.toString() ? `?${params.toString()}` : ''}`;
+            const response = await fetch(url);
             if (response.ok) {
                 const data = await response.json();
                 this.handleWorldState(data);
@@ -1450,37 +1458,65 @@ class OpenBotWorld {
     handleWorldState(data) {
         this.lastWorldUpdateAt = Date.now();
         this.updateLastUpdateLabel();
-        
+
         this.updateWorldClockAnchorFromPayload(data);
         this.updateWorldClockLabel();
         if (data.totalEntitiesCreated !== undefined) {
             this.totalEntitiesCreated = data.totalEntitiesCreated;
         }
 
-        // Get current agent IDs from the server
+        const payloadTick = Number.isFinite(Number(data.tick)) ? Number(data.tick) : null;
+        if (payloadTick !== null) {
+            this.worldTick = payloadTick;
+        }
+
+        const isDeltaPayload = data.isDelta === true;
+        const deltaWindowMissed = data.deltaWindowMissed === true;
         const agents = Array.isArray(data.agents) ? data.agents : [];
-        const serverAgentIds = new Set();
-        agents.forEach(agent => {
-            serverAgentIds.add(agent.id);
-            
-            if (this.agents.has(agent.id)) {
-                // Update existing agent
-                this.updateAgentPosition(agent.id, agent.position, agent.rotation);
-                this.agents.get(agent.id).data = agent;
-            } else {
-                // Add new agent
-                this.addAgent(agent);
-            }
-        });
-        
-        // Remove agents that are no longer on the server
-        const localAgentIds = Array.from(this.agents.keys());
-        localAgentIds.forEach(agentId => {
-            if (!serverAgentIds.has(agentId)) {
-                this.removeAgent(agentId);
-            }
-        });
-        
+
+        if (isDeltaPayload && !deltaWindowMissed) {
+            agents.forEach(agent => {
+                if (this.agents.has(agent.id)) {
+                    this.updateAgentPosition(agent.id, agent.position, agent.rotation);
+                    this.agents.get(agent.id).data = agent;
+                } else {
+                    this.addAgent(agent);
+                }
+            });
+
+            const removedAgentIds = Array.isArray(data.removedAgentIds) ? data.removedAgentIds : [];
+            removedAgentIds.forEach(agentId => {
+                if (this.agents.has(agentId)) {
+                    this.removeAgent(agentId);
+                }
+            });
+        } else {
+            // Full sync (default path + fallback if delta window is missed)
+            const serverAgentIds = new Set();
+            agents.forEach(agent => {
+                serverAgentIds.add(agent.id);
+
+                if (this.agents.has(agent.id)) {
+                    this.updateAgentPosition(agent.id, agent.position, agent.rotation);
+                    this.agents.get(agent.id).data = agent;
+                } else {
+                    this.addAgent(agent);
+                }
+            });
+
+            const localAgentIds = Array.from(this.agents.keys());
+            localAgentIds.forEach(agentId => {
+                if (!serverAgentIds.has(agentId)) {
+                    this.removeAgent(agentId);
+                }
+            });
+        }
+
+        // Enable delta polling after first successful full sync
+        if (!isDeltaPayload || deltaWindowMissed) {
+            this.worldDeltaEnabled = true;
+        }
+
         this.updateStatus();
     }
     
