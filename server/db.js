@@ -180,6 +180,11 @@ async function initDatabase() {
     `);
 
     await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp_id
+      ON chat_messages(timestamp DESC, id DESC)
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_agents_updated_at 
       ON agents(updated_at DESC)
     `);
@@ -513,16 +518,39 @@ async function getChatMessagesBefore(beforeTimestamp, limit = 20) {
   })).reverse(); // Return in chronological order (oldest first)
 }
 
-// Clean up old chat messages (keep only last 1000)
+// Clean up old chat messages (keep only last 10000)
 async function cleanupOldChatMessages() {
-  await pool.query(`
-    DELETE FROM chat_messages 
-    WHERE id NOT IN (
-      SELECT id FROM chat_messages 
-      ORDER BY timestamp DESC 
-      LIMIT 1000
+  const retainedRows = 10000;
+  const deleteBatchSize = 5000;
+
+  const cutoffResult = await pool.query(
+    `SELECT timestamp, id
+     FROM chat_messages
+     ORDER BY timestamp DESC, id DESC
+     OFFSET $1
+     LIMIT 1`,
+    [retainedRows - 1]
+  );
+
+  if (cutoffResult.rows.length === 0) {
+    return;
+  }
+
+  const { timestamp: cutoffTimestamp, id: cutoffId } = cutoffResult.rows[0];
+
+  await pool.query(
+    `WITH deletable AS (
+      SELECT id
+      FROM chat_messages
+      WHERE timestamp < $1
+         OR (timestamp = $1 AND id < $2)
+      ORDER BY timestamp ASC, id ASC
+      LIMIT $3
     )
-  `);
+    DELETE FROM chat_messages
+    WHERE id IN (SELECT id FROM deletable)`,
+    [cutoffTimestamp, cutoffId, deleteBatchSize]
+  );
 }
 
 // Save world object
