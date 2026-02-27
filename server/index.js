@@ -56,7 +56,12 @@ const entityRouter = createEntityRouter(db, rateLimiters);
 app.use(entityRouter);
 
 // Helper to get memory stores from entity router (for non-DB mode)
-const getMemorySessions = () => entityRouter._memorySessions;
+const getMemorySessions = () => {
+  if (!entityRouter._memorySessions) {
+    entityRouter._memorySessions = new Map();
+  }
+  return entityRouter._memorySessions;
+};
 const getMemoryEntities = () => entityRouter._memoryEntities;
 
 // Auth middleware instances
@@ -857,21 +862,23 @@ app.get('/chat', async (req, res) => {
 });
 
 // Disconnect agent (optional cleanup endpoint)
-app.delete('/disconnect/:agentId', (req, res) => {
+app.delete('/disconnect/:agentId', requireAuth, (req, res) => {
   try {
     const { agentId } = req.params;
-    
-    const agent = worldState.agents.get(agentId);
-    if (agent) {
-      console.log(`Agent disconnected: ${agent.name} (${agentId})`);
-      worldState.agents.delete(agentId);
-      res.json({ success: true });
-    } else {
-      res.status(404).json({ 
-        success: false, 
-        error: 'Agent not found' 
+
+    const agent = getOwnedAgentOrReject(req, res, agentId);
+    if (!agent) return;
+
+    if (agent.entityId !== req.entityId) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden'
       });
     }
+
+    console.log(`Agent disconnected: ${agent.name} (${agentId})`);
+    worldState.agents.delete(agentId);
+    res.json({ success: true });
   } catch (error) {
     console.error('Error disconnecting agent:', error);
     res.status(500).json({ 
@@ -958,10 +965,14 @@ async function persistState() {
 }
 
 // Start game loop
-setInterval(() => {
+const gameLoopInterval = setInterval(() => {
   gameLoop();
   persistState();
 }, 1000 / TICK_RATE);
+
+if (typeof gameLoopInterval.unref === 'function') {
+  gameLoopInterval.unref();
+}
 
 // Status API endpoint
 app.get('/status', async (req, res) => {
@@ -1265,4 +1276,12 @@ async function startServer() {
   }
 }
 
-startServer();
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  app,
+  worldState,
+  getMemorySessions
+};
