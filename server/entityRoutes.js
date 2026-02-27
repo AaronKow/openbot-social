@@ -46,6 +46,40 @@ if (typeof challengeCleanupInterval.unref === 'function') {
 function createEntityRouter(db, rateLimiters = {}) {
   const router = express.Router();
 
+  function mapUniqueViolationError(error, context = {}) {
+    if (!error || error.code !== '23505') {
+      return null;
+    }
+
+    const constraintHint = [error.constraint, error.detail, error.message]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    if (constraintHint.includes('entity_id')) {
+      return {
+        success: false,
+        error: 'entity_id already exists. Each entity must have a unique ID.'
+      };
+    }
+
+    if (constraintHint.includes('entity_name')) {
+      return {
+        success: false,
+        error: `entity_name '${context.entity_name}' already exists. Each entity must have a unique name.`
+      };
+    }
+
+    if (constraintHint.includes('public_key_fingerprint')) {
+      return {
+        success: false,
+        error: 'This public key is already registered to another entity.'
+      };
+    }
+
+    return null;
+  }
+
   // ============= ENTITY CREATION =============
 
   /**
@@ -65,6 +99,7 @@ function createEntityRouter(db, rateLimiters = {}) {
   router.post('/entity/create', 
     rateLimiters.entityCreate || noopMiddleware,
     async (req, res) => {
+      let resolvedEntityName;
       try {
         const { entity_id, entity_type = 'lobster', public_key, entity_name } = req.body;
 
@@ -85,7 +120,7 @@ function createEntityRouter(db, rateLimiters = {}) {
         }
 
         // entity_name can be provided explicitly; if not, it equals entity_id.
-        const resolvedEntityName = (entity_name || entity_id).substring(0, 64);
+        resolvedEntityName = (entity_name || entity_id).substring(0, 64);
 
         if (!/^[a-zA-Z0-9_-]{3,64}$/.test(resolvedEntityName)) {
           return res.status(400).json({
@@ -219,6 +254,13 @@ function createEntityRouter(db, rateLimiters = {}) {
           });
         }
       } catch (error) {
+        const uniqueConstraintResponse = mapUniqueViolationError(error, {
+          entity_name: resolvedEntityName
+        });
+        if (uniqueConstraintResponse) {
+          return res.status(409).json(uniqueConstraintResponse);
+        }
+
         console.error('Error creating entity:', error);
         res.status(500).json({
           success: false,
