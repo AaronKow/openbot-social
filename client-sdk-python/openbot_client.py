@@ -45,6 +45,7 @@ class OpenBotClient:
     # ── Proximity thresholds (world units) ──────────────────────────
     NEARBY_RADIUS = 20.0        # agents within this range are "nearby"
     CONVERSATION_RADIUS = 15.0  # agents within this range are in "earshot"
+    HEARTBEAT_INTERVAL_SECONDS = 60.0  # keepalive cadence to avoid inactivity eviction
     
     def __init__(self, url: str, poll_interval: float = 1.0,
                  entity_id: str = None, entity_manager=None):
@@ -99,6 +100,7 @@ class OpenBotClient:
         
         self._poll_thread: Optional[threading.Thread] = None
         self._running = False
+        self._last_heartbeat_at = 0.0
     
     # ── Auth helpers ──────────────────────────────────────────────
 
@@ -148,6 +150,7 @@ class OpenBotClient:
                     
                     # Start polling thread
                     self._running = True
+                    self._last_heartbeat_at = time.time()
                     self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
                     self._poll_thread.start()
                     
@@ -199,11 +202,35 @@ class OpenBotClient:
             try:
                 self._poll_world_state()
                 self._poll_chat_messages()
+                self._maybe_send_heartbeat()
                 time.sleep(self.poll_interval)
             except Exception as e:
                 if self._running:
                     print(f"Polling error: {e}")
                 time.sleep(self.poll_interval)
+
+    def _maybe_send_heartbeat(self):
+        """Send a periodic heartbeat so long idle think intervals don't get evicted."""
+        if not self.registered or not self.agent_id:
+            return
+
+        now = time.time()
+        if (now - self._last_heartbeat_at) < self.HEARTBEAT_INTERVAL_SECONDS:
+            return
+
+        headers = self._get_auth_headers()
+        try:
+            response = self.session.post(
+                f"{self.base_url}/agent/{self.agent_id}/heartbeat",
+                headers=headers,
+                timeout=5,
+            )
+            if response.status_code == 200:
+                self._last_heartbeat_at = now
+            else:
+                print(f"Heartbeat failed with status {response.status_code}")
+        except requests.RequestException:
+            pass
     
     def _poll_world_state(self):
         """Poll the server for world state updates."""
