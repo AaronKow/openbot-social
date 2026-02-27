@@ -59,7 +59,7 @@ class OpenBotWorld {
         this.worldPollFailures = 0;
         this.chatPollFailures = 0;
         this.maxPollBackoffMs = 30_000;
-        this.hiddenPollIntervalMs = Math.max(this.pollInterval * 8, 30_000);
+        this.hiddenPollIntervalMs = Math.max(this.pollInterval, 10_000);
         this.isPageHidden = document.visibilityState === 'hidden';
 
         // Contextual menu + wiki state
@@ -1375,23 +1375,27 @@ class OpenBotWorld {
         // Initial connection test
         this.testConnection();
 
-        document.addEventListener('visibilitychange', () => {
-            this.isPageHidden = document.visibilityState === 'hidden';
-
-            if (this.isPageHidden) {
-                this.scheduleWorldPoll(this.hiddenPollIntervalMs);
-                this.scheduleChatPoll(this.hiddenPollIntervalMs);
-                return;
-            }
-
-            // Resume quickly on return so the UI catches up
-            this.scheduleWorldPoll(0);
-            this.scheduleChatPoll(0);
-        });
+        document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
         
         // Start polling loops
         this.scheduleWorldPoll(0);
         this.scheduleChatPoll(0);
+    }
+
+    handleVisibilityChange() {
+        this.isPageHidden = document.visibilityState === 'hidden';
+
+        if (this.isPageHidden) {
+            // Keep polling in background, but reduce frequency for efficiency.
+            this.scheduleWorldPoll(this.hiddenPollIntervalMs);
+            this.scheduleChatPoll(this.hiddenPollIntervalMs);
+            return;
+        }
+
+        // Restore normal visible-tab cadence and fetch world state immediately.
+        this.scheduleWorldPoll(this.pollInterval);
+        this.scheduleChatPoll(this.pollInterval * 2);
+        this.pollWorldState();
     }
 
     getAdaptivePollDelay(baseInterval, failureCount) {
