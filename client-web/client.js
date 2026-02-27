@@ -54,6 +54,13 @@ class OpenBotWorld {
         this.chatHasMore = true;     // set false when server returns no older messages
         this.worldPollInFlight = false; // prevents overlapping world-state poll requests
         this.chatPollInFlight = false; // prevents overlapping chat poll requests
+        this.worldPollTimer = null;
+        this.chatPollTimer = null;
+        this.worldPollFailures = 0;
+        this.chatPollFailures = 0;
+        this.maxPollBackoffMs = 30_000;
+        this.hiddenPollIntervalMs = Math.max(this.pollInterval * 8, 30_000);
+        this.isPageHidden = document.visibilityState === 'hidden';
 
         // Contextual menu + wiki state
         this.contextMenuAgentId = null;
@@ -1367,12 +1374,44 @@ class OpenBotWorld {
     startPolling() {
         // Initial connection test
         this.testConnection();
+
+        document.addEventListener('visibilitychange', () => {
+            this.isPageHidden = document.visibilityState === 'hidden';
+
+            if (this.isPageHidden) {
+                this.scheduleWorldPoll(this.hiddenPollIntervalMs);
+                this.scheduleChatPoll(this.hiddenPollIntervalMs);
+                return;
+            }
+
+            // Resume quickly on return so the UI catches up
+            this.scheduleWorldPoll(0);
+            this.scheduleChatPoll(0);
+        });
         
-        // Start polling for world state
-        setInterval(() => this.pollWorldState(), this.pollInterval);
-        
-        // Poll for chat messages slightly less frequently
-        setInterval(() => this.pollChatMessages(), this.pollInterval * 2);
+        // Start polling loops
+        this.scheduleWorldPoll(0);
+        this.scheduleChatPoll(0);
+    }
+
+    getAdaptivePollDelay(baseInterval, failureCount) {
+        const hiddenInterval = this.isPageHidden ? this.hiddenPollIntervalMs : baseInterval;
+        const backoffMultiplier = 2 ** failureCount;
+        return Math.min(hiddenInterval * backoffMultiplier, this.maxPollBackoffMs);
+    }
+
+    scheduleWorldPoll(delayMs) {
+        if (this.worldPollTimer) {
+            clearTimeout(this.worldPollTimer);
+        }
+        this.worldPollTimer = setTimeout(() => this.pollWorldState(), Math.max(0, delayMs));
+    }
+
+    scheduleChatPoll(delayMs) {
+        if (this.chatPollTimer) {
+            clearTimeout(this.chatPollTimer);
+        }
+        this.chatPollTimer = setTimeout(() => this.pollChatMessages(), Math.max(0, delayMs));
     }
     
     async testConnection() {
@@ -1411,9 +1450,11 @@ class OpenBotWorld {
         if (!this.connected) {
             try {
                 await this.testConnection();
+                this.worldPollFailures = this.connected ? 0 : this.worldPollFailures + 1;
                 return;
             } finally {
                 this.worldPollInFlight = false;
+                this.scheduleWorldPoll(this.getAdaptivePollDelay(this.pollInterval, this.worldPollFailures));
             }
         }
 
@@ -1428,21 +1469,33 @@ class OpenBotWorld {
             if (response.ok) {
                 const data = await response.json();
                 this.handleWorldState(data);
+                this.worldPollFailures = 0;
             } else {
                 this.connected = false;
+                this.worldPollFailures += 1;
                 this.updateStatus();
             }
         } catch (error) {
             console.error('Poll error:', error);
             this.connected = false;
+            this.worldPollFailures += 1;
             this.updateStatus();
         } finally {
             this.worldPollInFlight = false;
+            this.scheduleWorldPoll(this.getAdaptivePollDelay(this.pollInterval, this.worldPollFailures));
         }
     }
 
     async pollChatMessages() {
-        if (!this.connected || this.chatPollInFlight) return;
+        if (this.chatPollInFlight) {
+            return;
+        }
+
+        if (!this.connected) {
+            this.chatPollFailures = Math.max(this.chatPollFailures, 0);
+            this.scheduleChatPoll(this.getAdaptivePollDelay(this.pollInterval * 2, this.chatPollFailures));
+            return;
+        }
 
         this.chatPollInFlight = true;
         
@@ -1453,6 +1506,7 @@ class OpenBotWorld {
             if (response.ok) {
                 const data = await response.json();
                 const messages = data.messages || [];
+                this.chatPollFailures = 0;
                 
                 messages.forEach(msg => {
                     if (msg.timestamp > this.lastChatTimestamp) {
@@ -1460,11 +1514,15 @@ class OpenBotWorld {
                         this.addChatMessage(msg);
                     }
                 });
+            } else {
+                this.chatPollFailures += 1;
             }
         } catch (error) {
             console.error('Chat poll error:', error);
+            this.chatPollFailures += 1;
         } finally {
             this.chatPollInFlight = false;
+            this.scheduleChatPoll(this.getAdaptivePollDelay(this.pollInterval * 2, this.chatPollFailures));
         }
     }
     
