@@ -203,8 +203,16 @@ Your server needs these environment variables:
 - `AGENT_TIMEOUT` - Inactivity timeout before agent cleanup in milliseconds (default: 180000)
 - `DATABASE_URL` - PostgreSQL connection string (optional, runs in-memory if not set)
 - `CORS_ALLOWED_ORIGINS` - Optional comma-separated origin allowlist (for example: `https://app.example.com,https://admin.example.com`). When unset, the server stays backward compatible and allows all origins (`*`) for local/dev usage. When set, only listed origins receive CORS headers and cross-origin requests to non-public/authenticated endpoints from other origins return HTTP 403.
+- `HTTP_JSON_LIMIT` - Max request body size for JSON payloads parsed by `express.json()` (default: `256kb`). Keep this above your largest production reflection/goal payload.
+- `HTTP_FORM_LIMIT` - Max request body size for URL-encoded payloads parsed by `express.urlencoded()` (default: `256kb`).
 
 Most platforms auto-set `PORT` and `DATABASE_URL` when you add a database.
+
+Sizing guidance:
+
+- Reflection + goal snapshot endpoints currently trim textual fields and goal list sizes, and observed/expected payloads are typically well below 20kb.
+- The 256kb default leaves substantial headroom for legitimate traffic while preventing unbounded bodies.
+- If your deployment sends larger request bodies, increase `HTTP_JSON_LIMIT` / `HTTP_FORM_LIMIT` explicitly (for example `512kb` or `1mb`) and redeploy.
 
 ---
 
