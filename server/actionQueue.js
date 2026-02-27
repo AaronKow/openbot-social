@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const { normalizeChatMessage } = require('./chatMessage');
 
 const MAX_QUEUE_ACTIONS = Number(process.env.ACTION_QUEUE_MAX_ACTIONS || 8);
 const MAX_QUEUE_TOTAL_TICKS = Number(process.env.ACTION_QUEUE_MAX_TOTAL_TICKS || 30);
@@ -47,11 +48,11 @@ function validateActionItem(raw) {
   }
 
   if (type === 'talk') {
-    const message = String(raw.message || '').trim();
-    if (!message) {
-      throw new Error('talk requires non-empty message');
+    try {
+      action.message = normalizeChatMessage(raw.message);
+    } catch (error) {
+      throw new Error(`talk ${error.message}`);
     }
-    action.message = message.slice(0, 280);
   }
 
   if (type === 'emoji') {
