@@ -518,6 +518,21 @@ async function getChatMessagesBefore(beforeTimestamp, limit = 20) {
   })).reverse(); // Return in chronological order (oldest first)
 }
 
+// Get up to `limit` messages with timestamp > sinceTimestamp (for polling catch-up)
+async function getChatMessagesAfter(sinceTimestamp, limit = 100) {
+  const result = await pool.query(
+    'SELECT * FROM chat_messages WHERE timestamp > $1 ORDER BY timestamp ASC, id ASC LIMIT $2',
+    [sinceTimestamp, limit]
+  );
+
+  return result.rows.map(row => ({
+    agentId: row.agent_id,
+    agentName: row.agent_name,
+    message: row.message,
+    timestamp: parseInt(row.timestamp, 10)
+  }));
+}
+
 // Clean up old chat messages (keep only last 10000)
 async function cleanupOldChatMessages() {
   const retainedRows = 10000;
@@ -1333,6 +1348,7 @@ module.exports = {
   saveChatMessage,
   loadRecentChatMessages,
   getChatMessagesBefore,
+  getChatMessagesAfter,
   cleanupOldChatMessages,
   saveWorldObject,
   loadAllWorldObjects,
