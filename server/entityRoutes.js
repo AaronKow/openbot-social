@@ -459,6 +459,25 @@ function createEntityRouter(db, rateLimiters = {}) {
 
         const entityId = verification.payload.sub;
 
+        // Verify the old token is still an active stored session before rotating
+        if (process.env.DATABASE_URL) {
+          const session = await db.getSession(oldToken);
+          if (!session) {
+            return res.status(401).json({
+              success: false,
+              error: 'Session not found or revoked'
+            });
+          }
+        } else {
+          const session = router._memorySessions?.get(oldToken);
+          if (!session || session.revoked || new Date(session.expires_at) < new Date()) {
+            return res.status(401).json({
+              success: false,
+              error: 'Session not found or revoked'
+            });
+          }
+        }
+
         // Revoke old session
         if (process.env.DATABASE_URL) {
           await db.revokeSession(oldToken);
