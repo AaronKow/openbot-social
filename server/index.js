@@ -1083,8 +1083,31 @@ app.get('/chat', async (req, res) => {
 
     // ---- Lazy-loading: return up to `limit` messages older than `before` ----
     if (before) {
-      const beforeTime = parseInt(before);
-      const pageSize = Math.min(parseInt(limit) || 20, 50); // cap at 50 per request
+      const beforeRaw = String(before).trim();
+      const beforeTime = Number.parseInt(beforeRaw, 10);
+      if (!Number.isFinite(beforeTime) || beforeTime <= 0 || !/^\d+$/.test(beforeRaw)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid `before` query parameter: expected a positive integer timestamp'
+        });
+      }
+
+      let pageSize = 20;
+      if (limit !== undefined) {
+        const limitRaw = String(limit).trim();
+        const parsedLimit = Number.parseInt(limitRaw, 10);
+
+        if (!Number.isFinite(parsedLimit) || !/^\d+$/.test(limitRaw)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid `limit` query parameter: expected a numeric value'
+          });
+        }
+
+        pageSize = parsedLimit;
+      }
+
+      pageSize = Math.min(Math.max(pageSize, 1), 50); // clamp to safe per-request bounds
 
       // Search the in-memory store first (most recent 100 msgs)
       let messages = worldState.chatMessages.filter(msg => msg.timestamp < beforeTime);
