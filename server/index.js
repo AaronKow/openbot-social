@@ -575,6 +575,32 @@ function findAgentByEntityId(entityId) {
   return null;
 }
 
+function findAgentByName(name) {
+  const targetName = String(name || '').trim();
+  if (!targetName) return null;
+  for (const candidate of worldState.agents.values()) {
+    if (candidate.name === targetName) return candidate;
+  }
+  return null;
+}
+
+function buildDeterministicNearbyTarget(agent, targetAgent) {
+  const seed = `${agent?.id || ''}:${targetAgent?.id || ''}:${targetAgent?.name || ''}`;
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash * 31) + seed.charCodeAt(i)) >>> 0;
+  }
+
+  const offsetX = ((hash & 0xff) / 255 - 0.5) * 2;
+  const offsetZ = (((hash >> 8) & 0xff) / 255 - 0.5) * 2;
+
+  return validatePosition({
+    x: targetAgent.position.x + offsetX,
+    y: targetAgent.position.y,
+    z: targetAgent.position.z + offsetZ
+  });
+}
+
 function applyQueueAction(agent, action) {
   if (!agent || !action) return;
 
@@ -610,6 +636,31 @@ function applyQueueAction(agent, action) {
     addChatMessage(agent.id, agent.name, normalizedMessage, agent.entityId);
     agent.state = 'chatting';
     agent.lastAction = { type: 'talk', message: normalizedMessage };
+    markAgentUpdated(agent);
+    return;
+  }
+
+  if (action.type === 'move_to_agent') {
+    const targetAgent = findAgentByName(action.agent_name);
+    if (!targetAgent) {
+      agent.lastAction = {
+        type: 'move_to_agent',
+        agent_name: action.agent_name,
+        skipped: true,
+        reason: 'target_agent_not_found'
+      };
+      markAgentUpdated(agent);
+      return;
+    }
+
+    const targetPosition = buildDeterministicNearbyTarget(agent, targetAgent);
+    agent.position = clampMovement(agent.position, targetPosition);
+    agent.state = 'moving';
+    agent.lastAction = {
+      type: 'move_to_agent',
+      agent_name: action.agent_name,
+      targetAgentId: targetAgent.id
+    };
     markAgentUpdated(agent);
     return;
   }
@@ -1231,8 +1282,10 @@ async function persistState() {
 }
 
 // Start game loop and persistence with non-overlapping async schedulers
-scheduleNextTick();
-schedulePersistRun();
+if (process.env.NODE_ENV !== 'test') {
+  scheduleNextTick();
+  schedulePersistRun();
+}
 
 // Status API endpoint
 app.get('/status', async (req, res) => {
@@ -1594,5 +1647,12 @@ if (require.main === module) {
 module.exports = {
   app,
   worldState,
-  getMemorySessions
+  getMemorySessions,
+  __testHooks: {
+    applyQueueAction,
+    findAgentByName,
+    buildDeterministicNearbyTarget,
+    clampMovement,
+    validatePosition
+  }
 };
