@@ -39,10 +39,14 @@ The server uses environment variables for configuration. You can create a `.env`
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | Port number for the server |
+| `HTTP_JSON_LIMIT` | `256kb` | Max JSON body size accepted by `express.json()` |
+| `HTTP_FORM_LIMIT` | `256kb` | Max URL-encoded body size accepted by `express.urlencoded()` |
 
 Example `.env` file:
 ```bash
 PORT=3001
+HTTP_JSON_LIMIT=256kb
+HTTP_FORM_LIMIT=256kb
 ```
 
 ## Running the Server

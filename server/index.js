@@ -13,6 +13,19 @@ const { normalizeChatMessage, truncateForLog } = require('./chatMessage');
 
 const app = express();
 
+function getBodyLimit(envKey, fallback) {
+  const configured = process.env[envKey];
+  if (typeof configured !== 'string' || !configured.trim()) {
+    return fallback;
+  }
+  return configured.trim();
+}
+
+// Reflection + goal snapshot payloads are intentionally compact (typically < 20kb after route-level trimming),
+// so a 256kb default keeps current behavior while adding protection against abusive request sizes.
+const HTTP_JSON_LIMIT = getBodyLimit('HTTP_JSON_LIMIT', '256kb');
+const HTTP_FORM_LIMIT = getBodyLimit('HTTP_FORM_LIMIT', '256kb');
+
 function parseTrustProxy(value) {
   if (value === undefined) return false;
   const lowered = String(value).trim().toLowerCase();
@@ -26,8 +39,8 @@ function parseTrustProxy(value) {
 app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: HTTP_JSON_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: HTTP_FORM_LIMIT }));
 
 function parseCorsAllowedOrigins(value) {
   if (!value || !value.trim()) {
@@ -1758,6 +1771,22 @@ app.post('/entity-reflections/check', rateLimiters.summaryCheck, async (req, res
     console.error('Error checking entity reflections:', error);
     res.status(500).json({ triggered: false, message: 'Internal server error' });
   }
+});
+
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({
+      success: false,
+      error: 'Payload too large',
+      code: 'PAYLOAD_TOO_LARGE',
+      limits: {
+        json: HTTP_JSON_LIMIT,
+        form: HTTP_FORM_LIMIT
+      }
+    });
+  }
+
+  return next(err);
 });
 
 // Initialize and start server
