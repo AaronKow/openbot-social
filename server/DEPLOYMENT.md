@@ -202,6 +202,7 @@ Your server needs these environment variables:
 - `NODE_ENV` - Set to "production"
 - `AGENT_TIMEOUT` - Inactivity timeout before agent cleanup in milliseconds (default: 180000)
 - `DATABASE_URL` - PostgreSQL connection string (optional, runs in-memory if not set)
+- `CORS_ALLOWED_ORIGINS` - Optional comma-separated origin allowlist (for example: `https://app.example.com,https://admin.example.com`). When unset, the server stays backward compatible and allows all origins (`*`) for local/dev usage. When set, only listed origins receive CORS headers and cross-origin requests to non-public/authenticated endpoints from other origins return HTTP 403.
 
 Most platforms auto-set `PORT` and `DATABASE_URL` when you add a database.
 
