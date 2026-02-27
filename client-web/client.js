@@ -52,6 +52,8 @@ class OpenBotWorld {
         // Chat lazy-loading state
         this.chatIsLoading = false;  // prevents concurrent history fetches
         this.chatHasMore = true;     // set false when server returns no older messages
+        this.worldPollInFlight = false; // prevents overlapping world-state poll requests
+        this.chatPollInFlight = false; // prevents overlapping chat poll requests
 
         // Contextual menu + wiki state
         this.contextMenuAgentId = null;
@@ -1400,9 +1402,19 @@ class OpenBotWorld {
     }
     
     async pollWorldState() {
-        if (!this.connected) {
-            await this.testConnection();
+        if (this.worldPollInFlight) {
             return;
+        }
+
+        this.worldPollInFlight = true;
+
+        if (!this.connected) {
+            try {
+                await this.testConnection();
+                return;
+            } finally {
+                this.worldPollInFlight = false;
+            }
         }
 
         try {
@@ -1424,11 +1436,15 @@ class OpenBotWorld {
             console.error('Poll error:', error);
             this.connected = false;
             this.updateStatus();
+        } finally {
+            this.worldPollInFlight = false;
         }
     }
-    
+
     async pollChatMessages() {
-        if (!this.connected) return;
+        if (!this.connected || this.chatPollInFlight) return;
+
+        this.chatPollInFlight = true;
         
         try {
             const url = `${this.apiBase}/chat?since=${this.lastChatTimestamp}`;
@@ -1447,6 +1463,8 @@ class OpenBotWorld {
             }
         } catch (error) {
             console.error('Chat poll error:', error);
+        } finally {
+            this.chatPollInFlight = false;
         }
     }
     
