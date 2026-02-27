@@ -1299,48 +1299,83 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Status API endpoint
 app.get('/status', async (req, res) => {
-  const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
-  const uptimeMs = Date.now() - worldState.startTime;
-  
-  // Count total entities created
-  let totalEntities = worldState.totalEntitiesCreated;
-  if (process.env.DATABASE_URL) {
-    try {
-      totalEntities = await db.getEntityCount();
-    } catch (e) {
-      // fallback to cached count
+  try {
+    const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
+    const uptimeMs = Date.now() - worldState.startTime;
+
+    // Count total entities created
+    let totalEntities = worldState.totalEntitiesCreated;
+    if (process.env.DATABASE_URL) {
+      try {
+        totalEntities = await db.getEntityCount();
+      } catch (e) {
+        // fallback to cached count
+      }
     }
+
+    res.json({
+      status: 'online',
+      activeAgents: worldState.agents.size,
+      totalEntitiesCreated: totalEntities,
+      tick: worldState.tick,
+      uptime: process.uptime(),
+      uptimeFormatted: formatUptime(uptimeMs),
+      uptimeMs: uptimeMs,
+      serverStartTime: worldState.startTime,
+      worldCreatedAt: worldState.worldCreatedAt,
+      database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled',
+      tickScheduler: {
+        intervalMs: TICK_INTERVAL_MS,
+        isTickRunning: tickInProgress,
+        lastTickDurationMs: tickSchedulerMetrics.lastTickDurationMs,
+        maxTickDurationMs: tickSchedulerMetrics.maxTickDurationMs,
+        skippedTicks: tickSchedulerMetrics.skippedTicks
+      },
+      persistenceScheduler: {
+        intervalMs: PERSIST_FLUSH_INTERVAL_MS,
+        isRunning: isPersistRunning,
+        lastRunDurationMs: persistenceSchedulerMetrics.lastRunDurationMs,
+        maxRunDurationMs: persistenceSchedulerMetrics.maxRunDurationMs,
+        skippedRuns: persistenceSchedulerMetrics.skippedRuns,
+        lastAgentSaveAt: persistenceSchedulerMetrics.lastAgentSaveAt,
+        lastChatCleanupAt: persistenceSchedulerMetrics.lastChatCleanupAt,
+        lastSessionCleanupAt: persistenceSchedulerMetrics.lastSessionCleanupAt
+      }
+    });
+  } catch (error) {
+    console.error('Status endpoint error:', error);
+    const safeStartTime = worldState.startTime || Date.now();
+    const safeUptimeMs = Math.max(0, Date.now() - safeStartTime);
+    return res.status(503).json({
+      status: 'degraded',
+      activeAgents: worldState.agents?.size ?? 0,
+      totalEntitiesCreated: worldState.totalEntitiesCreated ?? 0,
+      tick: worldState.tick ?? 0,
+      uptime: Number.isFinite(process.uptime()) ? process.uptime() : 0,
+      uptimeFormatted: formatUptime(safeUptimeMs),
+      uptimeMs: safeUptimeMs,
+      serverStartTime: safeStartTime,
+      worldCreatedAt: worldState.worldCreatedAt || safeStartTime,
+      database: process.env.DATABASE_URL ? 'disconnected' : 'disabled',
+      tickScheduler: {
+        intervalMs: TICK_INTERVAL_MS,
+        isTickRunning: Boolean(tickInProgress),
+        lastTickDurationMs: tickSchedulerMetrics.lastTickDurationMs ?? 0,
+        maxTickDurationMs: tickSchedulerMetrics.maxTickDurationMs ?? 0,
+        skippedTicks: tickSchedulerMetrics.skippedTicks ?? 0
+      },
+      persistenceScheduler: {
+        intervalMs: PERSIST_FLUSH_INTERVAL_MS,
+        isRunning: Boolean(isPersistRunning),
+        lastRunDurationMs: persistenceSchedulerMetrics.lastRunDurationMs ?? 0,
+        maxRunDurationMs: persistenceSchedulerMetrics.maxRunDurationMs ?? 0,
+        skippedRuns: persistenceSchedulerMetrics.skippedRuns ?? 0,
+        lastAgentSaveAt: persistenceSchedulerMetrics.lastAgentSaveAt ?? null,
+        lastChatCleanupAt: persistenceSchedulerMetrics.lastChatCleanupAt ?? null,
+        lastSessionCleanupAt: persistenceSchedulerMetrics.lastSessionCleanupAt ?? null
+      }
+    });
   }
-  
-  res.json({
-    status: 'online',
-    activeAgents: worldState.agents.size,
-    totalEntitiesCreated: totalEntities,
-    tick: worldState.tick,
-    uptime: process.uptime(),
-    uptimeFormatted: formatUptime(uptimeMs),
-    uptimeMs: uptimeMs,
-    serverStartTime: worldState.startTime,
-    worldCreatedAt: worldState.worldCreatedAt,
-    database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled',
-    tickScheduler: {
-      intervalMs: TICK_INTERVAL_MS,
-      isTickRunning: tickInProgress,
-      lastTickDurationMs: tickSchedulerMetrics.lastTickDurationMs,
-      maxTickDurationMs: tickSchedulerMetrics.maxTickDurationMs,
-      skippedTicks: tickSchedulerMetrics.skippedTicks
-    },
-    persistenceScheduler: {
-      intervalMs: PERSIST_FLUSH_INTERVAL_MS,
-      isRunning: isPersistRunning,
-      lastRunDurationMs: persistenceSchedulerMetrics.lastRunDurationMs,
-      maxRunDurationMs: persistenceSchedulerMetrics.maxRunDurationMs,
-      skippedRuns: persistenceSchedulerMetrics.skippedRuns,
-      lastAgentSaveAt: persistenceSchedulerMetrics.lastAgentSaveAt,
-      lastChatCleanupAt: persistenceSchedulerMetrics.lastChatCleanupAt,
-      lastSessionCleanupAt: persistenceSchedulerMetrics.lastSessionCleanupAt
-    }
-  });
 });
 
 // Get all agents (alias for compatibility)
