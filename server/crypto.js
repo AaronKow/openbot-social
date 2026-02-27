@@ -88,8 +88,22 @@ function verifySignature(publicKeyPem, challenge, signatureBase64) {
 
 // ============= JWT SESSION TOKENS =============
 
-// Server-side secret for JWT signing (generated on startup, or from env)
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+// Server-side secret for JWT signing (required in production, fallback for local/dev/test only)
+const runtimeEnv = (process.env.NODE_ENV || 'development').toLowerCase();
+const rawJwtSecret = process.env.JWT_SECRET;
+const hasJwtSecret = typeof rawJwtSecret === 'string' && rawJwtSecret.trim().length > 0;
+
+if (runtimeEnv === 'production' && !hasJwtSecret) {
+  throw new Error('JWT_SECRET is required when NODE_ENV is "production". Set a strong secret before starting the server.');
+}
+
+if (!hasJwtSecret) {
+  console.warn(
+    'WARNING: JWT_SECRET is not set. Using a temporary random secret for local/dev/test runtime only; all existing tokens will be invalid after restart.'
+  );
+}
+
+const JWT_SECRET = hasJwtSecret ? rawJwtSecret : crypto.randomBytes(64).toString('hex');
 const rawJwtExpiryHours = process.env.JWT_EXPIRY_HOURS;
 const JWT_EXPIRY_HOURS = parseJwtExpiryHours(rawJwtExpiryHours);
 
