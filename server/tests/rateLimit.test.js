@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { createRateLimiter, createEntityRateLimiter } = require('../rateLimit');
+const db = require('../db');
 
 function createRes() {
   return {
@@ -73,4 +74,62 @@ test('createEntityRateLimiter uses entityId first', async () => {
   assert.equal(nextCalled, true);
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['X-RateLimit-Limit'], '120');
+});
+
+test('checkRateLimit enforces maxRequests under parallel calls', async () => {
+  const originalQuery = db.pool.query;
+  const state = new Map();
+
+  db.pool.query = async (sql, params) => {
+    assert.ok(sql.includes('ON CONFLICT (identifier, action_type)'));
+
+    const [identifier, actionType, now, maxRequests, windowSeconds] = params;
+    const key = `${identifier}:${actionType}`;
+    const windowMs = windowSeconds * 1000;
+    const existing = state.get(key);
+
+    if (!existing || (now.getTime() - existing.windowStart.getTime()) > windowMs) {
+      const next = { requestCount: 1, windowStart: now };
+      state.set(key, next);
+      return { rows: [{ request_count: 1, window_start: now, allowed: true }] };
+    }
+
+    if (existing.requestCount >= maxRequests) {
+      return {
+        rows: [{
+          request_count: existing.requestCount,
+          window_start: existing.windowStart,
+          allowed: false
+        }]
+      };
+    }
+
+    existing.requestCount += 1;
+    state.set(key, existing);
+    return {
+      rows: [{
+        request_count: existing.requestCount,
+        window_start: existing.windowStart,
+        allowed: true
+      }]
+    };
+  };
+
+  try {
+    const maxRequests = 5;
+    const attempts = 25;
+    const checks = await Promise.all(
+      Array.from({ length: attempts }, () => db.checkRateLimit('parallel-ip', 'chat', maxRequests, 60))
+    );
+
+    const allowedCount = checks.filter(r => r.allowed).length;
+    const blockedCount = checks.filter(r => !r.allowed).length;
+
+    assert.equal(allowedCount, maxRequests);
+    assert.equal(blockedCount, attempts - maxRequests);
+    assert.ok(checks.every(r => r.remaining >= 0));
+    assert.ok(checks.every(r => r.resetAt instanceof Date));
+  } finally {
+    db.pool.query = originalQuery;
+  }
 });
