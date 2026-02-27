@@ -76,6 +76,10 @@ const requireAuth = requireSession(db, getMemorySessions);
 const optionalAuth = optionalSession(db, getMemorySessions);
 const encryptResponses = encryptIfAuthenticated(db, getMemoryEntities);
 
+// Attach optional auth context globally so authenticated requests can opt-in to encrypted JSON responses.
+app.use(optionalAuth);
+app.use(encryptResponses);
+
 // Configuration
 const PORT = process.env.PORT || 3001;
 const TICK_RATE = 30; // 30 updates per second
