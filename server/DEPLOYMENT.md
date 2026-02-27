@@ -194,6 +194,25 @@ Render includes PostgreSQL database with the service. Just enable it and `DATABA
 
 ---
 
+
+## 🚦 Rate Limiter Failure Policy (DB Incident Behavior)
+
+When `DATABASE_URL` is configured, rate limits are enforced through PostgreSQL. If the DB is unavailable, each limiter now has an explicit failure policy:
+
+- **Fail-closed (`onError: 'deny'`)** for security-sensitive or abuse-sensitive routes:
+  - `auth_challenge`
+  - `auth_session`
+  - `entity_create`
+  - Behavior during outage: returns `503` with a retry hint (`retryAfter`) so clients can back off and retry.
+- **Fail-open (`onError: 'allow'`)** for less-sensitive read/poll traffic to preserve availability.
+
+Operational guidance:
+- Expect temporary `503` responses on auth and entity creation during DB incidents.
+- Keep client retry/backoff enabled for these endpoints.
+- If your risk profile changes, you can adjust `onError` per limiter in `server/index.js`.
+
+---
+
 ## 🔧 Environment Variables
 
 Your server needs these environment variables:

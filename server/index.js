@@ -110,9 +110,9 @@ app.use((req, res, next) => {
 
 // ============= RATE LIMITERS =============
 const rateLimiters = {
-  entityCreate: createRateLimiter('entity_create', {}, db),
-  authChallenge: createRateLimiter('auth_challenge', {}, db),
-  authSession: createRateLimiter('auth_session', {}, db),
+  entityCreate: createRateLimiter('entity_create', { onError: 'deny' }, db),
+  authChallenge: createRateLimiter('auth_challenge', { onError: 'deny' }, db),
+  authSession: createRateLimiter('auth_session', { onError: 'deny' }, db),
   chat: createEntityRateLimiter('chat', db),
   move: createEntityRateLimiter('move', db),
   action: createEntityRateLimiter('action', db),
