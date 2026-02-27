@@ -64,6 +64,12 @@ const getMemorySessions = () => {
   return entityRouter._memorySessions;
 };
 const getMemoryEntities = () => entityRouter._memoryEntities;
+const getMemoryDailyReflections = () => {
+  if (!app._memoryDailyReflections) {
+    app._memoryDailyReflections = new Map();
+  }
+  return app._memoryDailyReflections;
+};
 
 // Auth middleware instances
 const requireAuth = requireSession(db, getMemorySessions);
@@ -1276,7 +1282,18 @@ app.get('/entity/:entityId/daily-reflections', requireAuth, async (req, res) => 
     }
 
     const limit = Math.min(parseInt(req.query.limit) || 30, 90);
-    const summaries = await entityReflectionSummary.getEntityReflections(entityId, limit);
+    let summaries;
+    if (process.env.DATABASE_URL) {
+      summaries = await entityReflectionSummary.getEntityReflections(entityId, limit);
+    } else {
+      const reflectionsByEntity = getMemoryDailyReflections();
+      const entityReflections = reflectionsByEntity.get(entityId);
+      summaries = entityReflections
+        ? Array.from(entityReflections.values())
+          .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+          .slice(0, limit)
+        : [];
+    }
     res.json({ success: true, summaries });
   } catch (error) {
     console.error('Error fetching entity daily reflections:', error);
@@ -1302,16 +1319,39 @@ app.post('/entity/:entityId/daily-reflections', requireAuth, async (req, res) =>
     }
 
     const safeCount = Number.isFinite(Number(messageCount)) ? Math.max(0, parseInt(messageCount, 10)) : 0;
-    await db.saveEntityDailyReflection(
-      entityId,
-      summaryDate,
-      dailySummary.trim().slice(0, 4000),
-      safeCount,
-      true,
-      typeof socialSummary === 'string' ? socialSummary.trim().slice(0, 2000) : '',
-      goalProgress && typeof goalProgress === 'object' ? goalProgress : {},
-      memoryUpdates && typeof memoryUpdates === 'object' ? memoryUpdates : {}
-    );
+    const safeDailySummary = dailySummary.trim().slice(0, 4000);
+    const safeSocialSummary = typeof socialSummary === 'string' ? socialSummary.trim().slice(0, 2000) : '';
+    const safeGoalProgress = goalProgress && typeof goalProgress === 'object' ? goalProgress : {};
+    const safeMemoryUpdates = memoryUpdates && typeof memoryUpdates === 'object' ? memoryUpdates : {};
+
+    if (process.env.DATABASE_URL) {
+      await db.saveEntityDailyReflection(
+        entityId,
+        summaryDate,
+        safeDailySummary,
+        safeCount,
+        true,
+        safeSocialSummary,
+        safeGoalProgress,
+        safeMemoryUpdates
+      );
+    } else {
+      const reflectionsByEntity = getMemoryDailyReflections();
+      if (!reflectionsByEntity.has(entityId)) {
+        reflectionsByEntity.set(entityId, new Map());
+      }
+      const entityReflections = reflectionsByEntity.get(entityId);
+      entityReflections.set(summaryDate, {
+        date: summaryDate,
+        dailySummary: safeDailySummary,
+        socialSummary: safeSocialSummary,
+        goalProgress: safeGoalProgress,
+        memoryUpdates: safeMemoryUpdates,
+        messageCount: safeCount,
+        aiCompleted: true,
+        createdAt: new Date().toISOString()
+      });
+    }
 
     res.json({ success: true, entityId, summaryDate });
   } catch (error) {
