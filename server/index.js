@@ -1153,7 +1153,8 @@ const persistenceSchedulerMetrics = {
   lastSessionCleanupAt: 0
 };
 
-let isTickRunning = false;
+let tickInProgress = false;
+let tickQueued = false;
 let nextTickAt = Date.now() + TICK_INTERVAL_MS;
 let tickTimer = null;
 
@@ -1202,14 +1203,15 @@ async function runPersistenceCycle() {
 }
 
 async function runScheduledTick() {
-  if (isTickRunning) {
+  if (tickInProgress) {
+    tickQueued = true;
     tickSchedulerMetrics.skippedTicks++;
     nextTickAt += TICK_INTERVAL_MS;
     scheduleNextTick();
     return;
   }
 
-  isTickRunning = true;
+  tickInProgress = true;
   const tickStartedAt = Date.now();
 
   try {
@@ -1220,7 +1222,7 @@ async function runScheduledTick() {
     const tickDurationMs = Date.now() - tickStartedAt;
     tickSchedulerMetrics.lastTickDurationMs = tickDurationMs;
     tickSchedulerMetrics.maxTickDurationMs = Math.max(tickSchedulerMetrics.maxTickDurationMs, tickDurationMs);
-    isTickRunning = false;
+    tickInProgress = false;
   }
 
   const now = Date.now();
@@ -1236,6 +1238,11 @@ async function runScheduledTick() {
     console.log(
       `[tick-scheduler] tick=${worldState.tick} lastDurationMs=${tickSchedulerMetrics.lastTickDurationMs} maxDurationMs=${tickSchedulerMetrics.maxTickDurationMs} skippedTicks=${tickSchedulerMetrics.skippedTicks}`
     );
+  }
+
+  if (tickQueued) {
+    tickQueued = false;
+    nextTickAt = Math.min(nextTickAt, Date.now());
   }
 
   scheduleNextTick();
@@ -1319,7 +1326,7 @@ app.get('/status', async (req, res) => {
     database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled',
     tickScheduler: {
       intervalMs: TICK_INTERVAL_MS,
-      isTickRunning,
+      isTickRunning: tickInProgress,
       lastTickDurationMs: tickSchedulerMetrics.lastTickDurationMs,
       maxTickDurationMs: tickSchedulerMetrics.maxTickDurationMs,
       skippedTicks: tickSchedulerMetrics.skippedTicks
