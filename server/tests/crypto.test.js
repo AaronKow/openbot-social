@@ -4,6 +4,28 @@ const crypto = require('node:crypto');
 
 const serverCrypto = require('../crypto');
 
+
+function loadCryptoWithExpiry(expiryHours) {
+  const previousExpiry = process.env.JWT_EXPIRY_HOURS;
+
+  if (expiryHours === undefined) {
+    delete process.env.JWT_EXPIRY_HOURS;
+  } else {
+    process.env.JWT_EXPIRY_HOURS = expiryHours;
+  }
+
+  delete require.cache[require.resolve('../crypto')];
+  const loaded = require('../crypto');
+
+  if (previousExpiry === undefined) {
+    delete process.env.JWT_EXPIRY_HOURS;
+  } else {
+    process.env.JWT_EXPIRY_HOURS = previousExpiry;
+  }
+
+  return loaded;
+}
+
 test('validatePublicKey accepts generated RSA public key', () => {
   const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const pem = publicKey.export({ type: 'spki', format: 'pem' });
@@ -67,4 +89,36 @@ test('encryptResponse + createAuthChallenge produce decryptable payloads', () =>
   ).toString('hex');
 
   assert.equal(decryptedChallenge, challenge.challenge);
+});
+
+
+test('invalid JWT_EXPIRY_HOURS falls back to 24 hours for token expiry', () => {
+  const originalNow = Date.now;
+  Date.now = () => 1_700_000_000_000;
+
+  try {
+    const cryptoWithInvalidExpiry = loadCryptoWithExpiry('not-a-number');
+    const session = cryptoWithInvalidExpiry.createSessionToken('entity-invalid-expiry');
+
+    assert.equal(cryptoWithInvalidExpiry.JWT_EXPIRY_HOURS, 24);
+
+    const expectedSeconds = 24 * 60 * 60 * 1000;
+    assert.equal(session.expiresAt.getTime(), Date.now() + expectedSeconds);
+
+    Date.now = () => 1_700_000_000_000 + expectedSeconds + 1_000;
+    const verification = cryptoWithInvalidExpiry.verifySessionToken(session.token);
+    assert.equal(verification.valid, false);
+    assert.match(verification.error, /expired/i);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('non-positive JWT_EXPIRY_HOURS also falls back to 24 hours', () => {
+  const cryptoWithZeroExpiry = loadCryptoWithExpiry('0');
+  const session = cryptoWithZeroExpiry.createSessionToken('entity-zero-expiry');
+  const verification = cryptoWithZeroExpiry.verifySessionToken(session.token);
+
+  assert.equal(cryptoWithZeroExpiry.JWT_EXPIRY_HOURS, 24);
+  assert.equal(verification.valid, true);
 });

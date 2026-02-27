@@ -12,6 +12,13 @@
 
 const crypto = require('crypto');
 
+const DEFAULT_JWT_EXPIRY_HOURS = 24;
+
+function parseJwtExpiryHours(rawExpiryHours) {
+  const parsed = Number(rawExpiryHours);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_JWT_EXPIRY_HOURS;
+}
+
 // ============= RSA UTILITIES =============
 
 /**
@@ -83,7 +90,16 @@ function verifySignature(publicKeyPem, challenge, signatureBase64) {
 
 // Server-side secret for JWT signing (generated on startup, or from env)
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
-const JWT_EXPIRY_HOURS = parseInt(process.env.JWT_EXPIRY_HOURS || '24', 10);
+const rawJwtExpiryHours = process.env.JWT_EXPIRY_HOURS;
+const JWT_EXPIRY_HOURS = parseJwtExpiryHours(rawJwtExpiryHours);
+
+if (
+  rawJwtExpiryHours !== undefined &&
+  JWT_EXPIRY_HOURS === DEFAULT_JWT_EXPIRY_HOURS &&
+  Number(rawJwtExpiryHours) !== DEFAULT_JWT_EXPIRY_HOURS
+) {
+  console.warn('Invalid JWT_EXPIRY_HOURS value detected; defaulting to 24 hours.');
+}
 
 /**
  * Create a JWT-like session token.
