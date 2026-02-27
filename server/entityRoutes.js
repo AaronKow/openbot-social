@@ -20,21 +20,130 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const serverCrypto = require('./crypto');
 
-// In-memory challenge store (challengeId -> { challenge, entityId, expiresAt })
+// In-memory challenge store (challengeId -> { challenge, entityId, expiresAt, createdAt, lastAccessedAt })
 const pendingChallenges = new Map();
+const pendingChallengesByEntity = new Map();
+
+const MAX_PENDING_CHALLENGES = Number.parseInt(process.env.MAX_PENDING_CHALLENGES || '5000', 10);
+const MAX_PENDING_CHALLENGES_PER_ENTITY = Number.parseInt(process.env.MAX_PENDING_CHALLENGES_PER_ENTITY || '3', 10);
+const ENFORCE_SINGLE_ACTIVE_CHALLENGE_PER_ENTITY = (process.env.ENFORCE_SINGLE_ACTIVE_CHALLENGE_PER_ENTITY || 'true') === 'true';
+
+const challengeMetrics = {
+  created: 0,
+  consumed: 0,
+  evictedExpired: 0,
+  evictedLeastRecent: 0,
+  replacedExisting: 0,
+  rejectedGlobalCap: 0,
+  rejectedPerEntityCap: 0,
+  expiredDuringVerification: 0,
+  invalidSignature: 0
+};
+
+function logChallengeMetrics(reason = 'periodic') {
+  console.info('[auth/challenge][metrics]', {
+    reason,
+    pendingCount: pendingChallenges.size,
+    entityCount: pendingChallengesByEntity.size,
+    ...challengeMetrics
+  });
+}
+
+function removePendingChallenge(challengeId, metricKey) {
+  const challenge = pendingChallenges.get(challengeId);
+  if (!challenge) {
+    return;
+  }
+
+  pendingChallenges.delete(challengeId);
+
+  const entityChallenges = pendingChallengesByEntity.get(challenge.entityId);
+  if (entityChallenges) {
+    entityChallenges.delete(challengeId);
+    if (entityChallenges.size === 0) {
+      pendingChallengesByEntity.delete(challenge.entityId);
+    }
+  }
+
+  if (metricKey && Object.prototype.hasOwnProperty.call(challengeMetrics, metricKey)) {
+    challengeMetrics[metricKey] += 1;
+  }
+}
+
+function pruneExpiredChallenges(now = Date.now()) {
+  let removed = 0;
+  for (const [id, data] of pendingChallenges) {
+    if (now > data.expiresAt) {
+      removePendingChallenge(id, 'evictedExpired');
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function getOldestChallengeId(challengeIds = []) {
+  return challengeIds
+    .map((id) => [id, pendingChallenges.get(id)])
+    .filter(([, entry]) => Boolean(entry))
+    .sort(([, a], [, b]) => {
+      if (a.lastAccessedAt !== b.lastAccessedAt) return a.lastAccessedAt - b.lastAccessedAt;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.challengeId.localeCompare(b.challengeId);
+    })[0]?.[0];
+}
+
+function makeChallengeSpace(entityId, now = Date.now()) {
+  pruneExpiredChallenges(now);
+
+  if (ENFORCE_SINGLE_ACTIVE_CHALLENGE_PER_ENTITY) {
+    const existing = pendingChallengesByEntity.get(entityId);
+    if (existing?.size) {
+      for (const challengeId of existing) {
+        removePendingChallenge(challengeId, 'replacedExisting');
+      }
+    }
+  }
+
+  const entityChallenges = pendingChallengesByEntity.get(entityId);
+  while (entityChallenges && entityChallenges.size >= MAX_PENDING_CHALLENGES_PER_ENTITY) {
+    const oldestEntityChallengeId = getOldestChallengeId(entityChallenges);
+    if (!oldestEntityChallengeId) {
+      challengeMetrics.rejectedPerEntityCap += 1;
+      return { ok: false, status: 429, message: 'Too many pending challenges for this entity', reason: 'entity_cap' };
+    }
+    removePendingChallenge(oldestEntityChallengeId, 'evictedLeastRecent');
+  }
+
+  while (pendingChallenges.size >= MAX_PENDING_CHALLENGES) {
+    const oldestGlobalChallengeId = getOldestChallengeId([...pendingChallenges.keys()]);
+    if (!oldestGlobalChallengeId) {
+      challengeMetrics.rejectedGlobalCap += 1;
+      return { ok: false, status: 429, message: 'Too many pending challenges. Retry shortly.', reason: 'global_cap' };
+    }
+    removePendingChallenge(oldestGlobalChallengeId, 'evictedLeastRecent');
+  }
+
+  return { ok: true };
+}
 
 // Clean up expired challenges every minute
 const challengeCleanupInterval = setInterval(() => {
-  const now = Date.now();
-  for (const [id, data] of pendingChallenges) {
-    if (now > data.expiresAt) {
-      pendingChallenges.delete(id);
-    }
+  const removed = pruneExpiredChallenges(Date.now());
+  if (removed > 0) {
+    logChallengeMetrics('cleanup');
   }
 }, 60000);
 
+const challengeMetricsInterval = setInterval(() => {
+  logChallengeMetrics();
+}, 300000);
+
 if (typeof challengeCleanupInterval.unref === 'function') {
   challengeCleanupInterval.unref();
+}
+
+if (typeof challengeMetricsInterval.unref === 'function') {
+  challengeMetricsInterval.unref();
 }
 
 /**
@@ -315,13 +424,38 @@ function createEntityRouter(db, rateLimiters = {}) {
         // Generate challenge encrypted with entity's public key
         const authChallenge = serverCrypto.createAuthChallenge(entity.public_key);
 
+        const now = Date.now();
+        const capacity = makeChallengeSpace(entity_id, now);
+        if (!capacity.ok) {
+          console.warn('[auth/challenge] rejected new challenge request', {
+            entityId: entity_id,
+            reason: capacity.reason,
+            pendingCount: pendingChallenges.size,
+            perEntityPendingCount: pendingChallengesByEntity.get(entity_id)?.size || 0
+          });
+          return res.status(capacity.status).json({
+            success: false,
+            error: capacity.message
+          });
+        }
+
         // Store challenge server-side for verification
-        pendingChallenges.set(authChallenge.challengeId, {
+        const challengeData = {
+          challengeId: authChallenge.challengeId,
           challenge: authChallenge.challenge,
           entityId: entity_id,
           publicKey: entity.public_key,
-          expiresAt: authChallenge.expiresAt
-        });
+          expiresAt: authChallenge.expiresAt,
+          createdAt: now,
+          lastAccessedAt: now
+        };
+
+        pendingChallenges.set(authChallenge.challengeId, challengeData);
+        if (!pendingChallengesByEntity.has(entity_id)) {
+          pendingChallengesByEntity.set(entity_id, new Set());
+        }
+        pendingChallengesByEntity.get(entity_id).add(authChallenge.challengeId);
+        challengeMetrics.created += 1;
 
         res.json({
           success: true,
@@ -384,8 +518,9 @@ function createEntityRouter(db, rateLimiters = {}) {
         }
 
         // Check challenge expiry
+        challengeData.lastAccessedAt = Date.now();
         if (Date.now() > challengeData.expiresAt) {
-          pendingChallenges.delete(challenge_id);
+          removePendingChallenge(challenge_id, 'expiredDuringVerification');
           return res.status(400).json({
             success: false,
             error: 'Challenge expired'
@@ -400,7 +535,7 @@ function createEntityRouter(db, rateLimiters = {}) {
         );
 
         if (!isValid) {
-          pendingChallenges.delete(challenge_id);
+          removePendingChallenge(challenge_id, 'invalidSignature');
           return res.status(401).json({
             success: false,
             error: 'Invalid signature — authentication failed'
@@ -408,7 +543,7 @@ function createEntityRouter(db, rateLimiters = {}) {
         }
 
         // Authentication successful — remove used challenge
-        pendingChallenges.delete(challenge_id);
+        removePendingChallenge(challenge_id, 'consumed');
 
         // Create session token
         const { token, expiresAt } = serverCrypto.createSessionToken(entity_id);
