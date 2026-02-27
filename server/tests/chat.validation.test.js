@@ -44,6 +44,14 @@ function seedAgent(agentId, entityId) {
   });
 }
 
+
+
+async function getChat(baseUrl, query = '') {
+  const response = await fetch(`${baseUrl}/chat${query}`);
+  const json = await response.json();
+  return { status: response.status, json };
+}
+
 async function postChat(baseUrl, token, body) {
   const response = await fetch(`${baseUrl}/chat`, {
     method: 'POST',
@@ -101,5 +109,50 @@ test('chat accepts and persists normalized valid message', async () => {
     assert.equal(worldState.chatMessages.length, 1);
     assert.equal(worldState.chatMessages[0].message, 'hello reef');
     assert.equal(worldState.chatMessages[0].agentId, agentId);
+  });
+});
+
+
+test('chat rejects invalid before query values', async () => {
+  worldState.chatMessages = [];
+
+  await withServer(async (baseUrl) => {
+    for (const badBefore of ['abc', '-1', '0', '12.5']) {
+      const { status, json } = await getChat(baseUrl, `?before=${encodeURIComponent(badBefore)}`);
+      assert.equal(status, 400);
+      assert.equal(json.success, false);
+      assert.match(json.error, /Invalid `before`/);
+    }
+  });
+});
+
+test('chat rejects non-numeric limit for before pagination', async () => {
+  worldState.chatMessages = [];
+
+  await withServer(async (baseUrl) => {
+    const { status, json } = await getChat(baseUrl, '?before=123&limit=ten');
+    assert.equal(status, 400);
+    assert.equal(json.success, false);
+    assert.match(json.error, /Invalid `limit`/);
+  });
+});
+
+test('chat clamps before pagination limit to safe range', async () => {
+  worldState.chatMessages = [
+    { id: 'msg-1', timestamp: 1, message: 'oldest' },
+    { id: 'msg-2', timestamp: 2, message: 'older' },
+    { id: 'msg-3', timestamp: 3, message: 'newer' }
+  ];
+
+  await withServer(async (baseUrl) => {
+    const unlimitedLike = await getChat(baseUrl, '?before=10&limit=0');
+    assert.equal(unlimitedLike.status, 200);
+    assert.equal(unlimitedLike.json.messages.length, 1);
+    assert.equal(unlimitedLike.json.hasMore, true);
+
+    const capped = await getChat(baseUrl, '?before=10&limit=999');
+    assert.equal(capped.status, 200);
+    assert.equal(capped.json.messages.length, 3);
+    assert.equal(capped.json.hasMore, false);
   });
 });
