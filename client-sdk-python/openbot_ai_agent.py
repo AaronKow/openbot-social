@@ -55,6 +55,17 @@ _NEWS_CACHE_HEADLINES: List[str] = []
 _NEWS_CACHE_FETCHED_AT: float = 0.0  # epoch seconds of last successful fetch
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        print(f"[agent] ⚠️ invalid {name}={raw!r}; using default {default}")
+        return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -689,6 +700,14 @@ class AIAgent:
         self._goal_snapshot_sync_supported: bool = True
         self._cognitive_loop = CognitiveLoop(self)
 
+    def _ticks_to_seconds(self, ticks: int) -> float:
+        """Convert logical ticks to wall-clock seconds using the configured interval."""
+        return ticks * self.TICK_INTERVAL
+
+    def _conversation_window_seconds(self) -> float:
+        """Recent-conversation fetch window that remains useful for long tick intervals."""
+        return max(60.0, self.TICK_INTERVAL * 2)
+
     # ── Entity lifecycle ──────────────────────────────────────────
 
     def create(self, entity_id: str) -> bool:
@@ -866,7 +885,8 @@ class AIAgent:
             lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
 
         # Recent conversation (last 6 messages so we catch new ones reliably)
-        recent = self.client.get_recent_conversation(60.0)
+        recent_window_secs = self._conversation_window_seconds()
+        recent = self.client.get_recent_conversation(recent_window_secs)
         self._new_senders = []   # reset each tick
         self._tagged_by = []     # reset each tick
         new_chat_texts: List[str] = []
@@ -917,8 +937,9 @@ class AIAgent:
                 for chat_text in new_chat_texts:
                     self._interest_tracker.observe_chat(chat_text)
         else:
-            silence_secs = (self._tick_count - self._last_chat_tick) * 4
-            if silence_secs > 60:
+            silence_secs = self._ticks_to_seconds(self._tick_count - self._last_chat_tick)
+            silence_alert_threshold = max(60.0, self.TICK_INTERVAL * 2)
+            if silence_secs > silence_alert_threshold:
                 lines.append(f"💬 silence {silence_secs}s!")
             else:
                 lines.append(f"💬 quiet {silence_secs}s")
@@ -1537,9 +1558,10 @@ class AIAgent:
 
         # Override C: LLM chose wait, genuinely alone — random chat or explore
         elif ai_chose_wait and not in_range:
-            recent = self.client.get_recent_conversation(60.0)
-            silence_ticks = self._tick_count - self._last_chat_tick
-            if not recent and silence_ticks > 15:
+            recent = self.client.get_recent_conversation(self._conversation_window_seconds())
+            silence_secs = self._ticks_to_seconds(self._tick_count - self._last_chat_tick)
+            silence_threshold = max(60.0, self.TICK_INTERVAL * 2)
+            if not recent and silence_secs > silence_threshold:
                 random_msg = random.choice(RANDOM_CHATS)
                 actions = [{"type": "chat", "message": random_msg}]
                 print("  🤖 [override C] silence + alone, forcing random chat")
@@ -1711,7 +1733,10 @@ examples:
     p_create.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_create.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_create.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
-    p_create.add_argument("--tick-interval", type=float, default=4.0, help="Seconds between LLM think cycles (default: 4.0)")
+    tick_interval_default = _env_float("TICK_INTERVAL", 4.0)
+
+    p_create.add_argument("--tick-interval", type=float, default=tick_interval_default,
+                          help=f"Seconds between LLM think cycles (default: $TICK_INTERVAL or {tick_interval_default})")
     p_create.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_create.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
@@ -1724,7 +1749,8 @@ examples:
     p_resume.add_argument("--model", default=None, help="OpenAI model (default: $OPENAI_MODEL)")
     p_resume.add_argument("--openai-key", default=None, help="OpenAI API key (default: $OPENAI_API_KEY)")
     p_resume.add_argument("--user-prompt", default="", help="Define the agent's personality, background, or values")
-    p_resume.add_argument("--tick-interval", type=float, default=4.0, help="Seconds between LLM think cycles (default: 4.0)")
+    p_resume.add_argument("--tick-interval", type=float, default=tick_interval_default,
+                          help=f"Seconds between LLM think cycles (default: $TICK_INTERVAL or {tick_interval_default})")
     p_resume.add_argument("--debug", action="store_true", help="Enable detailed debug output")
     p_resume.add_argument("--duration", type=int, default=300,
                           help="Run duration in seconds, 0 = unlimited (default: 300)")
@@ -1732,6 +1758,7 @@ examples:
     args = parser.parse_args()
 
     print("=" * 60)
+    print(f"Tick interval (parsed): {getattr(args, 'tick_interval', tick_interval_default)}s")
     print("OpenBot Social — AI Agent")
     print("=" * 60)
 
