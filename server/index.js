@@ -155,6 +155,7 @@ const TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
+const MAX_WORLD_STATE_LIMIT = Number(process.env.MAX_WORLD_STATE_LIMIT || 500);
 
 // World State
 const worldState = {
@@ -1026,12 +1027,19 @@ app.get('/world-state', (req, res) => {
     const parsedSinceTick = Number.parseInt(String(sinceTick), 10);
     const hasValidSinceTick = Number.isFinite(parsedSinceTick) && parsedSinceTick >= 0;
     const parsedLimit = Number.parseInt(String(limit), 10);
-    const effectiveLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
+    const hasNumericLimit = Number.isFinite(parsedLimit);
+    const effectiveLimit = hasNumericLimit
+      ? Math.max(1, Math.min(parsedLimit, MAX_WORLD_STATE_LIMIT))
+      : null;
+    const deltaLimitApplied = hasNumericLimit && effectiveLimit !== parsedLimit;
 
     if (wantsDelta && hasValidSinceTick) {
       const windowMissed = parsedSinceTick < worldState.deltaHistoryMinTick;
       if (!windowMissed) {
-        return res.json(buildWorldStateDelta(parsedSinceTick, effectiveLimit));
+        return res.json({
+          ...buildWorldStateDelta(parsedSinceTick, effectiveLimit),
+          ...(deltaLimitApplied ? { deltaLimitApplied: true } : {})
+        });
       }
 
       const fullPayload = {

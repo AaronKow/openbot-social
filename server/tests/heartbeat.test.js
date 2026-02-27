@@ -112,3 +112,72 @@ test('GET /world-state no longer keeps stale agents alive', async () => {
 
   worldState.agents.clear();
 });
+
+
+test('GET /world-state delta clamps limit to server max', async () => {
+  worldState.agents.clear();
+  worldState.agentChangeHistory.clear();
+  worldState.tick = 12;
+  worldState.deltaHistoryMinTick = 0;
+
+  const changedAgentIds = [];
+  for (let i = 0; i < 501; i += 1) {
+    const agentId = `agent-limit-${i}`;
+    changedAgentIds.push(agentId);
+    seedAgent(agentId, `entity-limit-${i}`, Date.now());
+  }
+
+  worldState.agentChangeHistory.set(10, {
+    changed: new Set(changedAgentIds),
+    removed: new Set()
+  });
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/world-state?delta=true&sinceTick=9&limit=999`);
+    assert.equal(res.status, 200);
+
+    const payload = await res.json();
+    assert.equal(payload.isDelta, true);
+    assert.equal(payload.changedAgentsTotal, 501);
+    assert.equal(payload.agents.length, 500);
+    assert.equal(payload.deltaTruncated, true);
+    assert.equal(payload.deltaLimitApplied, true);
+  });
+
+  worldState.agents.clear();
+  worldState.agentChangeHistory.clear();
+});
+
+test('GET /world-state delta without limit keeps existing behavior', async () => {
+  worldState.agents.clear();
+  worldState.agentChangeHistory.clear();
+  worldState.tick = 22;
+  worldState.deltaHistoryMinTick = 0;
+
+  const changedAgentIds = [];
+  for (let i = 0; i < 3; i += 1) {
+    const agentId = `agent-unlimited-${i}`;
+    changedAgentIds.push(agentId);
+    seedAgent(agentId, `entity-unlimited-${i}`, Date.now());
+  }
+
+  worldState.agentChangeHistory.set(20, {
+    changed: new Set(changedAgentIds),
+    removed: new Set()
+  });
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/world-state?delta=true&sinceTick=19`);
+    assert.equal(res.status, 200);
+
+    const payload = await res.json();
+    assert.equal(payload.isDelta, true);
+    assert.equal(payload.changedAgentsTotal, 3);
+    assert.equal(payload.agents.length, 3);
+    assert.equal(payload.deltaTruncated, false);
+    assert.equal(payload.deltaLimitApplied, undefined);
+  });
+
+  worldState.agents.clear();
+  worldState.agentChangeHistory.clear();
+});
