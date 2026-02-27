@@ -76,6 +76,67 @@ test('createEntityRateLimiter uses entityId first', async () => {
   assert.equal(res.headers['X-RateLimit-Limit'], '120');
 });
 
+
+
+test('createRateLimiter fails open by default when store check errors', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://example.test/openbot';
+
+  const middleware = createRateLimiter('general', {}, {
+    checkRateLimit: async () => {
+      throw new Error('db unavailable');
+    }
+  });
+
+  const req = { ip: '203.0.113.8', body: {} };
+  const res = createRes();
+  let nextCalled = false;
+
+  try {
+    await middleware(req, res, () => { nextCalled = true; });
+
+    assert.equal(nextCalled, true);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body, null);
+  } finally {
+    if (originalDatabaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+  }
+});
+
+test('createRateLimiter supports fail closed mode when store check errors', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://example.test/openbot';
+
+  const middleware = createRateLimiter('auth_session', { onError: 'deny' }, {
+    checkRateLimit: async () => {
+      throw new Error('db unavailable');
+    }
+  });
+
+  const req = { ip: '203.0.113.9', body: {} };
+  const res = createRes();
+  let nextCalled = false;
+
+  try {
+    await middleware(req, res, () => { nextCalled = true; });
+
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.error, 'Rate limit service unavailable');
+    assert.equal(res.body.retryAfter, 30);
+  } finally {
+    if (originalDatabaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+  }
+});
 test('checkRateLimit enforces maxRequests under parallel calls', async () => {
   const originalQuery = db.pool.query;
   const state = new Map();

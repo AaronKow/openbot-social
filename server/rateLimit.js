@@ -98,11 +98,13 @@ if (typeof memoryCleanupInterval.unref === 'function') {
  * @param {string} actionType - One of the keys in RATE_LIMITS
  * @param {object} [options] - Override options
  * @param {string} [options.identifierFn] - Function to extract identifier from request
+ * @param {'allow'|'deny'} [options.onError='allow'] - Failure policy when rate limit checks error
  * @param {object} [db] - Database module (optional, falls back to memory)
  * @returns {Function} Express middleware
  */
 function createRateLimiter(actionType, options = {}, db = null) {
   const config = RATE_LIMITS[actionType] || RATE_LIMITS.general;
+  const onError = options.onError === 'deny' ? 'deny' : 'allow';
   
   return async (req, res, next) => {
     try {
@@ -152,6 +154,14 @@ function createRateLimiter(actionType, options = {}, db = null) {
       next();
     } catch (error) {
       console.error(`Rate limit check error for ${actionType}:`, error);
+      if (onError === 'deny') {
+        return res.status(503).json({
+          success: false,
+          error: 'Rate limit service unavailable',
+          retryAfter: 30
+        });
+      }
+
       // On error, allow the request (fail open)
       next();
     }
@@ -161,8 +171,9 @@ function createRateLimiter(actionType, options = {}, db = null) {
 /**
  * Create entity-based rate limiter (uses entity_id from body or session).
  */
-function createEntityRateLimiter(actionType, db = null) {
+function createEntityRateLimiter(actionType, db = null, options = {}) {
   return createRateLimiter(actionType, {
+    ...options,
     identifierFn: (req) => {
       // Try to get entity_id from various sources
       return req.body?.entityId 
