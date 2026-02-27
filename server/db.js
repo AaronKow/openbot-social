@@ -371,6 +371,59 @@ async function saveAgent(agent) {
   await pool.query(query, values);
 }
 
+// Save or update multiple agents in a single database round trip.
+async function saveAgentsBatch(agents) {
+  if (!Array.isArray(agents) || agents.length === 0) {
+    return;
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const values = [];
+    const placeholders = agents.map((agent, index) => {
+      const offset = index * 8;
+      values.push(
+        agent.id,
+        agent.name,
+        agent.position.x,
+        agent.position.y,
+        agent.position.z,
+        agent.rotation,
+        agent.state,
+        agent.lastAction
+      );
+
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, NOW())`;
+    });
+
+    const query = `
+      INSERT INTO agents (id, name, position_x, position_y, position_z, rotation, state, last_action, updated_at)
+      VALUES ${placeholders.join(', ')}
+      ON CONFLICT (id)
+      DO UPDATE SET
+        name = EXCLUDED.name,
+        position_x = EXCLUDED.position_x,
+        position_y = EXCLUDED.position_y,
+        position_z = EXCLUDED.position_z,
+        rotation = EXCLUDED.rotation,
+        state = EXCLUDED.state,
+        last_action = EXCLUDED.last_action,
+        updated_at = NOW()
+    `;
+
+    await client.query(query, values);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 // Load agent from database
 async function loadAgent(agentId) {
   const result = await pool.query(
@@ -1261,6 +1314,7 @@ async function setEntityInterests(entityId, interests) {
 module.exports = {
   initDatabase,
   saveAgent,
+  saveAgentsBatch,
   loadAgent,
   loadAllAgents,
   deleteAgent,
