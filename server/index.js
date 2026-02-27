@@ -50,12 +50,14 @@ function isNonPublicCorsPath(req) {
 
   if (normalizedMethod === 'OPTIONS') {
     if (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action') return true;
+    if (/^\/agent\/[^/]+\/heartbeat$/.test(reqPath)) return true;
     if (reqPath.startsWith('/disconnect/')) return true;
     if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots)(?:\/.*)?$/.test(reqPath)) return true;
     return false;
   }
 
   if (normalizedMethod === 'POST' && (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action')) return true;
+  if (normalizedMethod === 'POST' && /^\/agent\/[^/]+\/heartbeat$/.test(reqPath)) return true;
   if (normalizedMethod === 'DELETE' && reqPath.startsWith('/disconnect/')) return true;
 
   if (
@@ -1005,15 +1007,7 @@ app.get('/ping', (req, res) => {
 // Get world state
 app.get('/world-state', (req, res) => {
   try {
-    const { agentId, sinceTick, delta, limit } = req.query;
-
-    // Update agent's last seen time if provided
-    if (agentId) {
-      const agent = worldState.agents.get(agentId);
-      if (agent) {
-        agent.lastUpdate = Date.now();
-      }
-    }
+    const { sinceTick, delta, limit } = req.query;
 
     const wantsDelta = String(delta).toLowerCase() === 'true' || sinceTick !== undefined;
     const parsedSinceTick = Number.parseInt(String(sinceTick), 10);
@@ -1049,6 +1043,24 @@ app.get('/world-state', (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: 'Internal server error' 
+    });
+  }
+});
+
+app.post('/agent/:agentId/heartbeat', requireAuth, (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const agent = getOwnedAgentOrReject(req, res, agentId);
+    if (!agent) return;
+
+    agent.lastUpdate = Date.now();
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error processing heartbeat:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
     });
   }
 });
@@ -1770,6 +1782,7 @@ module.exports = {
   worldState,
   getMemorySessions,
   __testHooks: {
+    gameLoop,
     applyQueueAction,
     findAgentByName,
     buildDeterministicNearbyTarget,
