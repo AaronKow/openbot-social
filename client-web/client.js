@@ -2,9 +2,16 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { config } from './config.js';
 
-const LOBSTER_HEAD_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(8);
+const LOBSTER_HEAD_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(2);
 const LOBSTER_MAX_TURN_RATE = 6.8; // rad/s
 const LOBSTER_MAX_FORWARD_SPEED = 16; // world units/s
+const LOBSTER_COLLISION_RADIUS = 1.2;
+const MAP_EDGE_BUFFER = LOBSTER_COLLISION_RADIUS + 0.35;
+const COLLISION_PUSH_BUFFER = 0.35;
+const RECOVERY_MOVE_DISTANCE = 10;
+const RECOVERY_TIMEOUT_MS = 1200;
+const MOVE_PROGRESS_EPSILON = 0.04;
+const MOVE_STUCK_TIMEOUT_MS = 1000;
 
 class OpenBotWorld {
     constructor() {
@@ -13,6 +20,7 @@ class OpenBotWorld {
         this.renderer = null;
         this.controls = null;
         this.agents = new Map(); // agentId -> { mesh, data }
+        this.obstacles = [];
         this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
         this.pollInterval = config.pollInterval;
@@ -207,18 +215,23 @@ class OpenBotWorld {
     }
     
     addDecorations() {
+        this.obstacles = [];
+
         // Add some rocks
         for (let i = 0; i < 20; i++) {
-            const rockGeometry = new THREE.DodecahedronGeometry(Math.random() * 2 + 0.5);
+            const radius = Math.random() * 2 + 0.5;
+            const rockGeometry = new THREE.DodecahedronGeometry(radius);
             const rockMaterial = new THREE.MeshStandardMaterial({
                 color: 0x555555,
                 roughness: 0.9
             });
             const rock = new THREE.Mesh(rockGeometry, rockMaterial);
+            const x = Math.random() * 100;
+            const z = Math.random() * 100;
             rock.position.set(
-                Math.random() * 100,
+                x,
                 Math.random() * 0.5,
-                Math.random() * 100
+                z
             );
             rock.rotation.set(
                 Math.random() * Math.PI,
@@ -228,6 +241,7 @@ class OpenBotWorld {
             rock.castShadow = true;
             rock.receiveShadow = true;
             this.scene.add(rock);
+            this.obstacles.push({ x, z, radius: radius + 0.45 });
         }
         
         // Add some kelp/seaweed
@@ -238,12 +252,15 @@ class OpenBotWorld {
                 roughness: 0.7
             });
             const kelp = new THREE.Mesh(kelpGeometry, kelpMaterial);
+            const x = Math.random() * 100;
+            const z = Math.random() * 100;
             kelp.position.set(
-                Math.random() * 100,
+                x,
                 Math.random() * 2.5 + 1.25,
-                Math.random() * 100
+                z
             );
             this.scene.add(kelp);
+            this.obstacles.push({ x, z, radius: 0.9 });
         }
     }
     
@@ -1692,6 +1709,12 @@ class OpenBotWorld {
             baseYaw: agentData.rotation || 0,
             serverYawTarget: agentData.rotation || 0,
             movementTarget: new THREE.Vector3(agentData.position.x, 0, agentData.position.z),
+            serverMovementTarget: new THREE.Vector3(agentData.position.x, 0, agentData.position.z),
+            recoveryTarget: null,
+            recoveryUntilMs: 0,
+            stuckTimeMs: 0,
+            lastProgressX: agentData.position.x,
+            lastProgressZ: agentData.position.z,
             lastLocomotionFrameMs: Date.now(),
             lastActionType: null,
             lastState: null,
@@ -1771,7 +1794,10 @@ class OpenBotWorld {
         if (agent) {
             const anim = agent.animation;
             if (anim && position) {
-                anim.movementTarget.set(position.x, 0, position.z);
+                anim.serverMovementTarget.set(position.x, 0, position.z);
+                if (!anim.recoveryTarget) {
+                    anim.movementTarget.copy(anim.serverMovementTarget);
+                }
             }
             if (rotation !== undefined) {
                 if (anim) {
@@ -1790,6 +1816,131 @@ class OpenBotWorld {
         return Math.atan2(Math.sin(to - from), Math.cos(to - from));
     }
 
+    clampToPlayableArea(position) {
+        position.x = THREE.MathUtils.clamp(position.x, MAP_EDGE_BUFFER, 100 - MAP_EDGE_BUFFER);
+        position.z = THREE.MathUtils.clamp(position.z, MAP_EDGE_BUFFER, 100 - MAP_EDGE_BUFFER);
+    }
+
+    clearRecoveryTarget(anim) {
+        if (!anim) return;
+        anim.recoveryTarget = null;
+        anim.recoveryUntilMs = 0;
+        anim.movementTarget.copy(anim.serverMovementTarget);
+        anim.stuckTimeMs = 0;
+        anim.lastProgressX = anim.movementTarget.x;
+        anim.lastProgressZ = anim.movementTarget.z;
+    }
+
+    assignRecoveryTarget(agent, awayX, awayZ, nowMs) {
+        const anim = agent?.animation;
+        const mesh = agent?.mesh;
+        if (!anim || !mesh) return;
+
+        const magnitude = Math.hypot(awayX, awayZ);
+        if (magnitude < 1e-5) {
+            this.clearRecoveryTarget(anim);
+            return;
+        }
+
+        const nx = awayX / magnitude;
+        const nz = awayZ / magnitude;
+        const target = new THREE.Vector3(
+            mesh.position.x + (nx * RECOVERY_MOVE_DISTANCE),
+            0,
+            mesh.position.z + (nz * RECOVERY_MOVE_DISTANCE)
+        );
+        this.clampToPlayableArea(target);
+
+        anim.recoveryTarget = target;
+        anim.recoveryUntilMs = nowMs + RECOVERY_TIMEOUT_MS;
+        anim.movementTarget.copy(target);
+        anim.stuckTimeMs = 0;
+        anim.lastProgressX = mesh.position.x;
+        anim.lastProgressZ = mesh.position.z;
+    }
+
+    resolveEnvironmentCollisionForAgent(agent, nowMs) {
+        const mesh = agent?.mesh;
+        if (!mesh) return;
+
+        let escapeX = 0;
+        let escapeZ = 0;
+        let collided = false;
+
+        if (mesh.position.x < MAP_EDGE_BUFFER) {
+            escapeX += 1;
+            mesh.position.x = MAP_EDGE_BUFFER;
+            collided = true;
+        } else if (mesh.position.x > 100 - MAP_EDGE_BUFFER) {
+            escapeX -= 1;
+            mesh.position.x = 100 - MAP_EDGE_BUFFER;
+            collided = true;
+        }
+
+        if (mesh.position.z < MAP_EDGE_BUFFER) {
+            escapeZ += 1;
+            mesh.position.z = MAP_EDGE_BUFFER;
+            collided = true;
+        } else if (mesh.position.z > 100 - MAP_EDGE_BUFFER) {
+            escapeZ -= 1;
+            mesh.position.z = 100 - MAP_EDGE_BUFFER;
+            collided = true;
+        }
+
+        for (const obstacle of this.obstacles) {
+            const dx = mesh.position.x - obstacle.x;
+            const dz = mesh.position.z - obstacle.z;
+            const minDistance = LOBSTER_COLLISION_RADIUS + obstacle.radius;
+            const distSq = (dx * dx) + (dz * dz);
+            if (distSq >= minDistance * minDistance) continue;
+
+            const dist = Math.max(Math.sqrt(distSq), 0.0001);
+            const overlap = (minDistance - dist) + COLLISION_PUSH_BUFFER;
+            const nx = dx / dist;
+            const nz = dz / dist;
+            mesh.position.x += nx * overlap;
+            mesh.position.z += nz * overlap;
+            escapeX += nx;
+            escapeZ += nz;
+            collided = true;
+        }
+
+        if (!collided) return;
+
+        this.clampToPlayableArea(mesh.position);
+        this.assignRecoveryTarget(agent, escapeX, escapeZ, nowMs);
+    }
+
+    resolveAgentCollisions(nowMs) {
+        const liveAgents = Array.from(this.agents.values());
+        for (let i = 0; i < liveAgents.length; i += 1) {
+            const a = liveAgents[i];
+            for (let j = i + 1; j < liveAgents.length; j += 1) {
+                const b = liveAgents[j];
+                const dx = b.mesh.position.x - a.mesh.position.x;
+                const dz = b.mesh.position.z - a.mesh.position.z;
+                const minDistance = LOBSTER_COLLISION_RADIUS * 2;
+                const distSq = (dx * dx) + (dz * dz);
+                if (distSq >= minDistance * minDistance) continue;
+
+                const dist = Math.max(Math.sqrt(distSq), 0.0001);
+                const overlap = ((minDistance - dist) * 0.5) + COLLISION_PUSH_BUFFER;
+                const nx = dx / dist;
+                const nz = dz / dist;
+
+                a.mesh.position.x -= nx * overlap;
+                a.mesh.position.z -= nz * overlap;
+                b.mesh.position.x += nx * overlap;
+                b.mesh.position.z += nz * overlap;
+                this.clampToPlayableArea(a.mesh.position);
+                this.clampToPlayableArea(b.mesh.position);
+
+                this.assignRecoveryTarget(a, -nx, -nz, nowMs);
+                this.assignRecoveryTarget(b, nx, nz, nowMs);
+            }
+        }
+    }
+
     updateAgentLocomotionFrame(agent, nowMs) {
         const anim = agent.animation;
         if (!anim) return;
@@ -1800,8 +1951,13 @@ class OpenBotWorld {
         anim.lastLocomotionFrameMs = nowMs;
         if (dt <= 0) return;
 
-        const target = anim.movementTarget;
+        if (anim.recoveryTarget && nowMs >= anim.recoveryUntilMs) {
+            this.clearRecoveryTarget(anim);
+        }
+
+        const target = anim.recoveryTarget || anim.serverMovementTarget || anim.movementTarget;
         if (!target) return;
+        anim.movementTarget.copy(target);
 
         const toTargetX = target.x - mesh.position.x;
         const toTargetZ = target.z - mesh.position.z;
@@ -1820,18 +1976,50 @@ class OpenBotWorld {
                 mesh.position.z += Math.sin(mesh.rotation.y) * forwardStep;
             }
 
-            if (distance <= 0.08) {
+            const progressDx = mesh.position.x - Number(anim.lastProgressX ?? mesh.position.x);
+            const progressDz = mesh.position.z - Number(anim.lastProgressZ ?? mesh.position.z);
+            const progressDistance = Math.hypot(progressDx, progressDz);
+            if (progressDistance >= MOVE_PROGRESS_EPSILON) {
+                anim.stuckTimeMs = 0;
+                anim.lastProgressX = mesh.position.x;
+                anim.lastProgressZ = mesh.position.z;
+            } else if (headingError <= LOBSTER_HEAD_ALIGNMENT_THRESHOLD) {
+                anim.stuckTimeMs = Number(anim.stuckTimeMs || 0) + (dt * 1000);
+                if (anim.stuckTimeMs >= MOVE_STUCK_TIMEOUT_MS) {
+                    if (anim.recoveryTarget) {
+                        this.clearRecoveryTarget(anim);
+                    } else {
+                        anim.lastProgressX = mesh.position.x;
+                        anim.lastProgressZ = mesh.position.z;
+                        anim.movementTarget.copy(anim.serverMovementTarget);
+                    }
+                    anim.stuckTimeMs = 0;
+                }
+            }
+
+            this.resolveEnvironmentCollisionForAgent(agent, nowMs);
+
+            const remainingDistance = Math.hypot(target.x - mesh.position.x, target.z - mesh.position.z);
+            if (remainingDistance <= 0.08) {
                 mesh.position.x = target.x;
                 mesh.position.z = target.z;
+                if (anim.recoveryTarget) {
+                    this.clearRecoveryTarget(anim);
+                }
             }
 
             anim.baseYaw = mesh.rotation.y;
             return;
         }
 
+        if (anim.recoveryTarget) {
+            this.clearRecoveryTarget(anim);
+        }
+
         const idleYawDelta = this.shortestAngleDelta(mesh.rotation.y, Number(anim.serverYawTarget || mesh.rotation.y));
         const idleTurn = LOBSTER_MAX_TURN_RATE * 0.75 * dt;
         mesh.rotation.y += THREE.MathUtils.clamp(idleYawDelta, -idleTurn, idleTurn);
+        this.resolveEnvironmentCollisionForAgent(agent, nowMs);
         anim.baseYaw = mesh.rotation.y;
     }
 
@@ -2619,6 +2807,11 @@ class OpenBotWorld {
 
         this.agents.forEach((agent) => {
             this.updateAgentLocomotionFrame(agent, nowMs);
+        });
+
+        this.resolveAgentCollisions(nowMs);
+
+        this.agents.forEach((agent) => {
             this.applyAgentAnimationFrame(agent, nowMs);
         });
 
