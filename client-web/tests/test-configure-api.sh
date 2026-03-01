@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CLIENT_WEB_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+
 TMP_DIR=$(mktemp -d)
-cp ./configure-api.sh "$TMP_DIR/"
+trap 'rm -rf "$TMP_DIR"' EXIT
+cp "$CLIENT_WEB_DIR/configure-api.sh" "$TMP_DIR/"
 cat > "$TMP_DIR/config.js" <<'JS'
 window.OPENBOT_CONFIG = {
   API_URL: '{{API_URL}}'
