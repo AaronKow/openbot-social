@@ -82,6 +82,9 @@ class OpenBotWorld {
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
+        this.ignoredAnimationStateLogThrottleMs = 60_000;
+        this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
+        this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
         this.utcClockFormatter = new Intl.DateTimeFormat('en-US', {
             hour: '2-digit',
             minute: '2-digit',
@@ -1608,6 +1611,7 @@ class OpenBotWorld {
         const agents = Array.isArray(data.agents) ? data.agents : [];
 
         if (isDeltaPayload && !deltaWindowMissed) {
+            // Invariant: animation state updates must run in both delta + full-sync paths.
             agents.forEach(agent => {
                 if (this.agents.has(agent.id)) {
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
@@ -1650,6 +1654,10 @@ class OpenBotWorld {
         // Enable delta polling after first successful full sync
         if (!isDeltaPayload || deltaWindowMissed) {
             this.worldDeltaEnabled = true;
+        }
+
+        if (this.showAnimationDiagnosticsInAgentList && this.followedAgentId) {
+            this.updateAgentList();
         }
 
         this.updateStatus();
@@ -1746,14 +1754,46 @@ class OpenBotWorld {
     }
 
     resolveAnimationType(agentData) {
-        const actionType = String(agentData?.lastAction?.type || '').toLowerCase();
-        const state = String(agentData?.state || '').toLowerCase();
-        const combined = `${actionType} ${state}`;
+        const actionType = String(agentData?.lastAction?.type || '').toLowerCase().trim();
+        const state = String(agentData?.state || '').toLowerCase().trim();
 
-        if (/jump|hop|leap/.test(combined)) return 'jump';
-        if (/dance|dancing|groove|boogie/.test(combined)) return 'dance';
-        if (/emote|wave|cheer|signal|pose|react/.test(combined)) return 'emote';
+        const jumpAliases = ['jump', 'hop', 'leap', 'bounce'];
+        const danceAliases = ['dance', 'dancing', 'groove', 'boogie', 'shimmy'];
+        const emoteAliases = ['emote', 'wave', 'cheer', 'signal', 'pose', 'react', 'gesture'];
+
+        const actionTokens = actionType.split(/[^a-z0-9]+/).filter(Boolean);
+        const stateTokens = state.split(/[^a-z0-9]+/).filter(Boolean);
+        const hasAnyAlias = (aliases) => aliases.some(alias => (
+            actionType === alias
+            || state === alias
+            || actionTokens.includes(alias)
+            || stateTokens.includes(alias)
+        ));
+
+        if (hasAnyAlias(jumpAliases)) return 'jump';
+        if (hasAnyAlias(danceAliases)) return 'dance';
+        if (hasAnyAlias(emoteAliases)) return 'emote';
         return null;
+    }
+
+    maybeLogIgnoredAnimationState(agentId, agentData) {
+        const actionType = String(agentData?.lastAction?.type || '').toLowerCase().trim();
+        const state = String(agentData?.state || '').toLowerCase().trim();
+        if (!actionType && !state) return;
+
+        const key = `${actionType || 'none'}|${state || 'none'}`;
+        const now = Date.now();
+        const lastLoggedAt = this.ignoredAnimationStateLogs.get(key) || 0;
+        if (now - lastLoggedAt < this.ignoredAnimationStateLogThrottleMs) {
+            return;
+        }
+
+        this.ignoredAnimationStateLogs.set(key, now);
+        console.info('[animation] ignored action/state combination (no matching animType)', {
+            agentId,
+            actionType: actionType || null,
+            state: state || null
+        });
     }
 
     getAnimationDurationMs(animType) {
@@ -1778,6 +1818,7 @@ class OpenBotWorld {
         anim.lastState = nextState;
 
         if (!nextAnimType) {
+            this.maybeLogIgnoredAnimationState(agentId, agentData);
             anim.animType = null;
             anim.animStartMs = 0;
             anim.animDurationMs = 0;
@@ -2430,7 +2471,17 @@ class OpenBotWorld {
             const itemDiv = document.createElement('div');
             itemDiv.className = 'agent-item';
             const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
-            itemDiv.textContent = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
+            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
+            const isSelected = this.followedAgentId === id;
+            if (this.showAnimationDiagnosticsInAgentList && isSelected) {
+                const anim = agent.animation || {};
+                const animType = anim.animType || 'none';
+                const baseYaw = Number(anim.baseYaw || 0).toFixed(2);
+                const lastAction = agent.data?.lastAction?.type || anim.lastActionType || 'none';
+                itemDiv.textContent = `${summary} [animType=${animType}, baseYaw=${baseYaw}, lastAction=${lastAction}]`;
+            } else {
+                itemDiv.textContent = summary;
+            }
             itemDiv.style.cursor = 'pointer';
             itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);
