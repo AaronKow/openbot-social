@@ -118,25 +118,50 @@ class OfflineMockWorld {
     }
 
     createLobsterMesh() {
+        // Match production lobster model from client-web/client.js
         const group = new THREE.Group();
-        const body = new THREE.Mesh(
-            new THREE.CapsuleGeometry(0.3, 1.2, 8, 16),
-            new THREE.MeshStandardMaterial({ color: 0xff4444, roughness: 0.5, metalness: 0.3 })
-        );
+
+        const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.2, 8, 16);
+        const bodyMaterial = new THREE.MeshStandardMaterial({
+            color: 0xff4444,
+            roughness: 0.5,
+            metalness: 0.3
+        });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
         body.rotation.z = Math.PI / 2;
         body.castShadow = true;
         group.add(body);
 
-        const clawGeom = new THREE.BoxGeometry(0.15, 0.12, 0.6);
-        const clawMat = new THREE.MeshStandardMaterial({ color: 0xff6666, roughness: 0.4 });
-        const leftClaw = new THREE.Mesh(clawGeom, clawMat);
-        leftClaw.position.set(0.55, 0.18, 0.18);
+        for (let i = 0; i < 3; i += 1) {
+            const segmentGeometry = new THREE.BoxGeometry(0.4 - i * 0.05, 0.5 - i * 0.1, 0.3 - i * 0.05);
+            const segment = new THREE.Mesh(segmentGeometry, bodyMaterial);
+            segment.position.set(-0.7 - i * 0.45, 0, 0);
+            segment.castShadow = true;
+            group.add(segment);
+        }
+
+        const clawGeometry = new THREE.BoxGeometry(0.6, 0.2, 0.2);
+        const leftClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
+        leftClaw.position.set(0.8, 0.4, 0);
         leftClaw.castShadow = true;
         group.add(leftClaw);
 
-        const rightClaw = leftClaw.clone();
-        rightClaw.position.z = -0.18;
+        const rightClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
+        rightClaw.position.set(0.8, -0.4, 0);
+        rightClaw.castShadow = true;
         group.add(rightClaw);
+
+        const antennaGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.8);
+        const antennaMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
+        const leftAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
+        leftAntenna.position.set(0.8, 0.15, 0.2);
+        leftAntenna.rotation.z = Math.PI / 6;
+        group.add(leftAntenna);
+
+        const rightAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
+        rightAntenna.position.set(0.8, -0.15, 0.2);
+        rightAntenna.rotation.z = -Math.PI / 6;
+        group.add(rightAntenna);
 
         return group;
     }
