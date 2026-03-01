@@ -82,6 +82,9 @@ class OpenBotWorld {
         this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
+        this.ignoredAnimationStateLogThrottleMs = 60_000;
+        this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
+        this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
         this.utcClockFormatter = new Intl.DateTimeFormat('en-US', {
             hour: '2-digit',
             minute: '2-digit',
@@ -243,75 +246,57 @@ class OpenBotWorld {
     createLobsterModel() {
         // Lobster body - simplified representation
         const group = new THREE.Group();
-
-        const frontRig = new THREE.Group();
-        frontRig.name = 'frontRig';
-        group.add(frontRig);
-        
-        // Main body
-        const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.2, 8, 16);
         const bodyMaterial = new THREE.MeshStandardMaterial({
             color: 0xff4444,
             roughness: 0.5,
             metalness: 0.3
         });
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.name = 'lobsterBody';
-        body.rotation.z = Math.PI / 2;
-        body.castShadow = true;
-        group.add(body);
 
-        // Front rig keeps all face-facing parts under one orientation parent.
-        const frontRig = new THREE.Group();
-        frontRig.name = 'frontRig';
-        frontRig.position.set(0.8, 0, 0);
-        group.add(frontRig);
+        const addPart = (geometry, position, rotation = null, material = bodyMaterial) => {
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(position.x, position.y, position.z);
+            if (rotation) {
+                mesh.rotation.set(rotation.x || 0, rotation.y || 0, rotation.z || 0);
+            }
+            mesh.castShadow = true;
+            group.add(mesh);
+            return mesh;
+        };
 
-        // Dedicated head at the front of the body.
-        const headGeometry = new THREE.SphereGeometry(0.22, 12, 12);
-        const head = new THREE.Mesh(headGeometry, bodyMaterial);
-        head.name = 'head';
-        head.castShadow = true;
-        frontRig.add(head);
-        
+        // Main body
+        addPart(
+            new THREE.CapsuleGeometry(0.3, 1.2, 8, 16),
+            { x: 0, y: 0, z: 0 },
+            { z: Math.PI / 2 }
+        );
+
         // Tail segments
         for (let i = 0; i < 3; i++) {
-            const segmentGeometry = new THREE.BoxGeometry(0.4 - i * 0.05, 0.5 - i * 0.1, 0.3 - i * 0.05);
-            const segment = new THREE.Mesh(segmentGeometry, bodyMaterial);
-            segment.position.set(-0.7 - i * 0.45, 0, 0);
-            segment.castShadow = true;
-            group.add(segment);
+            addPart(
+                new THREE.BoxGeometry(0.4 - i * 0.05, 0.5 - i * 0.1, 0.3 - i * 0.05),
+                { x: -0.7 - i * 0.45, y: 0, z: 0 }
+            );
         }
-        
+
         // Claws
-        const clawGeometry = new THREE.BoxGeometry(0.6, 0.2, 0.2);
-        const leftClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        leftClaw.name = 'leftClaw';
-        leftClaw.position.set(0.28, 0.4, 0);
-        leftClaw.castShadow = true;
-        frontRig.add(leftClaw);
-        
-        const rightClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        rightClaw.name = 'rightClaw';
-        rightClaw.position.set(0.28, -0.4, 0);
-        rightClaw.castShadow = true;
-        frontRig.add(rightClaw);
-        
+        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: 0.4, z: 0 });
+        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: -0.4, z: 0 });
+
         // Antennae
-        const antennaGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.8);
         const antennaMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
-        const leftAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        leftAntenna.name = 'leftAntenna';
-        leftAntenna.position.set(0.25, 0.15, 0.2);
-        leftAntenna.rotation.z = Math.PI / 6;
-        frontRig.add(leftAntenna);
-        
-        const rightAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        rightAntenna.name = 'rightAntenna';
-        rightAntenna.position.set(0.25, -0.15, 0.2);
-        rightAntenna.rotation.z = -Math.PI / 6;
-        frontRig.add(rightAntenna);
-        
+        addPart(
+            new THREE.CylinderGeometry(0.02, 0.02, 0.8),
+            { x: 0.8, y: 0.15, z: 0.2 },
+            { z: Math.PI / 6 },
+            antennaMaterial
+        );
+        addPart(
+            new THREE.CylinderGeometry(0.02, 0.02, 0.8),
+            { x: 0.8, y: -0.15, z: 0.2 },
+            { z: -Math.PI / 6 },
+            antennaMaterial
+        );
+
         return group;
     }
 
@@ -1631,6 +1616,7 @@ class OpenBotWorld {
         const agents = Array.isArray(data.agents) ? data.agents : [];
 
         if (isDeltaPayload && !deltaWindowMissed) {
+            // Invariant: animation state updates must run in both delta + full-sync paths.
             agents.forEach(agent => {
                 if (this.agents.has(agent.id)) {
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
@@ -1673,6 +1659,10 @@ class OpenBotWorld {
         // Enable delta polling after first successful full sync
         if (!isDeltaPayload || deltaWindowMissed) {
             this.worldDeltaEnabled = true;
+        }
+
+        if (this.showAnimationDiagnosticsInAgentList && this.followedAgentId) {
+            this.updateAgentList();
         }
 
         this.updateStatus();
@@ -1790,14 +1780,46 @@ class OpenBotWorld {
     }
 
     resolveAnimationType(agentData) {
-        const actionType = String(agentData?.lastAction?.type || '').toLowerCase();
-        const state = String(agentData?.state || '').toLowerCase();
-        const combined = `${actionType} ${state}`;
+        const actionType = String(agentData?.lastAction?.type || '').toLowerCase().trim();
+        const state = String(agentData?.state || '').toLowerCase().trim();
 
-        if (/jump|hop|leap/.test(combined)) return 'jump';
-        if (/dance|dancing|groove|boogie/.test(combined)) return 'dance';
-        if (/emote|wave|cheer|signal|pose|react/.test(combined)) return 'emote';
+        const jumpAliases = ['jump', 'hop', 'leap', 'bounce'];
+        const danceAliases = ['dance', 'dancing', 'groove', 'boogie', 'shimmy'];
+        const emoteAliases = ['emote', 'wave', 'cheer', 'signal', 'pose', 'react', 'gesture'];
+
+        const actionTokens = actionType.split(/[^a-z0-9]+/).filter(Boolean);
+        const stateTokens = state.split(/[^a-z0-9]+/).filter(Boolean);
+        const hasAnyAlias = (aliases) => aliases.some(alias => (
+            actionType === alias
+            || state === alias
+            || actionTokens.includes(alias)
+            || stateTokens.includes(alias)
+        ));
+
+        if (hasAnyAlias(jumpAliases)) return 'jump';
+        if (hasAnyAlias(danceAliases)) return 'dance';
+        if (hasAnyAlias(emoteAliases)) return 'emote';
         return null;
+    }
+
+    maybeLogIgnoredAnimationState(agentId, agentData) {
+        const actionType = String(agentData?.lastAction?.type || '').toLowerCase().trim();
+        const state = String(agentData?.state || '').toLowerCase().trim();
+        if (!actionType && !state) return;
+
+        const key = `${actionType || 'none'}|${state || 'none'}`;
+        const now = Date.now();
+        const lastLoggedAt = this.ignoredAnimationStateLogs.get(key) || 0;
+        if (now - lastLoggedAt < this.ignoredAnimationStateLogThrottleMs) {
+            return;
+        }
+
+        this.ignoredAnimationStateLogs.set(key, now);
+        console.info('[animation] ignored action/state combination (no matching animType)', {
+            agentId,
+            actionType: actionType || null,
+            state: state || null
+        });
     }
 
     getAnimationDurationMs(animType) {
@@ -1822,6 +1844,7 @@ class OpenBotWorld {
         anim.lastState = nextState;
 
         if (!nextAnimType) {
+            this.maybeLogIgnoredAnimationState(agentId, agentData);
             anim.animType = null;
             anim.animStartMs = 0;
             anim.animDurationMs = 0;
@@ -2484,7 +2507,17 @@ class OpenBotWorld {
             const itemDiv = document.createElement('div');
             itemDiv.className = 'agent-item';
             const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
-            itemDiv.textContent = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
+            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
+            const isSelected = this.followedAgentId === id;
+            if (this.showAnimationDiagnosticsInAgentList && isSelected) {
+                const anim = agent.animation || {};
+                const animType = anim.animType || 'none';
+                const baseYaw = Number(anim.baseYaw || 0).toFixed(2);
+                const lastAction = agent.data?.lastAction?.type || anim.lastActionType || 'none';
+                itemDiv.textContent = `${summary} [animType=${animType}, baseYaw=${baseYaw}, lastAction=${lastAction}]`;
+            } else {
+                itemDiv.textContent = summary;
+            }
             itemDiv.style.cursor = 'pointer';
             itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);
