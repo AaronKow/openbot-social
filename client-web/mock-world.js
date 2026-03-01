@@ -325,6 +325,10 @@ class OfflineMockWorld {
         position.z = Math.max(0, Math.min(WORLD_SIZE, position.z));
     }
 
+    shortestAngleDelta(from, to) {
+        return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    }
+
     updateLobster(lobster, dt) {
         if (this.simulationTime >= lobster.nextDecisionAt) {
             const action = this.chooseWeightedAction(lobster);
@@ -338,10 +342,23 @@ class OfflineMockWorld {
 
         if (distance > 0.12) {
             direction.normalize();
-            mesh.position.x += direction.x * lobster.speed * dt;
-            mesh.position.z += direction.z * lobster.speed * dt;
             const targetYaw = Math.atan2(direction.z, direction.x);
-            mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, targetYaw, 0.16);
+            const yawDelta = this.shortestAngleDelta(mesh.rotation.y, targetYaw);
+
+            // Rotate toward target with shortest-angle turn to avoid occasional tail-first movement.
+            const maxTurnRate = 5.0; // rad/s
+            const maxTurnThisTick = maxTurnRate * dt;
+            const clampedTurn = THREE.MathUtils.clamp(yawDelta, -maxTurnThisTick, maxTurnThisTick);
+            mesh.rotation.y += clampedTurn;
+
+            // Move only when mostly facing forward so head leads motion.
+            const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
+            if (headingError < 0.45) {
+                const moveScale = THREE.MathUtils.clamp(1 - headingError / 0.45, 0, 1);
+                const moveStep = lobster.speed * dt * moveScale;
+                mesh.position.x += direction.x * moveStep;
+                mesh.position.z += direction.z * moveStep;
+            }
         }
 
         if (lobster.jumpActive) {
