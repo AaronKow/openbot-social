@@ -4,6 +4,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const WORLD_SIZE = 100;
 const HALF_WORLD = WORLD_SIZE / 2;
 const FIXED_STEP_SECONDS = 1 / 60;
+const GROUND_Y = 0;
+const LOBSTER_COLLISION_RADIUS = 1.2;
 
 function createSeededRng(seedText) {
     const text = String(seedText || 'openbot-mock-default');
@@ -166,6 +168,17 @@ class OfflineMockWorld {
         return group;
     }
 
+
+    measureLobsterPhysics(mesh) {
+        mesh.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(mesh);
+        const baseY = Math.max(0.01, GROUND_Y - bounds.min.y + 0.02);
+        return {
+            baseY,
+            collisionRadius: LOBSTER_COLLISION_RADIUS
+        };
+    }
+
     createLobsters() {
         const seedPreview = this.seed;
         const lobsterSpecs = [
@@ -177,6 +190,8 @@ class OfflineMockWorld {
             const mesh = this.createLobsterMesh();
             mesh.position.copy(spec.start);
             mesh.rotation.y = this.randomRange(0, Math.PI * 2);
+            const physics = this.measureLobsterPhysics(mesh);
+            mesh.position.y = physics.baseY;
             this.scene.add(mesh);
 
             const label = this.makeLabelSprite(`${spec.name} · idle`);
@@ -188,8 +203,10 @@ class OfflineMockWorld {
                 mesh,
                 label,
                 labelText: `${spec.name} · idle`,
-                target: spec.start.clone(),
+                target: new THREE.Vector3(spec.start.x, 0, spec.start.z),
                 speed: this.randomRange(2.2, 2.8),
+                baseY: physics.baseY,
+                collisionRadius: physics.collisionRadius,
                 jumpActive: false,
                 jumpPhase: 0,
                 danceTimeLeft: 0,
@@ -323,16 +340,16 @@ class OfflineMockWorld {
             direction.normalize();
             mesh.position.x += direction.x * lobster.speed * dt;
             mesh.position.z += direction.z * lobster.speed * dt;
-            const targetYaw = Math.atan2(direction.x, direction.z);
+            const targetYaw = Math.atan2(direction.z, direction.x);
             mesh.rotation.y = THREE.MathUtils.lerp(mesh.rotation.y, targetYaw, 0.16);
         }
 
         if (lobster.jumpActive) {
             lobster.jumpPhase += dt * 6.5;
-            mesh.position.y = Math.max(0, Math.sin(lobster.jumpPhase) * 1.25);
+            mesh.position.y = lobster.baseY + Math.max(0, Math.sin(lobster.jumpPhase) * 1.25);
             if (lobster.jumpPhase >= Math.PI) {
                 lobster.jumpActive = false;
-                mesh.position.y = 0;
+                mesh.position.y = lobster.baseY;
                 if (lobster.currentAction === 'jump') {
                     lobster.currentAction = 'idle';
                     this.setLabel(lobster, `${lobster.name} · idle`);
@@ -357,10 +374,45 @@ class OfflineMockWorld {
             }
         }
 
+        this.keepLobsterAboveGround(lobster);
         this.clampToWorld(mesh.position);
 
         if (mesh.position.x <= 0 + 0.2 || mesh.position.x >= WORLD_SIZE - 0.2 || mesh.position.z <= 0 + 0.2 || mesh.position.z >= WORLD_SIZE - 0.2) {
             lobster.target.set(this.randomRange(10, 90), 0, this.randomRange(10, 90));
+        }
+    }
+
+
+    keepLobsterAboveGround(lobster) {
+        const minAllowedY = Math.max(lobster.baseY, GROUND_Y);
+        lobster.mesh.position.y = Math.max(lobster.mesh.position.y, minAllowedY);
+    }
+
+    resolveLobsterCollisions() {
+        for (let i = 0; i < this.lobsters.length; i += 1) {
+            const a = this.lobsters[i];
+            for (let j = i + 1; j < this.lobsters.length; j += 1) {
+                const b = this.lobsters[j];
+                const dx = b.mesh.position.x - a.mesh.position.x;
+                const dz = b.mesh.position.z - a.mesh.position.z;
+                const distSq = dx * dx + dz * dz;
+                const minDist = a.collisionRadius + b.collisionRadius;
+                if (distSq >= minDist * minDist) continue;
+
+                const dist = Math.max(Math.sqrt(distSq), 0.0001);
+                const overlap = minDist - dist;
+                const nx = dx / dist;
+                const nz = dz / dist;
+                const push = overlap * 0.5;
+
+                a.mesh.position.x -= nx * push;
+                a.mesh.position.z -= nz * push;
+                b.mesh.position.x += nx * push;
+                b.mesh.position.z += nz * push;
+
+                this.clampToWorld(a.mesh.position);
+                this.clampToWorld(b.mesh.position);
+            }
         }
     }
 
@@ -369,6 +421,7 @@ class OfflineMockWorld {
         for (const lobster of this.lobsters) {
             this.updateLobster(lobster, dt);
         }
+        this.resolveLobsterCollisions();
     }
 
     animate() {
