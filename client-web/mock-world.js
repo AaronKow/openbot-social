@@ -357,11 +357,14 @@ class OfflineMockWorld {
             // Translate only during "move" so other actions don't produce side/tail drift.
             if (lobster.currentAction === 'move') {
                 const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
-                if (headingError < 0.45) {
-                    const moveScale = THREE.MathUtils.clamp(1 - headingError / 0.45, 0, 1);
-                    const moveStep = lobster.speed * dt * moveScale;
-                    mesh.position.x += direction.x * moveStep;
-                    mesh.position.z += direction.z * moveStep;
+                const forwardMoveThreshold = THREE.MathUtils.degToRad(12);
+                if (headingError <= forwardMoveThreshold) {
+                    const alignmentScale = THREE.MathUtils.clamp(1 - headingError / forwardMoveThreshold, 0.25, 1);
+                    const moveStep = lobster.speed * dt * alignmentScale;
+                    const forwardX = Math.cos(mesh.rotation.y);
+                    const forwardZ = Math.sin(mesh.rotation.y);
+                    mesh.position.x += forwardX * moveStep;
+                    mesh.position.z += forwardZ * moveStep;
                 }
             }
         }
