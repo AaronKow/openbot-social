@@ -15,6 +15,14 @@ function asPositiveInt(value, fallback = 1) {
   return Math.max(1, Math.floor(n));
 }
 
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
 function validateActionItem(raw) {
   if (!raw || typeof raw !== 'object') {
     throw new Error('Each action must be an object');
@@ -65,12 +73,29 @@ function validateActionItem(raw) {
 
   if (type === 'dance') {
     const style = String(raw.style || '').trim();
-    if (style) action.style = style.slice(0, 64);
+    action.style = (style || 'idle-groove').slice(0, 64);
+    action.durationTicks = clampNumber(raw.durationTicks, 1, MAX_TICKS_PER_ACTION, requiredTicks);
+    if (raw.tempo !== undefined) {
+      action.tempo = clampNumber(raw.tempo, 0.5, 2.5, 1);
+    }
   }
 
   if (type === 'emote') {
     const emote = String(raw.emote || '').trim();
     action.emote = (emote || 'wave').slice(0, 64);
+    action.durationTicks = clampNumber(raw.durationTicks, 1, MAX_TICKS_PER_ACTION, requiredTicks);
+    if (raw.intensity !== undefined) {
+      action.intensity = clampNumber(raw.intensity, 0.1, 2, 1);
+    }
+  }
+
+  if (type === 'jump') {
+    action.height = clampNumber(raw.height, 0.25, 6, 1);
+    action.durationTicks = clampNumber(raw.durationTicks, 1, MAX_TICKS_PER_ACTION, requiredTicks);
+    const style = String(raw.style || '').trim();
+    if (style) {
+      action.style = style.slice(0, 64);
+    }
   }
 
   return action;

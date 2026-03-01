@@ -738,6 +738,57 @@ function applyQueueAction(agent, action) {
     return;
   }
 
+  if (action.type === 'jump') {
+    const jumpPayload = {
+      type: 'jump',
+      height: Number.isFinite(Number(action.height)) ? Number(action.height) : 1,
+      durationTicks: Math.max(1, Math.floor(Number(action.durationTicks) || Number(action.requiredTicks) || 1)),
+    };
+    if (action.style) {
+      jumpPayload.style = String(action.style).slice(0, 64);
+    }
+    agent.state = 'jumping';
+    agent.lastAction = jumpPayload;
+    markAgentUpdated(agent);
+    return;
+  }
+
+  if (action.type === 'dance') {
+    const dancePayload = {
+      type: 'dance',
+      style: String(action.style || 'idle-groove').slice(0, 64),
+      durationTicks: Math.max(1, Math.floor(Number(action.durationTicks) || Number(action.requiredTicks) || 1)),
+    };
+    if (action.tempo !== undefined) {
+      const tempo = Number(action.tempo);
+      if (Number.isFinite(tempo)) {
+        dancePayload.tempo = tempo;
+      }
+    }
+    agent.state = 'dancing';
+    agent.lastAction = dancePayload;
+    markAgentUpdated(agent);
+    return;
+  }
+
+  if (action.type === 'emote') {
+    const emotePayload = {
+      type: 'emote',
+      emote: String(action.emote || 'wave').slice(0, 64),
+      durationTicks: Math.max(1, Math.floor(Number(action.durationTicks) || Number(action.requiredTicks) || 1)),
+    };
+    if (action.intensity !== undefined) {
+      const intensity = Number(action.intensity);
+      if (Number.isFinite(intensity)) {
+        emotePayload.intensity = intensity;
+      }
+    }
+    agent.state = 'emoting';
+    agent.lastAction = emotePayload;
+    markAgentUpdated(agent);
+    return;
+  }
+
   const payload = { ...action };
   delete payload.requiredTicks;
   agent.lastAction = payload;
