@@ -296,6 +296,7 @@ class OfflineMockWorld {
         }
 
         if (action === 'jump') {
+            lobster.target.set(lobster.mesh.position.x, 0, lobster.mesh.position.z);
             lobster.jumpActive = true;
             lobster.jumpPhase = 0;
             lobster.cooldowns.jump = now + this.randomRange(3.6, 5.2);
@@ -305,6 +306,7 @@ class OfflineMockWorld {
         }
 
         if (action === 'emote') {
+            lobster.target.set(lobster.mesh.position.x, 0, lobster.mesh.position.z);
             lobster.emoteTimeLeft = this.randomRange(0.7, 1.4);
             lobster.cooldowns.emote = now + this.randomRange(4.2, 6.5);
             lobster.nextDecisionAt = now + this.randomRange(1.2, 1.8);
@@ -313,6 +315,7 @@ class OfflineMockWorld {
             return;
         }
 
+        lobster.target.set(lobster.mesh.position.x, 0, lobster.mesh.position.z);
         lobster.danceTimeLeft = this.randomRange(1.6, 2.8);
         lobster.danceDirection = this.rng() > 0.5 ? 1 : -1;
         lobster.cooldowns.dance = now + this.randomRange(6.2, 9.0);
@@ -345,19 +348,21 @@ class OfflineMockWorld {
             const targetYaw = Math.atan2(direction.z, direction.x);
             const yawDelta = this.shortestAngleDelta(mesh.rotation.y, targetYaw);
 
-            // Rotate toward target with shortest-angle turn to avoid occasional tail-first movement.
+            // Rotate toward target with shortest-angle turn.
             const maxTurnRate = 5.0; // rad/s
             const maxTurnThisTick = maxTurnRate * dt;
             const clampedTurn = THREE.MathUtils.clamp(yawDelta, -maxTurnThisTick, maxTurnThisTick);
             mesh.rotation.y += clampedTurn;
 
-            // Move only when mostly facing forward so head leads motion.
-            const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
-            if (headingError < 0.45) {
-                const moveScale = THREE.MathUtils.clamp(1 - headingError / 0.45, 0, 1);
-                const moveStep = lobster.speed * dt * moveScale;
-                mesh.position.x += direction.x * moveStep;
-                mesh.position.z += direction.z * moveStep;
+            // Translate only during "move" so other actions don't produce side/tail drift.
+            if (lobster.currentAction === 'move') {
+                const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
+                if (headingError < 0.45) {
+                    const moveScale = THREE.MathUtils.clamp(1 - headingError / 0.45, 0, 1);
+                    const moveStep = lobster.speed * dt * moveScale;
+                    mesh.position.x += direction.x * moveStep;
+                    mesh.position.z += direction.z * moveStep;
+                }
             }
         }
 
@@ -384,7 +389,6 @@ class OfflineMockWorld {
 
         if (lobster.danceTimeLeft > 0) {
             lobster.danceTimeLeft -= dt;
-            mesh.rotation.y += lobster.danceDirection * dt * 7.0;
             if (lobster.danceTimeLeft <= 0 && lobster.currentAction === 'dance') {
                 lobster.currentAction = 'idle';
                 this.setLabel(lobster, `${lobster.name} · idle`);
@@ -403,6 +407,23 @@ class OfflineMockWorld {
     keepLobsterAboveGround(lobster) {
         const minAllowedY = Math.max(lobster.baseY, GROUND_Y);
         lobster.mesh.position.y = Math.max(lobster.mesh.position.y, minAllowedY);
+    }
+
+
+    alignHeadingToVelocity(lobster, dt) {
+        const previous = lobster.previousPosition;
+        if (!previous) return;
+
+        const vx = lobster.mesh.position.x - previous.x;
+        const vz = lobster.mesh.position.z - previous.z;
+        const speedSq = vx * vx + vz * vz;
+        if (speedSq < 1e-7) return;
+
+        const velocityYaw = Math.atan2(vz, vx);
+        const yawDelta = this.shortestAngleDelta(lobster.mesh.rotation.y, velocityYaw);
+        const maxAlignRate = 9.0; // rad/s, faster than steering so visible motion always head-first
+        const maxAlignThisTick = maxAlignRate * dt;
+        lobster.mesh.rotation.y += THREE.MathUtils.clamp(yawDelta, -maxAlignThisTick, maxAlignThisTick);
     }
 
     resolveLobsterCollisions() {
@@ -436,9 +457,16 @@ class OfflineMockWorld {
     tick(dt) {
         this.simulationTime += dt;
         for (const lobster of this.lobsters) {
+            lobster.previousPosition = {
+                x: lobster.mesh.position.x,
+                z: lobster.mesh.position.z
+            };
             this.updateLobster(lobster, dt);
         }
         this.resolveLobsterCollisions();
+        for (const lobster of this.lobsters) {
+            this.alignHeadingToVelocity(lobster, dt);
+        }
     }
 
     animate() {
