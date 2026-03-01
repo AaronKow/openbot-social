@@ -6,6 +6,7 @@ const HALF_WORLD = WORLD_SIZE / 2;
 const FIXED_STEP_SECONDS = 1 / 60;
 const GROUND_Y = 0;
 const LOBSTER_COLLISION_RADIUS = 1.2;
+const HEAD_THRUST_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(12);
 
 function createSeededRng(seedText) {
     const text = String(seedText || 'openbot-mock-default');
@@ -357,10 +358,9 @@ class OfflineMockWorld {
             // Translate only during "move" so other actions don't produce side/tail drift.
             if (lobster.currentAction === 'move') {
                 const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
-                const forwardMoveThreshold = THREE.MathUtils.degToRad(12);
-                if (headingError <= forwardMoveThreshold) {
-                    const alignmentScale = THREE.MathUtils.clamp(1 - headingError / forwardMoveThreshold, 0.25, 1);
-                    const moveStep = lobster.speed * dt * alignmentScale;
+                if (headingError <= HEAD_THRUST_ALIGNMENT_THRESHOLD) {
+                    const alignmentScale = THREE.MathUtils.clamp(1 - headingError / HEAD_THRUST_ALIGNMENT_THRESHOLD, 0.25, 1);
+                    const moveStep = Math.min(distance, lobster.speed * dt * alignmentScale);
                     const forwardX = Math.cos(mesh.rotation.y);
                     const forwardZ = Math.sin(mesh.rotation.y);
                     mesh.position.x += forwardX * moveStep;
@@ -430,6 +430,10 @@ class OfflineMockWorld {
     }
 
     resolveLobsterCollisions() {
+        for (const lobster of this.lobsters) {
+            lobster.collisionPush = { x: 0, z: 0 };
+        }
+
         for (let i = 0; i < this.lobsters.length; i += 1) {
             const a = this.lobsters[i];
             for (let j = i + 1; j < this.lobsters.length; j += 1) {
@@ -451,9 +455,22 @@ class OfflineMockWorld {
                 b.mesh.position.x += nx * push;
                 b.mesh.position.z += nz * push;
 
+                a.collisionPush.x -= nx * push;
+                a.collisionPush.z -= nz * push;
+                b.collisionPush.x += nx * push;
+                b.collisionPush.z += nz * push;
+
                 this.clampToWorld(a.mesh.position);
                 this.clampToWorld(b.mesh.position);
             }
+        }
+
+        for (const lobster of this.lobsters) {
+            const push = lobster.collisionPush;
+            if (!push) continue;
+            const pushSq = push.x * push.x + push.z * push.z;
+            if (pushSq < 1e-7) continue;
+            lobster.mesh.rotation.y = Math.atan2(push.z, push.x);
         }
     }
 
