@@ -41,6 +41,14 @@
     <div id="mock-banner">Offline Mock Preview (No Server)</div>
     <div id="mock-meta" aria-live="polite"></div>
     <main id="canvas-container" aria-label="Offline mock world"></main>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
     <script type="module" src="./mock-world.js"></script>
 </body>
 </html>
