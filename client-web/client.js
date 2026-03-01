@@ -256,9 +256,23 @@ class OpenBotWorld {
             metalness: 0.3
         });
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.name = 'lobsterBody';
         body.rotation.z = Math.PI / 2;
         body.castShadow = true;
         group.add(body);
+
+        // Front rig keeps all face-facing parts under one orientation parent.
+        const frontRig = new THREE.Group();
+        frontRig.name = 'frontRig';
+        frontRig.position.set(0.8, 0, 0);
+        group.add(frontRig);
+
+        // Dedicated head at the front of the body.
+        const headGeometry = new THREE.SphereGeometry(0.22, 12, 12);
+        const head = new THREE.Mesh(headGeometry, bodyMaterial);
+        head.name = 'head';
+        head.castShadow = true;
+        frontRig.add(head);
         
         // Tail segments
         for (let i = 0; i < 3; i++) {
@@ -272,12 +286,14 @@ class OpenBotWorld {
         // Claws
         const clawGeometry = new THREE.BoxGeometry(0.6, 0.2, 0.2);
         const leftClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        leftClaw.position.set(0.8, 0.4, 0);
+        leftClaw.name = 'leftClaw';
+        leftClaw.position.set(0.28, 0.4, 0);
         leftClaw.castShadow = true;
         frontRig.add(leftClaw);
         
         const rightClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        rightClaw.position.set(0.8, -0.4, 0);
+        rightClaw.name = 'rightClaw';
+        rightClaw.position.set(0.28, -0.4, 0);
         rightClaw.castShadow = true;
         frontRig.add(rightClaw);
         
@@ -285,12 +301,14 @@ class OpenBotWorld {
         const antennaGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.8);
         const antennaMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
         const leftAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        leftAntenna.position.set(0.8, 0.15, 0.2);
+        leftAntenna.name = 'leftAntenna';
+        leftAntenna.position.set(0.25, 0.15, 0.2);
         leftAntenna.rotation.z = Math.PI / 6;
         frontRig.add(leftAntenna);
         
         const rightAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        rightAntenna.position.set(0.8, -0.15, 0.2);
+        rightAntenna.name = 'rightAntenna';
+        rightAntenna.position.set(0.25, -0.15, 0.2);
         rightAntenna.rotation.z = -Math.PI / 6;
         frontRig.add(rightAntenna);
         
@@ -1837,6 +1855,7 @@ class OpenBotWorld {
             frontRig.rotation.set(0, 0, 0);
         }
         if (body) body.scale.set(1, 1, 1);
+        if (frontRig) frontRig.rotation.set(0, 0, 0);
         if (leftClaw) leftClaw.rotation.z = 0;
         if (rightClaw) rightClaw.rotation.z = 0;
         if (leftAntenna) leftAntenna.rotation.x = 0;
@@ -1862,8 +1881,9 @@ class OpenBotWorld {
                     frontRig.rotation.y = Math.sin(phase * 0.6) * 0.08;
                 }
                 yOffset = Math.sin(phase * 1.4) * 0.1;
-                if (leftClaw) leftClaw.rotation.z = Math.sin(phase * 1.8) * 0.5;
-                if (rightClaw) rightClaw.rotation.z = -Math.sin(phase * 1.8) * 0.5;
+                if (frontRig) frontRig.rotation.y = Math.sin(phase * 1.2) * 0.18;
+                if (leftClaw) leftClaw.rotation.z = Math.sin(phase * 1.8) * 0.45;
+                if (rightClaw) rightClaw.rotation.z = -Math.sin(phase * 1.8) * 0.45;
             } else if (anim.animType === 'emote') {
                 const pulse = Math.sin(progress * Math.PI * 4);
                 yOffset = Math.max(0, Math.sin(progress * Math.PI)) * 0.15;
@@ -1874,6 +1894,7 @@ class OpenBotWorld {
                     const scalePulse = 1 + 0.06 * pulse;
                     body.scale.set(scalePulse, scalePulse, scalePulse);
                 }
+                if (frontRig) frontRig.rotation.z = 0.12 * pulse;
                 if (leftAntenna) leftAntenna.rotation.x = 0.35 * pulse;
                 if (rightAntenna) rightAntenna.rotation.x = -0.35 * pulse;
                 if (leftClaw) leftClaw.rotation.z = 0.25 * pulse;
