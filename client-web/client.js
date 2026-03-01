@@ -1611,6 +1611,7 @@ class OpenBotWorld {
             agents.forEach(agent => {
                 if (this.agents.has(agent.id)) {
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
+                    this.updateAgentAnimationState(agent.id, agent);
                     this.agents.get(agent.id).data = agent;
                 } else {
                     this.addAgent(agent);
@@ -1631,6 +1632,7 @@ class OpenBotWorld {
 
                 if (this.agents.has(agent.id)) {
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
+                    this.updateAgentAnimationState(agent.id, agent);
                     this.agents.get(agent.id).data = agent;
                 } else {
                     this.addAgent(agent);
@@ -1662,11 +1664,33 @@ class OpenBotWorld {
         mesh.position.set(agentData.position.x, 0.5, agentData.position.z);
         mesh.rotation.y = agentData.rotation || 0;
         this.scene.add(mesh);
+
+        const animation = {
+            animType: null,
+            animStartMs: 0,
+            animDurationMs: 0,
+            baseY: mesh.position.y,
+            yOffset: 0,
+            dancePhase: Math.random() * Math.PI * 2,
+            baseYaw: agentData.rotation || 0,
+            lastActionType: null,
+            lastState: null,
+            modelParts: {
+                body: mesh.children[0] || null,
+                leftClaw: mesh.children[4] || null,
+                rightClaw: mesh.children[5] || null,
+                leftAntenna: mesh.children[6] || null,
+                rightAntenna: mesh.children[7] || null
+            }
+        };
         
         this.agents.set(agentData.id, {
             mesh: mesh,
-            data: agentData
+            data: agentData,
+            animation
         });
+
+        this.updateAgentAnimationState(agentData.id, agentData);
         
         // Store agent name mapping for chat clicks
         this.agentNameMap.set(agentData.name, agentData.id);
@@ -1703,16 +1727,129 @@ class OpenBotWorld {
     updateAgentPosition(agentId, position, rotation) {
         const agent = this.agents.get(agentId);
         if (agent) {
-            // Smooth interpolation - keep y fixed at floor level (0.5)
-            agent.mesh.position.lerp(
-                new THREE.Vector3(position.x, 0.5, position.z),
-                0.3
-            );
+            // Smooth interpolation on x/z only, preserving temporary animated y offsets.
+            agent.mesh.position.x += (position.x - agent.mesh.position.x) * 0.3;
+            agent.mesh.position.z += (position.z - agent.mesh.position.z) * 0.3;
+            const anim = agent.animation;
             if (rotation !== undefined) {
-                agent.mesh.rotation.y = rotation;
+                if (anim) {
+                    anim.baseYaw = rotation;
+                } else {
+                    agent.mesh.rotation.y = rotation;
+                }
+            }
+            if (anim) {
+                anim.baseY = 0.5;
             }
             agent.data.position = position;
         }
+    }
+
+    resolveAnimationType(agentData) {
+        const actionType = String(agentData?.lastAction?.type || '').toLowerCase();
+        const state = String(agentData?.state || '').toLowerCase();
+        const combined = `${actionType} ${state}`;
+
+        if (/jump|hop|leap/.test(combined)) return 'jump';
+        if (/dance|dancing|groove|boogie/.test(combined)) return 'dance';
+        if (/emote|wave|cheer|signal|pose|react/.test(combined)) return 'emote';
+        return null;
+    }
+
+    getAnimationDurationMs(animType) {
+        if (animType === 'jump') return 700;
+        if (animType === 'dance') return 2200;
+        if (animType === 'emote') return 900;
+        return 0;
+    }
+
+    updateAgentAnimationState(agentId, agentData) {
+        const agent = this.agents.get(agentId);
+        if (!agent?.animation) return;
+
+        const anim = agent.animation;
+        const nextAnimType = this.resolveAnimationType(agentData);
+        const nextActionType = agentData?.lastAction?.type || null;
+        const nextState = agentData?.state || null;
+
+        const actionChanged = nextActionType !== anim.lastActionType;
+        const stateChanged = nextState !== anim.lastState;
+        anim.lastActionType = nextActionType;
+        anim.lastState = nextState;
+
+        if (!nextAnimType) {
+            anim.animType = null;
+            anim.animStartMs = 0;
+            anim.animDurationMs = 0;
+            anim.yOffset = 0;
+            return;
+        }
+
+        if (actionChanged || stateChanged || anim.animType !== nextAnimType) {
+            anim.animType = nextAnimType;
+            anim.animStartMs = Date.now();
+            anim.animDurationMs = this.getAnimationDurationMs(nextAnimType);
+            anim.yOffset = 0;
+        }
+    }
+
+    applyAgentAnimationFrame(agent, nowMs) {
+        const anim = agent.animation;
+        if (!anim) return;
+
+        const { mesh } = agent;
+        const baseY = anim.baseY ?? 0.5;
+        const body = anim.modelParts.body;
+        const leftClaw = anim.modelParts.leftClaw;
+        const rightClaw = anim.modelParts.rightClaw;
+        const leftAntenna = anim.modelParts.leftAntenna;
+        const rightAntenna = anim.modelParts.rightAntenna;
+
+        // Reset animated transforms each frame to avoid drift and stuck poses.
+        mesh.rotation.y = anim.baseYaw ?? mesh.rotation.y;
+        mesh.rotation.z = 0;
+        if (body) body.scale.set(1, 1, 1);
+        if (leftClaw) leftClaw.rotation.z = 0;
+        if (rightClaw) rightClaw.rotation.z = 0;
+        if (leftAntenna) leftAntenna.rotation.x = 0;
+        if (rightAntenna) rightAntenna.rotation.x = 0;
+
+        let yOffset = 0;
+        if (anim.animType && anim.animDurationMs > 0) {
+            const elapsed = nowMs - anim.animStartMs;
+            const progress = elapsed / anim.animDurationMs;
+
+            if (progress >= 1) {
+                anim.animType = null;
+                anim.animStartMs = 0;
+                anim.animDurationMs = 0;
+            } else if (anim.animType === 'jump') {
+                const jumpHeight = 0.8;
+                const sineArc = Math.sin(progress * Math.PI);
+                yOffset = Math.max(0, jumpHeight * sineArc);
+            } else if (anim.animType === 'dance') {
+                const phase = anim.dancePhase + elapsed * 0.014;
+                mesh.rotation.z = Math.sin(phase) * 0.16;
+                mesh.rotation.y += Math.sin(phase * 0.6) * 0.02;
+                yOffset = Math.sin(phase * 1.4) * 0.1;
+                if (leftClaw) leftClaw.rotation.z = Math.sin(phase * 1.8) * 0.5;
+                if (rightClaw) rightClaw.rotation.z = -Math.sin(phase * 1.8) * 0.5;
+            } else if (anim.animType === 'emote') {
+                const pulse = Math.sin(progress * Math.PI * 4);
+                yOffset = Math.max(0, Math.sin(progress * Math.PI)) * 0.15;
+                if (body) {
+                    const scalePulse = 1 + 0.06 * pulse;
+                    body.scale.set(scalePulse, scalePulse, scalePulse);
+                }
+                if (leftAntenna) leftAntenna.rotation.x = 0.35 * pulse;
+                if (rightAntenna) rightAntenna.rotation.x = -0.35 * pulse;
+                if (leftClaw) leftClaw.rotation.z = 0.25 * pulse;
+                if (rightClaw) rightClaw.rotation.z = -0.25 * pulse;
+            }
+        }
+
+        anim.yOffset = yOffset;
+        mesh.position.y = baseY + yOffset;
     }
     
     /**
@@ -2308,6 +2445,7 @@ class OpenBotWorld {
     
     animate() {
         requestAnimationFrame(() => this.animate());
+        const nowMs = Date.now();
 
         // Update keyboard movement
         this.updateKeyboardMovement();
@@ -2335,6 +2473,10 @@ class OpenBotWorld {
                 this.controls.enabled = true;
             }
         }
+
+        this.agents.forEach((agent) => {
+            this.applyAgentAnimationFrame(agent, nowMs);
+        });
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
