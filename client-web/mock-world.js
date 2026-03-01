@@ -6,7 +6,7 @@ const HALF_WORLD = WORLD_SIZE / 2;
 const FIXED_STEP_SECONDS = 1 / 60;
 const GROUND_Y = 0;
 const LOBSTER_COLLISION_RADIUS = 1.2;
-const HEAD_THRUST_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(12);
+const HEAD_THRUST_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(8);
 
 function createSeededRng(seedText) {
     const text = String(seedText || 'openbot-mock-default');
@@ -359,8 +359,7 @@ class OfflineMockWorld {
             if (lobster.currentAction === 'move') {
                 const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, targetYaw));
                 if (headingError <= HEAD_THRUST_ALIGNMENT_THRESHOLD) {
-                    const alignmentScale = THREE.MathUtils.clamp(1 - headingError / HEAD_THRUST_ALIGNMENT_THRESHOLD, 0.25, 1);
-                    const moveStep = Math.min(distance, lobster.speed * dt * alignmentScale);
+                    const moveStep = Math.min(distance, lobster.speed * dt);
                     const forwardX = Math.cos(mesh.rotation.y);
                     const forwardZ = Math.sin(mesh.rotation.y);
                     mesh.position.x += forwardX * moveStep;
@@ -414,6 +413,8 @@ class OfflineMockWorld {
 
 
     alignHeadingToVelocity(lobster, dt) {
+        if (lobster.currentAction !== 'move') return;
+
         const previous = lobster.previousPosition;
         if (!previous) return;
 
@@ -465,13 +466,6 @@ class OfflineMockWorld {
             }
         }
 
-        for (const lobster of this.lobsters) {
-            const push = lobster.collisionPush;
-            if (!push) continue;
-            const pushSq = push.x * push.x + push.z * push.z;
-            if (pushSq < 1e-7) continue;
-            lobster.mesh.rotation.y = Math.atan2(push.z, push.x);
-        }
     }
 
     tick(dt) {

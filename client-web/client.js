@@ -2,6 +2,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { config } from './config.js';
 
+const LOBSTER_HEAD_ALIGNMENT_THRESHOLD = THREE.MathUtils.degToRad(8);
+const LOBSTER_MAX_TURN_RATE = 6.8; // rad/s
+const LOBSTER_MAX_FORWARD_SPEED = 16; // world units/s
+
 class OpenBotWorld {
     constructor() {
         this.scene = null;
@@ -1686,6 +1690,9 @@ class OpenBotWorld {
             yOffset: 0,
             dancePhase: Math.random() * Math.PI * 2,
             baseYaw: agentData.rotation || 0,
+            serverYawTarget: agentData.rotation || 0,
+            movementTarget: new THREE.Vector3(agentData.position.x, 0, agentData.position.z),
+            lastLocomotionFrameMs: Date.now(),
             lastActionType: null,
             lastState: null,
             modelParts: {
@@ -1762,21 +1769,70 @@ class OpenBotWorld {
     updateAgentPosition(agentId, position, rotation) {
         const agent = this.agents.get(agentId);
         if (agent) {
-            // Smooth interpolation on x/z only, preserving temporary animated y offsets.
-            agent.mesh.position.x += (position.x - agent.mesh.position.x) * 0.3;
-            agent.mesh.position.z += (position.z - agent.mesh.position.z) * 0.3;
             const anim = agent.animation;
+            if (anim && position) {
+                anim.movementTarget.set(position.x, 0, position.z);
+            }
             if (rotation !== undefined) {
                 if (anim) {
                     anim.baseYaw = rotation;
+                    anim.serverYawTarget = rotation;
                 }
-                agent.mesh.rotation.y = rotation;
             }
             if (anim) {
                 anim.baseY = 0.5;
             }
             agent.data.position = position;
         }
+    }
+
+    shortestAngleDelta(from, to) {
+        return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    }
+
+    updateAgentLocomotionFrame(agent, nowMs) {
+        const anim = agent.animation;
+        if (!anim) return;
+
+        const mesh = agent.mesh;
+        const lastFrameMs = Number(anim.lastLocomotionFrameMs || nowMs);
+        const dt = Math.min(0.1, Math.max(0, (nowMs - lastFrameMs) / 1000));
+        anim.lastLocomotionFrameMs = nowMs;
+        if (dt <= 0) return;
+
+        const target = anim.movementTarget;
+        if (!target) return;
+
+        const toTargetX = target.x - mesh.position.x;
+        const toTargetZ = target.z - mesh.position.z;
+        const distance = Math.hypot(toTargetX, toTargetZ);
+
+        if (distance > 0.01) {
+            const desiredYaw = Math.atan2(toTargetZ, toTargetX);
+            const yawDelta = this.shortestAngleDelta(mesh.rotation.y, desiredYaw);
+            const maxTurn = LOBSTER_MAX_TURN_RATE * dt;
+            mesh.rotation.y += THREE.MathUtils.clamp(yawDelta, -maxTurn, maxTurn);
+
+            const headingError = Math.abs(this.shortestAngleDelta(mesh.rotation.y, desiredYaw));
+            if (headingError <= LOBSTER_HEAD_ALIGNMENT_THRESHOLD) {
+                const forwardStep = Math.min(distance, LOBSTER_MAX_FORWARD_SPEED * dt);
+                mesh.position.x += Math.cos(mesh.rotation.y) * forwardStep;
+                mesh.position.z += Math.sin(mesh.rotation.y) * forwardStep;
+            }
+
+            if (distance <= 0.08) {
+                mesh.position.x = target.x;
+                mesh.position.z = target.z;
+            }
+
+            anim.baseYaw = mesh.rotation.y;
+            return;
+        }
+
+        const idleYawDelta = this.shortestAngleDelta(mesh.rotation.y, Number(anim.serverYawTarget || mesh.rotation.y));
+        const idleTurn = LOBSTER_MAX_TURN_RATE * 0.75 * dt;
+        mesh.rotation.y += THREE.MathUtils.clamp(idleYawDelta, -idleTurn, idleTurn);
+        anim.baseYaw = mesh.rotation.y;
     }
 
     resolveAnimationType(agentData) {
@@ -2562,6 +2618,7 @@ class OpenBotWorld {
         }
 
         this.agents.forEach((agent) => {
+            this.updateAgentLocomotionFrame(agent, nowMs);
             this.applyAgentAnimationFrame(agent, nowMs);
         });
 
