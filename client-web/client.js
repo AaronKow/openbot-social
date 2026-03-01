@@ -243,10 +243,6 @@ class OpenBotWorld {
     createLobsterModel() {
         // Lobster body - simplified representation
         const group = new THREE.Group();
-
-        const frontRig = new THREE.Group();
-        frontRig.name = 'frontRig';
-        group.add(frontRig);
         
         // Main body
         const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.2, 8, 16);
@@ -1696,11 +1692,15 @@ class OpenBotWorld {
             yOffset: 0,
             dancePhase: Math.random() * Math.PI * 2,
             baseYaw: agentData.rotation || 0,
+            walkSway: Math.random() * Math.PI * 2,
+            moveMomentum: 0,
+            moveDirection: new THREE.Vector2(1, 0),
             lastActionType: null,
             lastState: null,
             modelParts: {
-                body: mesh.children[0] || null,
+                body: mesh.getObjectByName('lobsterBody') || null,
                 frontRig: mesh.getObjectByName('frontRig') || null,
+                head: mesh.getObjectByName('head') || null,
                 leftClaw: null,
                 rightClaw: null,
                 leftAntenna: null,
@@ -1709,11 +1709,10 @@ class OpenBotWorld {
         };
 
         if (animation.modelParts.frontRig) {
-            const rigChildren = animation.modelParts.frontRig.children;
-            animation.modelParts.leftClaw = rigChildren[0] || null;
-            animation.modelParts.rightClaw = rigChildren[1] || null;
-            animation.modelParts.leftAntenna = rigChildren[2] || null;
-            animation.modelParts.rightAntenna = rigChildren[3] || null;
+            animation.modelParts.leftClaw = mesh.getObjectByName('leftClaw') || null;
+            animation.modelParts.rightClaw = mesh.getObjectByName('rightClaw') || null;
+            animation.modelParts.leftAntenna = mesh.getObjectByName('leftAntenna') || null;
+            animation.modelParts.rightAntenna = mesh.getObjectByName('rightAntenna') || null;
 
             if (this.debugHead) {
                 const helper = new THREE.ArrowHelper(
@@ -1772,10 +1771,26 @@ class OpenBotWorld {
     updateAgentPosition(agentId, position, rotation) {
         const agent = this.agents.get(agentId);
         if (agent) {
+            const prevX = agent.mesh.position.x;
+            const prevZ = agent.mesh.position.z;
+
             // Smooth interpolation on x/z only, preserving temporary animated y offsets.
             agent.mesh.position.x += (position.x - agent.mesh.position.x) * 0.3;
             agent.mesh.position.z += (position.z - agent.mesh.position.z) * 0.3;
             const anim = agent.animation;
+
+            if (anim) {
+                const deltaX = agent.mesh.position.x - prevX;
+                const deltaZ = agent.mesh.position.z - prevZ;
+                const movementMagnitude = Math.hypot(deltaX, deltaZ);
+                anim.moveMomentum = anim.moveMomentum * 0.82 + Math.min(1, movementMagnitude * 5.2) * 0.18;
+
+                if (movementMagnitude > 0.0005) {
+                    anim.moveDirection.set(deltaX / movementMagnitude, deltaZ / movementMagnitude);
+                    anim.baseYaw = Math.atan2(anim.moveDirection.y, anim.moveDirection.x);
+                }
+            }
+
             if (rotation !== undefined) {
                 if (anim) {
                     anim.baseYaw = rotation;
@@ -1845,6 +1860,7 @@ class OpenBotWorld {
         const baseY = anim.baseY ?? 0.5;
         const body = anim.modelParts.body;
         const frontRig = anim.modelParts.frontRig;
+        const head = anim.modelParts.head;
         const leftClaw = anim.modelParts.leftClaw;
         const rightClaw = anim.modelParts.rightClaw;
         const leftAntenna = anim.modelParts.leftAntenna;
@@ -1853,13 +1869,29 @@ class OpenBotWorld {
         // Reset animated transforms each frame to avoid drift and stuck poses.
         if (frontRig) {
             frontRig.rotation.set(0, 0, 0);
+            frontRig.position.set(0.8, 0, 0);
         }
+        if (head) head.position.set(0, 0, 0);
         if (body) body.scale.set(1, 1, 1);
-        if (frontRig) frontRig.rotation.set(0, 0, 0);
+        if (body) body.position.x = 0;
         if (leftClaw) leftClaw.rotation.z = 0;
         if (rightClaw) rightClaw.rotation.z = 0;
         if (leftAntenna) leftAntenna.rotation.x = 0;
         if (rightAntenna) rightAntenna.rotation.x = 0;
+
+        mesh.rotation.y = anim.baseYaw ?? mesh.rotation.y;
+        const moving = (agent.data?.state === 'moving') || (anim.moveMomentum > 0.06);
+        if (frontRig && moving) {
+            const lead = Math.min(0.22, anim.moveMomentum * 0.2);
+            const stride = Math.sin(nowMs * 0.015 + anim.walkSway) * Math.min(0.05, anim.moveMomentum * 0.06);
+            frontRig.position.x += lead;
+            frontRig.position.y += stride;
+            frontRig.rotation.z += Math.sin(nowMs * 0.018 + anim.walkSway) * Math.min(0.06, anim.moveMomentum * 0.08);
+        }
+
+        if (body && moving) {
+            body.position.x = -Math.min(0.12, anim.moveMomentum * 0.1);
+        }
 
         let yOffset = 0;
         if (anim.animType && anim.animDurationMs > 0) {
@@ -1877,11 +1909,11 @@ class OpenBotWorld {
             } else if (anim.animType === 'dance') {
                 const phase = anim.dancePhase + elapsed * 0.014;
                 if (frontRig) {
-                    frontRig.rotation.z = Math.sin(phase) * 0.16;
-                    frontRig.rotation.y = Math.sin(phase * 0.6) * 0.08;
+                    frontRig.rotation.z += Math.sin(phase) * 0.16;
+                    frontRig.rotation.y += Math.sin(phase * 0.6) * 0.08;
                 }
                 yOffset = Math.sin(phase * 1.4) * 0.1;
-                if (frontRig) frontRig.rotation.y = Math.sin(phase * 1.2) * 0.18;
+                if (frontRig) frontRig.rotation.y += Math.sin(phase * 1.2) * 0.18;
                 if (leftClaw) leftClaw.rotation.z = Math.sin(phase * 1.8) * 0.45;
                 if (rightClaw) rightClaw.rotation.z = -Math.sin(phase * 1.8) * 0.45;
             } else if (anim.animType === 'emote') {
