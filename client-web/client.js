@@ -245,53 +245,57 @@ class OpenBotWorld {
     createLobsterModel() {
         // Lobster body - simplified representation
         const group = new THREE.Group();
-        
-        // Main body
-        const bodyGeometry = new THREE.CapsuleGeometry(0.3, 1.2, 8, 16);
         const bodyMaterial = new THREE.MeshStandardMaterial({
             color: 0xff4444,
             roughness: 0.5,
             metalness: 0.3
         });
-        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.rotation.z = Math.PI / 2;
-        body.castShadow = true;
-        group.add(body);
-        
+
+        const addPart = (geometry, position, rotation = null, material = bodyMaterial) => {
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(position.x, position.y, position.z);
+            if (rotation) {
+                mesh.rotation.set(rotation.x || 0, rotation.y || 0, rotation.z || 0);
+            }
+            mesh.castShadow = true;
+            group.add(mesh);
+            return mesh;
+        };
+
+        // Main body
+        addPart(
+            new THREE.CapsuleGeometry(0.3, 1.2, 8, 16),
+            { x: 0, y: 0, z: 0 },
+            { z: Math.PI / 2 }
+        );
+
         // Tail segments
         for (let i = 0; i < 3; i++) {
-            const segmentGeometry = new THREE.BoxGeometry(0.4 - i * 0.05, 0.5 - i * 0.1, 0.3 - i * 0.05);
-            const segment = new THREE.Mesh(segmentGeometry, bodyMaterial);
-            segment.position.set(-0.7 - i * 0.45, 0, 0);
-            segment.castShadow = true;
-            group.add(segment);
+            addPart(
+                new THREE.BoxGeometry(0.4 - i * 0.05, 0.5 - i * 0.1, 0.3 - i * 0.05),
+                { x: -0.7 - i * 0.45, y: 0, z: 0 }
+            );
         }
-        
+
         // Claws
-        const clawGeometry = new THREE.BoxGeometry(0.6, 0.2, 0.2);
-        const leftClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        leftClaw.position.set(0.8, 0.4, 0);
-        leftClaw.castShadow = true;
-        group.add(leftClaw);
-        
-        const rightClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
-        rightClaw.position.set(0.8, -0.4, 0);
-        rightClaw.castShadow = true;
-        group.add(rightClaw);
-        
+        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: 0.4, z: 0 });
+        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: -0.4, z: 0 });
+
         // Antennae
-        const antennaGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.8);
         const antennaMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
-        const leftAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        leftAntenna.position.set(0.8, 0.15, 0.2);
-        leftAntenna.rotation.z = Math.PI / 6;
-        group.add(leftAntenna);
-        
-        const rightAntenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-        rightAntenna.position.set(0.8, -0.15, 0.2);
-        rightAntenna.rotation.z = -Math.PI / 6;
-        group.add(rightAntenna);
-        
+        addPart(
+            new THREE.CylinderGeometry(0.02, 0.02, 0.8),
+            { x: 0.8, y: 0.15, z: 0.2 },
+            { z: Math.PI / 6 },
+            antennaMaterial
+        );
+        addPart(
+            new THREE.CylinderGeometry(0.02, 0.02, 0.8),
+            { x: 0.8, y: -0.15, z: 0.2 },
+            { z: -Math.PI / 6 },
+            antennaMaterial
+        );
+
         return group;
     }
 
