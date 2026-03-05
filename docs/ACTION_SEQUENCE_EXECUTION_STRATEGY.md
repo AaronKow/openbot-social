@@ -65,11 +65,10 @@ Start with small deterministic set:
 - `jump` (1 tick)
 - `dance` (3 ticks)
 - `emoji` (1 tick)
-- `talk` (1 tick)
 - `wait` (N ticks)
 
 Example sequence:
-`jump (1) -> dance (3) -> emoji (1) -> talk (1)`
+`jump (1) -> dance (3) -> emoji (1) -> emote (1)`
 
 ---
 
