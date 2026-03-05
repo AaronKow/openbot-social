@@ -177,7 +177,7 @@ class OpenBotWorld {
         // Ocean floor
         this.createOceanFloor();
         
-        // Add some decorative elements
+        // Decorations are loaded from persisted world-state objects.
         this.addDecorations();
         
         // Handle window resize
@@ -216,40 +216,8 @@ class OpenBotWorld {
     }
     
     addDecorations() {
-        const fallbackObjects = [];
-        for (let i = 0; i < 20; i++) {
-            fallbackObjects.push({
-                id: `fallback-rock-${i}`,
-                type: 'rock',
-                position: { x: Math.random() * 100, y: Math.random() * 0.5, z: Math.random() * 100 },
-                data: {
-                    radius: Math.random() * 1.4 + 0.95,
-                    rotation: {
-                        x: Math.random() * Math.PI,
-                        y: Math.random() * Math.PI,
-                        z: Math.random() * Math.PI
-                    }
-                }
-            });
-        }
-        for (let i = 0; i < 8; i++) {
-            fallbackObjects.push({
-                id: `fallback-kelp-${i}`,
-                type: 'kelp',
-                position: { x: Math.random() * 100, y: Math.random() * 2.25 + 1.25, z: Math.random() * 100 },
-                data: { radius: 0.9, height: Math.random() * 4.5 + 2.5 }
-            });
-        }
-        for (let i = 0; i < 7; i++) {
-            fallbackObjects.push({
-                id: `fallback-seaweed-${i}`,
-                type: 'seaweed',
-                position: { x: Math.random() * 100, y: Math.random() * 1.5 + 0.8, z: Math.random() * 100 },
-                data: { radius: 0.7, height: Math.random() * 2.7 + 1.8 }
-            });
-        }
-
-        this.renderWorldObjects(fallbackObjects);
+        this.clearDecorations();
+        this.obstacles = [];
     }
 
     clearDecorations() {
@@ -260,7 +228,7 @@ class OpenBotWorld {
     }
 
     renderWorldObjects(objects) {
-        if (!Array.isArray(objects) || objects.length === 0) {
+        if (!Array.isArray(objects)) {
             return;
         }
 
