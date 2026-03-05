@@ -68,13 +68,13 @@ test('normalizeQueueActions accepts valid action list', () => {
   const out = normalizeQueueActions([
     { type: 'jump', requiredTicks: 1 },
     { type: 'dance', requiredTicks: 3, style: 'funk' },
-    { type: 'talk', requiredTicks: 1, message: 'hello reef' }
+    { type: 'emoji', requiredTicks: 1, emoji: '🦞' }
   ]);
 
   assert.equal(out.totalItems, 3);
   assert.equal(out.totalRequiredTicks, 5);
   assert.equal(out.actions[1].style, 'funk');
-  assert.equal(out.actions[2].message, 'hello reef');
+  assert.equal(out.actions[2].emoji, '🦞');
 });
 
 test('normalizeQueueActions rejects unsupported action', () => {

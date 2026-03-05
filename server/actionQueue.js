@@ -1,12 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
-const { normalizeChatMessage } = require('./chatMessage');
 
 const MAX_QUEUE_ACTIONS = Number(process.env.ACTION_QUEUE_MAX_ACTIONS || 64);
 const MAX_QUEUE_TOTAL_TICKS = Number(process.env.ACTION_QUEUE_MAX_TOTAL_TICKS || 54000);
 const MAX_TICKS_PER_ACTION = Number(process.env.ACTION_QUEUE_MAX_TICKS_PER_ACTION || 3600);
 
 const ALLOWED_ACTIONS = new Set([
-  'move', 'move_to_agent', 'jump', 'dance', 'emoji', 'talk', 'emote', 'wait'
+  'move', 'move_to_agent', 'jump', 'dance', 'emoji', 'emote', 'wait'
 ]);
 
 function asPositiveInt(value, fallback = 1) {
@@ -53,14 +52,6 @@ function validateActionItem(raw) {
       throw new Error('move_to_agent requires agent_name');
     }
     action.agent_name = agentName.slice(0, 64);
-  }
-
-  if (type === 'talk') {
-    try {
-      action.message = normalizeChatMessage(raw.message);
-    } catch (error) {
-      throw new Error(`talk ${error.message}`);
-    }
   }
 
   if (type === 'emoji') {
