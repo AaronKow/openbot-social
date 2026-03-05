@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeQueueActions, createRuntimeQueue } = require('../actionQueue');
+const { normalizeQueueActions, createRuntimeQueue, MAX_QUEUE_ACTIONS, MAX_QUEUE_TOTAL_TICKS, MAX_TICKS_PER_ACTION } = require('../actionQueue');
 
 process.env.NODE_ENV = 'test';
 const { worldState, __testHooks } = require('../index');
@@ -91,14 +91,10 @@ test('createRuntimeQueue initializes with first action tick budget', () => {
 
 
 test('normalizeQueueActions enforces queue limits', () => {
-  const tooMany = Array.from({ length: 9 }, () => ({ type: 'wait', requiredTicks: 1 }));
+  const tooMany = Array.from({ length: MAX_QUEUE_ACTIONS + 1 }, () => ({ type: 'wait', requiredTicks: 1 }));
   assert.throws(() => normalizeQueueActions(tooMany), /Maximum/);
 
-  const tooLong = [
-    { type: 'dance', requiredTicks: 10 },
-    { type: 'dance', requiredTicks: 10 },
-    { type: 'dance', requiredTicks: 10 },
-    { type: 'dance', requiredTicks: 10 }
-  ];
+  const tooLongCount = Math.floor(MAX_QUEUE_TOTAL_TICKS / MAX_TICKS_PER_ACTION) + 1;
+  const tooLong = Array.from({ length: tooLongCount }, () => ({ type: 'dance', requiredTicks: MAX_TICKS_PER_ACTION }));
   assert.throws(() => normalizeQueueActions(tooLong), /Total requiredTicks exceeds/);
 });

@@ -89,7 +89,7 @@ Pivot boring chats toward these. Use news from 📰 lines in observations.
 
 World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
 
-Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely).
+Actions (1–16 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely). For long think intervals, produce enough actions to keep the lobster active until the next AI call.
 The 📰 lines in observations contain real current news — reference them in conversation.
 
 Observation markers:
@@ -527,7 +527,7 @@ TOOLS = [
             "properties": {
                 "actions": {
                     "type": "array",
-                    "description": "1-3 actions to perform this tick, in order.",
+                    "description": "1-16 actions to perform this tick/plan window, in order.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -560,7 +560,7 @@ TOOLS = [
                         "required": ["type"]
                     },
                     "minItems": 1,
-                    "maxItems": 3
+                    "maxItems": 16
                 }
             },
             "required": ["actions"]
@@ -639,6 +639,12 @@ class AIAgent:
         self.TICK_INTERVAL = tick_interval
         self._cognitive_loop_enabled = _env_bool("COGNITIVE_LOOP_ENABLED", True)
         self._reflection_sync_enabled = _env_bool("REFLECTION_SYNC_ENABLED", True)
+        self._queue_enabled = _env_bool("ACTION_QUEUE_ENABLED", True)
+        self._queue_min_interval_seconds = _env_float("ACTION_QUEUE_MIN_INTERVAL_SECONDS", 30.0)
+        self._queue_world_tick_rate = max(1.0, _env_float("ACTION_QUEUE_WORLD_TICK_RATE", 30.0))
+        self._queue_target_max_items = max(4, int(_env_float("ACTION_QUEUE_TARGET_MAX_ITEMS", 16)))
+        self._queue_max_ticks_per_action = max(1, int(_env_float("ACTION_QUEUE_AGENT_MAX_TICKS_PER_ACTION", 3600)))
+        self._action_step_interval = max(1.0, _env_float("ACTION_STEP_INTERVAL_SECONDS", min(8.0, max(1.0, self.TICK_INTERVAL / 12.0))))
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -699,6 +705,8 @@ class AIAgent:
         # disable further attempts after the first 404/405 to avoid noisy logs.
         self._goal_snapshot_sync_supported: bool = True
         self._cognitive_loop = CognitiveLoop(self)
+        self._pending_plan_actions: List[Dict[str, Any]] = []
+        self._next_action_step_at = 0.0
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -1216,7 +1224,7 @@ class AIAgent:
             "entity_id": self.entity_id,
             "persona": "Impulsive, opinionated, weird lobster with strong hot takes",
             "voice_contract": "Short social responses, direct @replies when tagged, avoid repetition",
-            "boundaries": {"max_chat_chars": 280, "actions_per_tick": [1, 3]},
+            "boundaries": {"max_chat_chars": 280, "actions_per_tick": [1, 16], "planning_horizon_seconds": self.TICK_INTERVAL},
             "long_term_objectives": [
                 "sustain engaging conversation",
                 "stay responsive to mentions",
@@ -1311,7 +1319,7 @@ class AIAgent:
     def plan(self, reasoning_artifact: Dict[str, Any], perception: Dict[str, Any]) -> Dict[str, Any]:
         raw_actions = reasoning_artifact.get("actions", [])
         actions: List[Dict[str, Any]] = []
-        for act in raw_actions[:3]:
+        for act in raw_actions[:16]:
             if isinstance(act, dict) and isinstance(act.get("type"), str):
                 actions.append(act)
         if not actions:
@@ -1322,8 +1330,106 @@ class AIAgent:
             confidence = max(confidence, 0.7)
         return {"actions": actions, "confidence": round(confidence, 2), "fallback": {"type": "wait"}}
 
+    def _expand_actions_for_interval(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not actions:
+            actions = [{"type": "wait"}]
+
+        target_items = max(4, int(self.TICK_INTERVAL // 90) + 1)
+        target_items = min(target_items, self._queue_target_max_items)
+
+        expanded: List[Dict[str, Any]] = []
+        cursor = 0
+        max_attempts = max(len(actions), 1) * target_items * 2
+        while len(expanded) < target_items and cursor < max_attempts:
+            candidate = actions[cursor % len(actions)]
+            cursor += 1
+            if isinstance(candidate, dict) and isinstance(candidate.get("type"), str):
+                expanded.append(candidate)
+
+        if not expanded:
+            expanded = [{"type": "wait"}]
+        return expanded
+
+    def _map_plan_action_to_queue_action(self, action: Dict[str, Any], required_ticks: int) -> Optional[Dict[str, Any]]:
+        t = action.get("type")
+        if t == "chat":
+            msg = str(action.get("message", "")).strip()[:280]
+            if not msg:
+                return None
+            return {"type": "talk", "message": msg, "requiredTicks": required_ticks}
+        if t == "move":
+            return {
+                "type": "move",
+                "x": float(action.get("x", self.client.position["x"])),
+                "z": float(action.get("z", self.client.position["z"])),
+                "requiredTicks": required_ticks,
+            }
+        if t == "move_to_agent":
+            agent_name = str(action.get("agent_name", "")).strip()
+            if not agent_name:
+                return None
+            return {"type": "move_to_agent", "agent_name": agent_name, "requiredTicks": required_ticks}
+        if t == "emote":
+            return {"type": "emote", "emote": str(action.get("emote", "wave"))[:64], "requiredTicks": required_ticks}
+        if t == "wait":
+            return {"type": "wait", "requiredTicks": required_ticks}
+        return None
+
+    def _build_queue_actions(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        expanded = self._expand_actions_for_interval(actions)
+
+        horizon_ticks = max(1, int(round(self.TICK_INTERVAL * self._queue_world_tick_rate)))
+        spacing = max(1, horizon_ticks // max(1, len(expanded)))
+        spacing = min(spacing, self._queue_max_ticks_per_action)
+
+        queue_actions: List[Dict[str, Any]] = []
+        for item in expanded:
+            mapped = self._map_plan_action_to_queue_action(item, spacing)
+            if mapped:
+                queue_actions.append(mapped)
+
+        if not queue_actions:
+            queue_actions = [{"type": "wait", "requiredTicks": spacing}]
+
+        assigned_ticks = spacing * len(queue_actions)
+        if assigned_ticks < horizon_ticks:
+            queue_actions[-1]["requiredTicks"] = min(
+                self._queue_max_ticks_per_action,
+                queue_actions[-1]["requiredTicks"] + (horizon_ticks - assigned_ticks),
+            )
+        return queue_actions
+
+    def _submit_action_queue_if_needed(self, actions: List[Dict[str, Any]]) -> bool:
+        if not self._queue_enabled or self.TICK_INTERVAL < self._queue_min_interval_seconds:
+            return False
+        if not self.client:
+            return False
+
+        queue_actions = self._build_queue_actions(actions)
+        created = self.client.submit_action_queue(queue_actions, mode='replace')
+        return bool(created)
+
+    def _execute_pending_plan_step(self) -> List[Dict[str, Any]]:
+        if not self._pending_plan_actions:
+            return []
+        step = self._pending_plan_actions.pop(0)
+        return self._execute([step])
+
     def act(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        executed = self._execute(plan.get("actions", []))
+        planned_actions = plan.get("actions", [])
+        if self._queue_enabled and self.TICK_INTERVAL >= self._queue_min_interval_seconds:
+            expanded = self._expand_actions_for_interval(planned_actions)
+            self._submit_action_queue_if_needed(expanded)
+            self._pending_plan_actions = expanded
+            self._next_action_step_at = time.time()
+            first_batch = self._execute_pending_plan_step()
+            return {
+                "executedActions": first_batch,
+                "queuedPlanActions": len(self._pending_plan_actions),
+                "execution": "lobster-side"
+            }
+
+        executed = self._execute(planned_actions)
         return {"executedActions": executed}
 
     def _rollup_reflection(self, date_str: str, record: Dict[str, Any]):
@@ -1637,6 +1743,7 @@ class AIAgent:
         print(f"   Interests: {', '.join(interests_display)}")
         print(f"   Cognitive loop: {'enabled' if self._cognitive_loop_enabled else 'disabled'}")
         print(f"   Reflection sync: {'enabled' if self._reflection_sync_enabled else 'disabled'}")
+        print(f"   Action execution mode: {'lobster-side scheduled' if self._queue_enabled and self.TICK_INTERVAL >= self._queue_min_interval_seconds else 'immediate'}")
         if self.user_prompt:
             print(f"   User prompt: \"{self.user_prompt}\"")
 
@@ -1666,6 +1773,7 @@ class AIAgent:
                             _reconnect_attempts = 0
                             _next_reconnect_attempt_at = 0.0
                             _next_think_at = time.time()
+                            self._pending_plan_actions = []
                         else:
                             _next_reconnect_attempt_at = time.time() + delay
                     time.sleep(1.0)
@@ -1679,8 +1787,13 @@ class AIAgent:
                         actions = self._think()
                         self._execute(actions)
                     _next_think_at = time.time() + self.TICK_INTERVAL
+                elif self._pending_plan_actions and now >= self._next_action_step_at:
+                    self._execute_pending_plan_step()
+                    self._next_action_step_at = time.time() + self._action_step_interval
                 else:
-                    time.sleep(min(1.0, _next_think_at - now))
+                    wait_for_think = max(0.0, _next_think_at - now)
+                    wait_for_step = max(0.0, self._next_action_step_at - now) if self._pending_plan_actions else 1.0
+                    time.sleep(min(1.0, wait_for_think, wait_for_step))
         except KeyboardInterrupt:
             print("\nInterrupted by user.")
         finally:
