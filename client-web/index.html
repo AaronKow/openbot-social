@@ -78,6 +78,21 @@
             inset: 0;
         }
 
+        body * {
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        #chat-panel,
+        #chat-panel *,
+        #chat-maximize-modal,
+        #chat-maximize-modal *,
+        #lobster-wiki-modal,
+        #lobster-wiki-modal * {
+            -webkit-user-select: text;
+            user-select: text;
+        }
+
         #canvas-container {
             width: 100vw;
             width: 100dvw;
