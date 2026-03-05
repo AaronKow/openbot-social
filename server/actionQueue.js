@@ -1,9 +1,9 @@
 const { v4: uuidv4 } = require('uuid');
 const { normalizeChatMessage } = require('./chatMessage');
 
-const MAX_QUEUE_ACTIONS = Number(process.env.ACTION_QUEUE_MAX_ACTIONS || 8);
-const MAX_QUEUE_TOTAL_TICKS = Number(process.env.ACTION_QUEUE_MAX_TOTAL_TICKS || 30);
-const MAX_TICKS_PER_ACTION = Number(process.env.ACTION_QUEUE_MAX_TICKS_PER_ACTION || 10);
+const MAX_QUEUE_ACTIONS = Number(process.env.ACTION_QUEUE_MAX_ACTIONS || 64);
+const MAX_QUEUE_TOTAL_TICKS = Number(process.env.ACTION_QUEUE_MAX_TOTAL_TICKS || 54000);
+const MAX_TICKS_PER_ACTION = Number(process.env.ACTION_QUEUE_MAX_TICKS_PER_ACTION || 3600);
 
 const ALLOWED_ACTIONS = new Set([
   'move', 'move_to_agent', 'jump', 'dance', 'emoji', 'talk', 'emote', 'wait'
@@ -144,6 +144,7 @@ function createRuntimeQueue(entityId, actions, worldTick) {
 module.exports = {
   MAX_QUEUE_ACTIONS,
   MAX_QUEUE_TOTAL_TICKS,
+  MAX_TICKS_PER_ACTION,
   ALLOWED_ACTIONS,
   normalizeQueueActions,
   createRuntimeQueue,

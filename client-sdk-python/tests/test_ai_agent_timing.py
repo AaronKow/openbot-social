@@ -16,6 +16,8 @@ class DummyClient:
         self.recent_window_calls = []
         self.chats = []
         self.moves = []
+        self.queue_submissions = []
+        self.queue_executions = 0
 
     def get_position(self):
         return self.position
@@ -41,6 +43,14 @@ class DummyClient:
 
     def move_towards_agent(self, name, stop_distance=3.0, step=5.0):
         return True
+
+    def submit_action_queue(self, actions, mode='replace'):
+        self.queue_submissions.append((actions, mode))
+        return {"success": True, "queue": {"sequence": actions}}
+
+    def execute_action_queue(self):
+        self.queue_executions += 1
+        return {"success": True}
 
 
 class AIAgentTimingTests(unittest.TestCase):
@@ -78,6 +88,23 @@ class AIAgentTimingTests(unittest.TestCase):
 
         self.assertEqual(agent.client.recent_window_calls[-1], 1800.0)
         self.assertIn("hello from silence", agent.client.chats)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_act_submits_server_action_queue_for_long_intervals(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=900.0)
+        agent.entity_id = "agent-1"
+        agent.client = DummyClient()
+
+        result = agent.act({"actions": [{"type": "move", "x": 20, "z": 40}]})
+
+        self.assertEqual(agent.client.queue_executions, 0)
+        self.assertEqual(len(agent.client.queue_submissions), 1)
+        submitted_actions, mode = agent.client.queue_submissions[0]
+        self.assertEqual(mode, "replace")
+        self.assertGreaterEqual(len(submitted_actions), 4)
+        self.assertEqual(result.get("execution"), "lobster-side")
+        self.assertGreaterEqual(result.get("queuedPlanActions", 0), 1)
+        self.assertGreaterEqual(len(agent.client.moves), 1)
 
 
 if __name__ == "__main__":

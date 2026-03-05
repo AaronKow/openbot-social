@@ -524,6 +524,68 @@ class OpenBotClient:
             }
         })
     
+
+    def get_action_queue(self) -> Optional[Dict[str, Any]]:
+        """Fetch the entity's current action queue state."""
+        if not self.entity_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.get(
+                f"{self.base_url}/entity/{self.entity_id}/action-queue",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if not data.get('success'):
+                return None
+            return data
+        except requests.RequestException:
+            return None
+
+    def submit_action_queue(self, actions: List[Dict[str, Any]], mode: str = 'replace') -> Optional[Dict[str, Any]]:
+        """Create or replace a server-side action queue for this entity."""
+        if not self.entity_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.post(
+                f"{self.base_url}/entity/{self.entity_id}/action-queue",
+                json={"actions": actions, "mode": mode},
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code not in (200, 201):
+                return None
+            data = response.json()
+            if not data.get('success'):
+                return None
+            return data
+        except requests.RequestException:
+            return None
+
+    def execute_action_queue(self) -> Optional[Dict[str, Any]]:
+        """Start execution of the current server-side action queue."""
+        if not self.entity_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.post(
+                f"{self.base_url}/entity/{self.entity_id}/action-queue/execute",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if not data.get('success'):
+                return None
+            return data
+        except requests.RequestException:
+            return None
+
     def ping(self) -> bool:
         """
         Send a ping to the server.
