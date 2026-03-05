@@ -156,6 +156,12 @@ const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
 const MAX_WORLD_STATE_LIMIT = Number(process.env.MAX_WORLD_STATE_LIMIT || 500);
+const MAP_REFILL_INTERVAL_MS = Number(process.env.MAP_REFILL_INTERVAL_MS || 15 * 60 * 1000);
+const MAP_OBJECT_TARGETS = Object.freeze({
+  rock: Number(process.env.MAP_ROCK_TARGET || 20),
+  kelp: Number(process.env.MAP_KELP_TARGET || 8),
+  seaweed: Number(process.env.MAP_SEAWEED_TARGET || 7)
+});
 
 // World State
 const worldState = {
@@ -265,6 +271,118 @@ function buildWorldStateDelta(sinceTick, limit) {
 const actionQueues = new Map(); // entityId -> runtime queue
 const queueLifecyclePersistBuffer = new Map(); // queueId -> snapshot
 const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RETENTION_MS || 120000);
+let mapRefillTimer = null;
+let mapRefillInProgress = false;
+
+function randomInRange(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function getObjectRadius(type, data = {}) {
+  if (type === 'rock') return Number(data.radius) || 1.8;
+  if (type === 'kelp') return Number(data.radius) || 0.9;
+  if (type === 'seaweed') return Number(data.radius) || 0.7;
+  return 0.9;
+}
+
+function isObjectPlacementValid(x, z, radius) {
+  for (const existing of worldState.objects.values()) {
+    const existingRadius = getObjectRadius(existing.type, existing.data);
+    const dx = x - existing.position.x;
+    const dz = z - existing.position.z;
+    const minDistance = radius + existingRadius + 0.35;
+    if (Math.sqrt(dx * dx + dz * dz) < minDistance) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function buildMapObject(type) {
+  const radius = getObjectRadius(type, {
+    radius: type === 'rock' ? randomInRange(0.95, 2.35) : type === 'kelp' ? randomInRange(0.75, 1.0) : randomInRange(0.55, 0.85)
+  });
+  const maxAttempts = 40;
+  let x = randomInRange(2, WORLD_SIZE.x - 2);
+  let z = randomInRange(2, WORLD_SIZE.y - 2);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (isObjectPlacementValid(x, z, radius)) break;
+    x = randomInRange(2, WORLD_SIZE.x - 2);
+    z = randomInRange(2, WORLD_SIZE.y - 2);
+  }
+
+  const y = type === 'rock' ? randomInRange(0, 0.5) : type === 'kelp' ? randomInRange(1.5, 3.75) : randomInRange(0.8, 2.25);
+  const objectId = `map-${type}-${uuidv4()}`;
+
+  return {
+    id: objectId,
+    type,
+    position: { x, y, z },
+    data: {
+      radius,
+      rotation: {
+        x: randomInRange(0, Math.PI),
+        y: randomInRange(0, Math.PI),
+        z: randomInRange(0, Math.PI)
+      },
+      height: type === 'rock' ? null : type === 'kelp' ? randomInRange(2.5, 7.0) : randomInRange(1.8, 4.5)
+    }
+  };
+}
+
+async function refillMapObjects({ persist = true } = {}) {
+  const typeCounts = { rock: 0, kelp: 0, seaweed: 0 };
+  for (const object of worldState.objects.values()) {
+    if (typeCounts[object.type] !== undefined) {
+      typeCounts[object.type] += 1;
+    }
+  }
+
+  const newObjects = [];
+  for (const [type, targetCount] of Object.entries(MAP_OBJECT_TARGETS)) {
+    const missing = Math.max(0, targetCount - (typeCounts[type] || 0));
+    for (let i = 0; i < missing; i += 1) {
+      const mapObject = buildMapObject(type);
+      worldState.objects.set(mapObject.id, mapObject);
+      newObjects.push(mapObject);
+    }
+  }
+
+  if (persist && process.env.DATABASE_URL && newObjects.length > 0) {
+    await Promise.all(newObjects.map((object) => (
+      db.saveWorldObject(object.id, object.type, object.position, object.data)
+    )));
+  }
+
+  return newObjects.length;
+}
+
+function scheduleMapRefill() {
+  mapRefillTimer = setTimeout(async () => {
+    if (mapRefillInProgress) {
+      scheduleMapRefill();
+      return;
+    }
+
+    mapRefillInProgress = true;
+    try {
+      const addedCount = await refillMapObjects({ persist: true });
+      if (addedCount > 0) {
+        console.log(`[map-refill] Added ${addedCount} missing map object(s)`);
+      }
+    } catch (error) {
+      console.error('Error refilling map objects:', error);
+    } finally {
+      mapRefillInProgress = false;
+      scheduleMapRefill();
+    }
+  }, MAP_REFILL_INTERVAL_MS);
+
+  if (typeof mapRefillTimer.unref === 'function') {
+    mapRefillTimer.unref();
+  }
+}
 
 // Maximum movement distance per move request (prevents teleporting)
 const MAX_MOVE_DISTANCE = 5.0; // Max units an agent can move per request
@@ -1491,6 +1609,7 @@ async function persistState() {
 if (process.env.NODE_ENV !== 'test') {
   scheduleNextTick();
   schedulePersistRun();
+  scheduleMapRefill();
 }
 
 // Status API endpoint
@@ -1880,8 +1999,20 @@ async function startServer() {
       } else if (worldCreatedAtResult.status === 'rejected') {
         console.warn('Could not load world creation timestamp:', worldCreatedAtResult.reason?.message || worldCreatedAtResult.reason);
       }
+
+      try {
+        const persistedWorldObjects = await db.loadAllWorldObjects();
+        for (const object of persistedWorldObjects) {
+          worldState.objects.set(object.id, object);
+        }
+        const addedCount = await refillMapObjects({ persist: true });
+        console.log(`Loaded ${persistedWorldObjects.length} world objects from database (${addedCount} added to fill missing map items)`);
+      } catch (error) {
+        console.warn('Could not load/refill map objects:', error?.message || error);
+      }
     } else {
       console.log('Database disabled - running in memory-only mode');
+      await refillMapObjects({ persist: false });
     }
 
     // Start server
@@ -1911,6 +2042,8 @@ module.exports = {
     findAgentByName,
     buildDeterministicNearbyTarget,
     clampMovement,
-    validatePosition
+    validatePosition,
+    refillMapObjects,
+    MAP_OBJECT_TARGETS
   }
 };
