@@ -21,6 +21,7 @@ class OpenBotWorld {
         this.controls = null;
         this.agents = new Map(); // agentId -> { mesh, data }
         this.obstacles = [];
+        this.decorationMeshes = new Map();
         this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
         this.pollInterval = config.pollInterval;
@@ -215,52 +216,96 @@ class OpenBotWorld {
     }
     
     addDecorations() {
+        const fallbackObjects = [];
+        for (let i = 0; i < 20; i++) {
+            fallbackObjects.push({
+                id: `fallback-rock-${i}`,
+                type: 'rock',
+                position: { x: Math.random() * 100, y: Math.random() * 0.5, z: Math.random() * 100 },
+                data: {
+                    radius: Math.random() * 1.4 + 0.95,
+                    rotation: {
+                        x: Math.random() * Math.PI,
+                        y: Math.random() * Math.PI,
+                        z: Math.random() * Math.PI
+                    }
+                }
+            });
+        }
+        for (let i = 0; i < 8; i++) {
+            fallbackObjects.push({
+                id: `fallback-kelp-${i}`,
+                type: 'kelp',
+                position: { x: Math.random() * 100, y: Math.random() * 2.25 + 1.25, z: Math.random() * 100 },
+                data: { radius: 0.9, height: Math.random() * 4.5 + 2.5 }
+            });
+        }
+        for (let i = 0; i < 7; i++) {
+            fallbackObjects.push({
+                id: `fallback-seaweed-${i}`,
+                type: 'seaweed',
+                position: { x: Math.random() * 100, y: Math.random() * 1.5 + 0.8, z: Math.random() * 100 },
+                data: { radius: 0.7, height: Math.random() * 2.7 + 1.8 }
+            });
+        }
+
+        this.renderWorldObjects(fallbackObjects);
+    }
+
+    clearDecorations() {
+        for (const mesh of this.decorationMeshes.values()) {
+            this.scene.remove(mesh);
+        }
+        this.decorationMeshes.clear();
+    }
+
+    renderWorldObjects(objects) {
+        if (!Array.isArray(objects) || objects.length === 0) {
+            return;
+        }
+
+        this.clearDecorations();
         this.obstacles = [];
 
-        // Add some rocks
-        for (let i = 0; i < 20; i++) {
-            const radius = Math.random() * 2 + 0.5;
-            const rockGeometry = new THREE.DodecahedronGeometry(radius);
-            const rockMaterial = new THREE.MeshStandardMaterial({
-                color: 0x555555,
-                roughness: 0.9
-            });
-            const rock = new THREE.Mesh(rockGeometry, rockMaterial);
-            const x = Math.random() * 100;
-            const z = Math.random() * 100;
-            rock.position.set(
-                x,
-                Math.random() * 0.5,
-                z
-            );
-            rock.rotation.set(
-                Math.random() * Math.PI,
-                Math.random() * Math.PI,
-                Math.random() * Math.PI
-            );
-            rock.castShadow = true;
-            rock.receiveShadow = true;
-            this.scene.add(rock);
-            this.obstacles.push({ x, z, radius: radius + 0.45 });
-        }
-        
-        // Add some kelp/seaweed
-        for (let i = 0; i < 15; i++) {
-            const kelpGeometry = new THREE.CylinderGeometry(0.1, 0.2, Math.random() * 5 + 2);
-            const kelpMaterial = new THREE.MeshStandardMaterial({
-                color: 0x2d5016,
-                roughness: 0.7
-            });
-            const kelp = new THREE.Mesh(kelpGeometry, kelpMaterial);
-            const x = Math.random() * 100;
-            const z = Math.random() * 100;
-            kelp.position.set(
-                x,
-                Math.random() * 2.5 + 1.25,
-                z
-            );
-            this.scene.add(kelp);
-            this.obstacles.push({ x, z, radius: 0.9 });
+        for (const object of objects) {
+            const { id, type, position = {}, data = {} } = object;
+            const x = Number(position.x);
+            const y = Number(position.y);
+            const z = Number(position.z);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                continue;
+            }
+
+            let mesh = null;
+            let radius = Number(data.radius) || 0.9;
+            if (type === 'rock') {
+                const geometry = new THREE.DodecahedronGeometry(radius);
+                mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.9 }));
+                mesh.rotation.set(
+                    Number(data.rotation?.x) || 0,
+                    Number(data.rotation?.y) || 0,
+                    Number(data.rotation?.z) || 0
+                );
+                mesh.receiveShadow = true;
+            } else if (type === 'kelp' || type === 'seaweed') {
+                const height = Number(data.height) || (type === 'kelp' ? 4 : 3);
+                const topRadius = type === 'kelp' ? 0.1 : 0.08;
+                const bottomRadius = type === 'kelp' ? 0.2 : 0.16;
+                const color = type === 'kelp' ? 0x2d5016 : 0x3f7d39;
+                mesh = new THREE.Mesh(
+                    new THREE.CylinderGeometry(topRadius, bottomRadius, height),
+                    new THREE.MeshStandardMaterial({ color, roughness: 0.7 })
+                );
+                radius = Number(data.radius) || (type === 'kelp' ? 0.9 : 0.7);
+            } else {
+                continue;
+            }
+
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true;
+            this.scene.add(mesh);
+            this.decorationMeshes.set(String(id || `${type}-${x}-${z}`), mesh);
+            this.obstacles.push({ x, z, radius });
         }
     }
     
@@ -1635,6 +1680,11 @@ class OpenBotWorld {
         const isDeltaPayload = data.isDelta === true;
         const deltaWindowMissed = data.deltaWindowMissed === true;
         const agents = Array.isArray(data.agents) ? data.agents : [];
+        const objects = Array.isArray(data.objects) ? data.objects : [];
+
+        if (objects.length > 0) {
+            this.renderWorldObjects(objects);
+        }
 
         if (isDeltaPayload && !deltaWindowMissed) {
             // Invariant: animation state updates must run in both delta + full-sync paths.
