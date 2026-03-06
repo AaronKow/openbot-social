@@ -204,6 +204,17 @@ function buildRelationshipGraph(selfId, relationships) {
 }
 
 function buildTimeline(entity, currentState, reflections, recentOwnChats) {
+  const limitsByType = {
+    identity: 1,
+    state: 1,
+    reflection: 8,
+    chat: 10
+  };
+  const compareByRecency = (a, b) => {
+    if (b.ts !== a.ts) return b.ts - a.ts;
+    if (a.type !== b.type) return String(a.type).localeCompare(String(b.type));
+    return String(a.title || '').localeCompare(String(b.title || ''));
+  };
   const events = [];
   const createdTs = toTs(entity.created_at || entity.createdAt);
   if (createdTs) {
@@ -253,9 +264,19 @@ function buildTimeline(entity, currentState, reflections, recentOwnChats) {
     });
   }
 
-  return events
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, 20);
+  const byType = new Map();
+  for (const event of events) {
+    if (!byType.has(event.type)) byType.set(event.type, []);
+    byType.get(event.type).push(event);
+  }
+
+  const selected = [];
+  for (const [type, limit] of Object.entries(limitsByType)) {
+    const typedEvents = (byType.get(type) || []).sort(compareByRecency).slice(0, limit);
+    selected.push(...typedEvents);
+  }
+
+  return selected.sort(compareByRecency);
 }
 
 
