@@ -581,3 +581,59 @@ test('buildEntityWikiPublic preserves payload parity with sequential composition
     Date.now = originalDateNow;
   }
 });
+
+test('buildEntityWikiPublic timeline preserves reflections during dense chat spikes', async () => {
+  const now = Date.now();
+  const reflectionCount = 12;
+  const reflections = Array.from({ length: reflectionCount }, (_, idx) => ({
+    date: new Date(now - (idx + 1) * 60 * 60 * 1000).toISOString().slice(0, 10),
+    dailySummary: `Reflection ${idx + 1}`,
+    createdAt: new Date(now - (idx + 1) * 60 * 60 * 1000).toISOString()
+  }));
+
+  const chatMessages = [];
+  for (let bucket = 0; bucket < 14; bucket += 1) {
+    const bucketStart = now - bucket * 15 * 60 * 1000;
+    for (let i = 0; i < 5; i += 1) {
+      chatMessages.push({
+        agentName: 'alpha-lobster',
+        message: `dense-${bucket}-${i}`,
+        timestamp: bucketStart - i * 1000
+      });
+    }
+  }
+
+  const fakeDb = {
+    async getEntity(entityId) {
+      return {
+        entity_id: entityId,
+        entity_name: entityId,
+        entity_type: 'lobster',
+        created_at: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return reflections;
+    },
+    async getRecentChatMessagesByAgentName() {
+      return chatMessages;
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb);
+
+  const timelineReflections = wiki.timeline.filter(event => event.type === 'reflection');
+  const timelineChats = wiki.timeline.filter(event => event.type === 'chat');
+
+  assert.equal(wiki.timeline.length, 19);
+  assert.equal(timelineChats.length, 10);
+  assert.equal(timelineReflections.length, 8);
+  assert.equal(wiki.timeline[0].type, 'chat');
+  assert.ok(wiki.timeline.every((event, idx, arr) => idx === 0 || arr[idx - 1].ts >= event.ts));
+});
