@@ -259,13 +259,20 @@ function buildTimeline(entity, currentState, reflections, recentOwnChats) {
 }
 
 
-function summarizeActionQueue(queue) {
+function summarizeActionQueue(queue, worldTick = null) {
   if (!queue || typeof queue !== 'object' || !Array.isArray(queue.actions)) {
     return null;
   }
 
   const status = String(queue.status || 'unknown').toLowerCase();
   if (status === 'expired') {
+    return null;
+  }
+
+
+  const expiresAtTick = Number(queue.expiresAtTick);
+  const tick = Number(worldTick);
+  if (Number.isFinite(expiresAtTick) && Number.isFinite(tick) && tick > expiresAtTick) {
     return null;
   }
 
@@ -344,7 +351,7 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     .find(a => a.entityId === entityId);
 
   const runtimeActionQueue = options.runtimeActionQueue || null;
-  const runtimeActionSequence = summarizeActionQueue(runtimeActionQueue);
+  const runtimeActionSequence = summarizeActionQueue(runtimeActionQueue, worldState?.tick);
   const agentName = entity.entity_name || entity.entity_id || entityId;
   const interestsPromise = db && typeof db.getEntityInterests === 'function'
     ? db.getEntityInterests(entityId)

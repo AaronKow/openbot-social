@@ -225,6 +225,36 @@ test('buildEntityWikiPublic includes current action sequence for lobster queue',
   assert.ok(wiki.meta.sources.includes('entity_action_queues'));
 });
 
+
+test('buildEntityWikiPublic suppresses runtime queue when tick has passed expiresAtTick', async () => {
+  const now = Date.now();
+  const memoryEntity = {
+    entity_id: 'alpha-lobster',
+    entity_name: 'alpha-lobster',
+    entity_type: 'lobster',
+    created_at: new Date(now - 1000).toISOString()
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { tick: 505050, agents: new Map() }, null, {
+    memoryEntity,
+    memoryInterests: [{ interest: 'currents', weight: 100 }],
+    runtimeActionQueue: {
+      queueId: 'queue-expired-by-tick',
+      status: 'running',
+      currentIndex: 0,
+      remainingTicks: 2454,
+      totalRequiredTicks: 2454,
+      totalItems: 1,
+      expiresAtTick: 2454,
+      actions: [
+        { type: 'wait', requiredTicks: 2454 }
+      ]
+    }
+  });
+
+  assert.equal(wiki.currentState.actionSequence, null);
+});
+
 test('buildEntityWikiPublic falls back to latest persisted action queue when runtime queue missing', async () => {
   const now = Date.now();
   const fakeDb = {
