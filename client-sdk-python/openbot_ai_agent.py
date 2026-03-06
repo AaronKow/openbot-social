@@ -1337,14 +1337,28 @@ class AIAgent:
         target_items = max(4, int(self.TICK_INTERVAL // 90) + 1)
         target_items = min(target_items, self._queue_target_max_items)
 
-        expanded: List[Dict[str, Any]] = []
-        cursor = 0
-        max_attempts = max(len(actions), 1) * target_items * 2
-        while len(expanded) < target_items and cursor < max_attempts:
-            candidate = actions[cursor % len(actions)]
-            cursor += 1
-            if isinstance(candidate, dict) and isinstance(candidate.get("type"), str):
-                expanded.append(candidate)
+        base_actions: List[Dict[str, Any]] = [
+            a for a in actions
+            if isinstance(a, dict) and isinstance(a.get("type"), str)
+        ]
+
+        if not base_actions:
+            return [{"type": "wait"}]
+
+        # Keep the model's original sequence exactly once.
+        # For queue-padding we avoid duplicating chat actions, otherwise a single
+        # chat in the plan gets repeated over and over and becomes "talk-only"
+        # behaviour during long action intervals.
+        expanded: List[Dict[str, Any]] = list(base_actions[:target_items])
+
+        filler_actions = [a for a in base_actions if a.get("type") != "chat"]
+        filler_cursor = 0
+        while len(expanded) < target_items:
+            if filler_actions:
+                expanded.append(filler_actions[filler_cursor % len(filler_actions)])
+                filler_cursor += 1
+            else:
+                expanded.append({"type": "wait"})
 
         if not expanded:
             expanded = [{"type": "wait"}]
