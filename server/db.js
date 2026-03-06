@@ -1080,12 +1080,24 @@ async function saveEntityDailyReflection(
      )
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (entity_id, summary_date) DO UPDATE SET
-       daily_summary = EXCLUDED.daily_summary,
-       social_summary = EXCLUDED.social_summary,
-       goal_progress = EXCLUDED.goal_progress,
-       memory_updates = EXCLUDED.memory_updates,
-       message_count = EXCLUDED.message_count,
-       ai_completed = EXCLUDED.ai_completed,
+       daily_summary = CASE
+         WHEN NULLIF(BTRIM(EXCLUDED.daily_summary), '') IS NOT NULL THEN EXCLUDED.daily_summary
+         ELSE entity_daily_reflections.daily_summary
+       END,
+       social_summary = CASE
+         WHEN NULLIF(BTRIM(EXCLUDED.social_summary), '') IS NOT NULL THEN EXCLUDED.social_summary
+         ELSE entity_daily_reflections.social_summary
+       END,
+       goal_progress = CASE
+         WHEN EXCLUDED.goal_progress <> '{}'::jsonb THEN EXCLUDED.goal_progress
+         ELSE entity_daily_reflections.goal_progress
+       END,
+       memory_updates = CASE
+         WHEN EXCLUDED.memory_updates <> '{}'::jsonb THEN EXCLUDED.memory_updates
+         ELSE entity_daily_reflections.memory_updates
+       END,
+       message_count = GREATEST(entity_daily_reflections.message_count, EXCLUDED.message_count),
+       ai_completed = (entity_daily_reflections.ai_completed OR EXCLUDED.ai_completed),
        created_at = CURRENT_TIMESTAMP`,
     [
       entityId,

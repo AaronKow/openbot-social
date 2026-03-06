@@ -163,6 +163,20 @@ const MAP_OBJECT_TARGETS = Object.freeze({
   seaweed: Number(process.env.MAP_SEAWEED_TARGET || 7)
 });
 
+function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
+  const raw = process.env[envKey];
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed) || parsed < minMs) {
+    if (raw !== undefined) {
+      console.warn(`[scheduler-config] invalid ${envKey}=${JSON.stringify(raw)}; using default ${fallbackMs}ms (min ${minMs}ms)`);
+    }
+    return fallbackMs;
+  }
+
+  return parsed;
+}
+
 // World State
 const worldState = {
   agents: new Map(), // agentId -> agent data
@@ -1471,7 +1485,7 @@ const PERSIST_FLUSH_INTERVAL_MS = 1000;
 const PERSIST_AGENT_SAVE_INTERVAL_MS = 5000;
 const PERSIST_CHAT_CLEANUP_INTERVAL_MS = 60000;
 const PERSIST_SESSION_CLEANUP_INTERVAL_MS = 300000;
-const ENTITY_REFLECTION_CHECK_INTERVAL_MS = Number(process.env.ENTITY_REFLECTION_CHECK_INTERVAL_MS || 10 * 60 * 1000);
+const ENTITY_REFLECTION_CHECK_INTERVAL_MS = getPositiveIntervalMs('ENTITY_REFLECTION_CHECK_INTERVAL_MS', 10 * 60 * 1000, 60 * 1000);
 
 const tickSchedulerMetrics = {
   lastTickDurationMs: 0,

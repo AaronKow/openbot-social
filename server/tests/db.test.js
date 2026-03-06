@@ -82,6 +82,40 @@ test('saveEntityGoalSnapshot persists bounded long/short goals', async () => {
   }
 });
 
+
+
+test('saveEntityDailyReflection upsert preserves existing reflection content when new payload is blank', async () => {
+  const calls = [];
+  const originalQuery = db.pool.query;
+  db.pool.query = async (sql, params) => {
+    calls.push({ sql, params });
+    return { rows: [] };
+  };
+
+  try {
+    await db.saveEntityDailyReflection(
+      'entity-keep',
+      '2026-01-01',
+      'fresh summary',
+      3,
+      false,
+      '',
+      {},
+      {}
+    );
+
+    assert.equal(calls.length, 1);
+    const upsertSql = calls[0].sql;
+    assert.ok(upsertSql.includes("NULLIF(BTRIM(EXCLUDED.daily_summary), '')"));
+    assert.ok(upsertSql.includes("NULLIF(BTRIM(EXCLUDED.social_summary), '')"));
+    assert.ok(upsertSql.includes("EXCLUDED.goal_progress <> '{}'::jsonb"));
+    assert.ok(upsertSql.includes("EXCLUDED.memory_updates <> '{}'::jsonb"));
+    assert.ok(upsertSql.includes('GREATEST(entity_daily_reflections.message_count, EXCLUDED.message_count)'));
+    assert.ok(upsertSql.includes('(entity_daily_reflections.ai_completed OR EXCLUDED.ai_completed)'));
+  } finally {
+    db.pool.query = originalQuery;
+  }
+});
 test('saveAgentsBatch writes one upsert query with all persisted fields', async () => {
   const calls = [];
   const fakeClient = {
