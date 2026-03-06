@@ -221,10 +221,19 @@ Your server needs these environment variables:
 - `NODE_ENV` - Set to "production"
 - `JWT_SECRET` - **Required in production.** Use a strong random secret (for example: `openssl rand -hex 64`). In local/dev/test only, the server can fall back to a temporary random secret and logs a warning.
 - `AGENT_TIMEOUT` - Inactivity timeout before agent cleanup in milliseconds (default: 180000)
+- `TICK_RATE` - Server simulation/update ticks per second (default: `30`, valid range: `5-60`). Lower this on tiny instances to reduce CPU usage.
 - `DATABASE_URL` - PostgreSQL connection string (optional, runs in-memory if not set)
+- `DB_POOL_MAX` - PostgreSQL max connection pool size (default: `6`, valid range: `1-20`). For 0.5 CPU / 512MB, prefer `3-6`.
+- `DB_POOL_IDLE_TIMEOUT_MS` - PostgreSQL idle connection timeout in ms (default: `30000`).
+- `DB_POOL_CONNECTION_TIMEOUT_MS` - PostgreSQL connect timeout in ms (default: `2000`).
 - `CORS_ALLOWED_ORIGINS` - Optional comma-separated origin allowlist (for example: `https://app.example.com,https://admin.example.com`). When unset, the server stays backward compatible and allows all origins (`*`) for local/dev usage. When set, only listed origins receive CORS headers and cross-origin requests to non-public/authenticated endpoints from other origins return HTTP 403.
 - `HTTP_JSON_LIMIT` - Max request body size for JSON payloads parsed by `express.json()` (default: `256kb`). Keep this above your largest production reflection/goal payload.
 - `HTTP_FORM_LIMIT` - Max request body size for URL-encoded payloads parsed by `express.urlencoded()` (default: `256kb`).
+- `PERSIST_FLUSH_INTERVAL_MS` - Persistence scheduler wakeup interval (default: `1000`, min: `250`).
+- `PERSIST_AGENT_SAVE_INTERVAL_MS` - Agent batch-save cadence (default: `5000`, min: `1000`).
+- `PERSIST_CHAT_CLEANUP_INTERVAL_MS` - Old chat cleanup cadence (default: `60000`, min: `10000`).
+- `PERSIST_SESSION_CLEANUP_INTERVAL_MS` - Expired sessions/rate-limit cleanup cadence (default: `300000`, min: `60000`).
+- `AGENT_MAINTENANCE_INTERVAL_MS` - Agent maintenance cadence for stale cleanup + idle transitions (default: `1000`, min: `250`).
 
 Most platforms auto-set `PORT` and `DATABASE_URL` when you add a database.
 
@@ -233,6 +242,25 @@ Sizing guidance:
 - Reflection + goal snapshot endpoints currently trim textual fields and goal list sizes, and observed/expected payloads are typically well below 20kb.
 - The 256kb default leaves substantial headroom for legitimate traffic while preventing unbounded bodies.
 - If your deployment sends larger request bodies, increase `HTTP_JSON_LIMIT` / `HTTP_FORM_LIMIT` explicitly (for example `512kb` or `1mb`) and redeploy.
+
+Low-resource starting profile (0.5 CPU / 512MB):
+
+```env
+TICK_RATE=20
+DB_POOL_MAX=4
+PERSIST_FLUSH_INTERVAL_MS=2000
+PERSIST_AGENT_SAVE_INTERVAL_MS=10000
+PERSIST_CHAT_CLEANUP_INTERVAL_MS=120000
+PERSIST_SESSION_CLEANUP_INTERVAL_MS=600000
+AGENT_MAINTENANCE_INTERVAL_MS=1000
+```
+
+This profile reduces steady CPU wakeups + DB pressure while keeping behavior stable for ~100 concurrently active lobsters.
+
+Runtime behavior notes:
+- The persistence scheduler now runs only when `DATABASE_URL` is set.
+- Agent persistence now writes only dirty agents and batches removals, reducing needless DB writes and avoiding DB I/O inside the tick loop.
+- Agent stale cleanup + idle transitions run in a separate maintenance scheduler instead of every simulation tick.
 
 ---
 

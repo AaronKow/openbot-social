@@ -21,6 +21,20 @@ function getBodyLimit(envKey, fallback) {
   return configured.trim();
 }
 
+function getPositiveNumber(envKey, fallback, min, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[envKey];
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    if (raw !== undefined) {
+      console.warn(`[runtime-config] invalid ${envKey}=${JSON.stringify(raw)}; using default ${fallback}`);
+    }
+    return fallback;
+  }
+
+  return parsed;
+}
+
 // Reflection + goal snapshot payloads are intentionally compact (typically < 20kb after route-level trimming),
 // so a 256kb default keeps current behavior while adding protection against abusive request sizes.
 const HTTP_JSON_LIMIT = getBodyLimit('HTTP_JSON_LIMIT', '256kb');
@@ -150,7 +164,7 @@ app.use(encryptResponses);
 
 // Configuration
 const PORT = process.env.PORT || 3001;
-const TICK_RATE = 30; // 30 updates per second
+const TICK_RATE = getPositiveNumber('TICK_RATE', 30, 5, 60); // 30 updates per second
 const TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
@@ -190,6 +204,9 @@ const worldState = {
   deltaHistoryMinTick: 0
 };
 
+const dirtyAgentIds = new Set();
+const pendingAgentDeleteIds = new Set();
+
 function getTickChangeBucket(tick) {
   let bucket = worldState.agentChangeHistory.get(tick);
   if (!bucket) {
@@ -208,6 +225,8 @@ function markAgentUpdated(agent) {
   const bucket = getTickChangeBucket(worldState.tick);
   bucket.removed.delete(agent.id);
   bucket.changed.add(agent.id);
+  pendingAgentDeleteIds.delete(agent.id);
+  dirtyAgentIds.add(agent.id);
 }
 
 function markAgentRemoved(agentId) {
@@ -215,6 +234,8 @@ function markAgentRemoved(agentId) {
   const bucket = getTickChangeBucket(worldState.tick);
   bucket.changed.delete(agentId);
   bucket.removed.add(agentId);
+  dirtyAgentIds.delete(agentId);
+  pendingAgentDeleteIds.add(agentId);
 }
 
 function pruneWorldStateDeltaHistory() {
@@ -1224,6 +1245,9 @@ app.get('/ping', (req, res) => {
 // Get world state
 app.get('/world-state', (req, res) => {
   try {
+    // Preserve previous behavior: stale agents are cleaned up before world-state responses.
+    runAgentMaintenance();
+
     const { sinceTick, delta, limit } = req.query;
 
     const wantsDelta = String(delta).toLowerCase() === 'true' || sinceTick !== undefined;
@@ -1452,28 +1476,20 @@ async function gameLoop() {
   pruneWorldStateDeltaHistory();
 
   await processActionQueues();
+}
 
-  // Clean up inactive agents (no updates for AGENT_TIMEOUT ms)
+function runAgentMaintenance() {
   const now = Date.now();
+
   for (const [agentId, agent] of worldState.agents.entries()) {
     if (now - agent.lastUpdate > AGENT_TIMEOUT) {
       console.log(`Cleaning up inactive agent: ${agent.name} (${agentId})`);
       markAgentRemoved(agentId);
       worldState.agents.delete(agentId);
-      
-      // Delete from database if enabled
-      if (process.env.DATABASE_URL) {
-        try {
-          await db.deleteAgent(agentId);
-        } catch (error) {
-          console.error('Error deleting agent from database:', error);
-        }
-      }
+      continue;
     }
-  }
 
-  // Update agent states (idle if no recent actions)
-  for (const agent of worldState.agents.values()) {
+    // Update agent states (idle if no recent actions)
     if (now - agent.lastUpdate > 1000 && agent.state !== 'idle') {
       agent.state = 'idle';
       markAgentUpdated(agent);
@@ -1481,11 +1497,12 @@ async function gameLoop() {
   }
 }
 
-const PERSIST_FLUSH_INTERVAL_MS = 1000;
-const PERSIST_AGENT_SAVE_INTERVAL_MS = 5000;
-const PERSIST_CHAT_CLEANUP_INTERVAL_MS = 60000;
-const PERSIST_SESSION_CLEANUP_INTERVAL_MS = 300000;
+const PERSIST_FLUSH_INTERVAL_MS = getPositiveIntervalMs('PERSIST_FLUSH_INTERVAL_MS', 1000, 250);
+const PERSIST_AGENT_SAVE_INTERVAL_MS = getPositiveIntervalMs('PERSIST_AGENT_SAVE_INTERVAL_MS', 5000, 1000);
+const PERSIST_CHAT_CLEANUP_INTERVAL_MS = getPositiveIntervalMs('PERSIST_CHAT_CLEANUP_INTERVAL_MS', 60000, 10000);
+const PERSIST_SESSION_CLEANUP_INTERVAL_MS = getPositiveIntervalMs('PERSIST_SESSION_CLEANUP_INTERVAL_MS', 300000, 60000);
 const ENTITY_REFLECTION_CHECK_INTERVAL_MS = getPositiveIntervalMs('ENTITY_REFLECTION_CHECK_INTERVAL_MS', 10 * 60 * 1000, 60 * 1000);
+const AGENT_MAINTENANCE_INTERVAL_MS = getPositiveIntervalMs('AGENT_MAINTENANCE_INTERVAL_MS', 1000, 250);
 
 const tickSchedulerMetrics = {
   lastTickDurationMs: 0,
@@ -1509,8 +1526,17 @@ let tickTimer = null;
 
 let isPersistRunning = false;
 let persistTimer = null;
+let agentMaintenanceTimer = null;
 let entityReflectionCheckTimer = null;
 let isEntityReflectionCheckRunning = false;
+
+function scheduleAgentMaintenance() {
+  agentMaintenanceTimer = setInterval(runAgentMaintenance, AGENT_MAINTENANCE_INTERVAL_MS);
+
+  if (typeof agentMaintenanceTimer.unref === 'function') {
+    agentMaintenanceTimer.unref();
+  }
+}
 
 async function runEntityReflectionCheckCycle() {
   if (!process.env.DATABASE_URL) {
@@ -1662,13 +1688,41 @@ async function persistState() {
   // Flush queued lifecycle updates every second.
   await flushQueueLifecyclePersistBuffer();
 
-  // Save all agents to database every 5 seconds.
+  // Delete removed agents in one DB call to avoid per-tick blocking I/O.
+  if (pendingAgentDeleteIds.size > 0) {
+    const deleteIds = Array.from(pendingAgentDeleteIds);
+    try {
+      await db.deleteAgentsBatch(deleteIds);
+      for (const agentId of deleteIds) {
+        pendingAgentDeleteIds.delete(agentId);
+      }
+    } catch (error) {
+      console.error('Error deleting removed agents via batch delete:', error);
+    }
+  }
+
+  // Save dirty agents to database on configured cadence.
   if (!persistenceSchedulerMetrics.lastAgentSaveAt || now - persistenceSchedulerMetrics.lastAgentSaveAt >= PERSIST_AGENT_SAVE_INTERVAL_MS) {
     try {
-      const agentsToPersist = Array.from(worldState.agents.values());
-      await db.saveAgentsBatch(agentsToPersist);
+      if (dirtyAgentIds.size > 0) {
+        const dirtyIds = Array.from(dirtyAgentIds);
+        const agentsToPersist = dirtyIds
+          .map((agentId) => worldState.agents.get(agentId))
+          .filter(Boolean);
+
+        await db.saveAgentsBatch(agentsToPersist);
+
+        for (const agentId of dirtyIds) {
+          const agent = worldState.agents.get(agentId);
+          if (agent) {
+            dirtyAgentIds.delete(agentId);
+          }
+        }
+
+        console.log(`Persisted ${agentsToPersist.length} dirty agents to database`);
+      }
+
       persistenceSchedulerMetrics.lastAgentSaveAt = now;
-      console.log(`Persisted ${agentsToPersist.length} agents to database`);
     } catch (error) {
       console.error('Error persisting state via batch save:', error);
     }
@@ -1699,7 +1753,10 @@ async function persistState() {
 // Start game loop and persistence with non-overlapping async schedulers
 if (process.env.NODE_ENV !== 'test') {
   scheduleNextTick();
-  schedulePersistRun();
+  scheduleAgentMaintenance();
+  if (process.env.DATABASE_URL) {
+    schedulePersistRun();
+  }
   scheduleMapRefill();
   scheduleEntityReflectionChecks();
 }
@@ -2153,6 +2210,7 @@ module.exports = {
     validatePosition,
     refillMapObjects,
     MAP_OBJECT_TARGETS,
+    runAgentMaintenance,
     runEntityReflectionCheckCycle,
     scheduleEntityReflectionChecks,
     ENTITY_REFLECTION_CHECK_INTERVAL_MS,
