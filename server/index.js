@@ -1803,7 +1803,21 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
     const memoryEntity = getMemoryEntities()?.get(entityId) || null;
     const memoryInterests = app._memoryInterests?.get(entityId) || [];
     const memoryGoalSnapshot = app._memoryGoalSnapshots?.get(entityId) || null;
-    const runtimeActionQueue = actionQueues.get(entityId) || null;
+    let runtimeActionQueue = actionQueues.get(entityId) || null;
+    if (
+      runtimeActionQueue
+      && runtimeActionQueue.expiresAtTick !== null
+      && runtimeActionQueue.expiresAtTick !== undefined
+      && worldState.tick > Number(runtimeActionQueue.expiresAtTick)
+    ) {
+      runtimeActionQueue.status = 'expired';
+      runtimeActionQueue.lastError = 'Action queue expired past tick budget';
+      runtimeActionQueue.completedAtTick = worldState.tick;
+      runtimeActionQueue.completedAtMs = Date.now();
+      persistQueueLifecycle(runtimeActionQueue);
+      actionQueues.delete(entityId);
+      runtimeActionQueue = null;
+    }
     const dbAdapter = process.env.DATABASE_URL ? db : null;
 
     const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
