@@ -1,12 +1,24 @@
 const { Pool } = require('pg');
 
+function parsePositiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const rounded = Math.floor(parsed);
+  if (rounded < min || rounded > max) return fallback;
+  return rounded;
+}
+
+const DB_POOL_MAX = parsePositiveInt(process.env.DB_POOL_MAX, 6, 1, 20);
+const DB_POOL_IDLE_TIMEOUT_MS = parsePositiveInt(process.env.DB_POOL_IDLE_TIMEOUT_MS, 30000, 1000, 120000);
+const DB_POOL_CONNECTION_TIMEOUT_MS = parsePositiveInt(process.env.DB_POOL_CONNECTION_TIMEOUT_MS, 2000, 250, 30000);
+
 // Database connection pool
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  max: DB_POOL_MAX,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT_MS,
 });
 
 // Initialize database tables
@@ -481,6 +493,14 @@ async function loadAllAgents() {
 // Delete agent from database
 async function deleteAgent(agentId) {
   await pool.query('DELETE FROM agents WHERE id = $1', [agentId]);
+}
+
+async function deleteAgentsBatch(agentIds) {
+  if (!Array.isArray(agentIds) || agentIds.length === 0) {
+    return;
+  }
+
+  await pool.query('DELETE FROM agents WHERE id = ANY($1::varchar[])', [agentIds]);
 }
 
 // Save chat message to database
@@ -1360,6 +1380,7 @@ module.exports = {
   loadAgent,
   loadAllAgents,
   deleteAgent,
+  deleteAgentsBatch,
   saveChatMessage,
   loadRecentChatMessages,
   getChatMessagesBefore,
