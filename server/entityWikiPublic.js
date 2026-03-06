@@ -1,3 +1,7 @@
+const { ALLOWED_ACTIONS } = require('./actionQueue');
+
+const TERMINAL_QUEUE_STATUSES = new Set(['completed', 'failed', 'cancelled', 'expired']);
+
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
@@ -283,6 +287,45 @@ function summarizeActionQueue(queue) {
   };
 }
 
+function summarizePersistedActionQueue(queue) {
+  if (!queue || typeof queue !== 'object') return null;
+  if (!TERMINAL_QUEUE_STATUSES.has(String(queue.status || '').toLowerCase())) return null;
+
+  const rawActions = Array.isArray(queue?.queueSpec?.actions) ? queue.queueSpec.actions : [];
+  const actions = rawActions.filter((action) => (
+    action
+    && typeof action === 'object'
+    && typeof action.type === 'string'
+    && ALLOWED_ACTIONS.has(action.type)
+  ));
+  if (actions.length === 0) return null;
+
+  const status = String(queue.status || 'unknown').toLowerCase();
+  const currentIndex = Math.max(0, Math.min(Number(queue.currentIndex || 0), actions.length));
+
+  return {
+    queueId: queue.queueId || null,
+    status,
+    currentIndex,
+    totalItems: Number(queue.totalItems || actions.length || 0),
+    remainingTicks: 0,
+    totalRequiredTicks: Number(queue.totalRequiredTicks || 0),
+    currentAction: null,
+    sequence: actions.map((a, idx) => ({
+      index: idx,
+      type: a.type,
+      requiredTicks: Number(a.requiredTicks || 1),
+      status: status === 'completed'
+        ? 'completed'
+        : idx < currentIndex
+          ? 'completed'
+          : idx === currentIndex
+            ? status
+            : 'pending'
+    }))
+  };
+}
+
 async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   let entity = options.memoryEntity || null;
   if (!entity && db && typeof db.getEntity === 'function') {
@@ -318,30 +361,14 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   const actionSequencePromise = runtimeActionSequence
     ? Promise.resolve(runtimeActionSequence)
     : (db && typeof db.getRecentEntityActionQueues === 'function'
-      ? db.getRecentEntityActionQueues(entityId, 1)
+      ? db.getRecentEntityActionQueues(entityId, 5)
         .then(recentQueues => {
-          const latestQueue = Array.isArray(recentQueues) ? recentQueues[0] : null;
-          const persistedActions = Array.isArray(latestQueue?.queueSpec?.actions) ? latestQueue.queueSpec.actions : null;
-          if (!latestQueue || !persistedActions || persistedActions.length === 0) return null;
-          return {
-            queueId: latestQueue.queueId || null,
-            status: latestQueue.status || 'unknown',
-            currentIndex: Number(latestQueue.currentIndex || 0),
-            totalItems: Number(latestQueue.totalItems || persistedActions.length || 0),
-            remainingTicks: 0,
-            totalRequiredTicks: Number(latestQueue.totalRequiredTicks || 0),
-            currentAction: null,
-            sequence: persistedActions.map((a, idx) => ({
-              index: idx,
-              type: a.type,
-              requiredTicks: Number(a.requiredTicks || 1),
-              status: idx < Number(latestQueue.currentIndex || 0)
-                ? 'completed'
-                : idx === Number(latestQueue.currentIndex || 0)
-                  ? (latestQueue.status === 'running' ? 'running' : (latestQueue.status || 'pending'))
-                  : 'pending'
-            }))
-          };
+          if (!Array.isArray(recentQueues) || recentQueues.length === 0) return null;
+          for (const queue of recentQueues) {
+            const summary = summarizePersistedActionQueue(queue);
+            if (summary) return summary;
+          }
+          return null;
         })
         .catch(error => {
           console.warn(`[wiki-public] failed to read recent action queues for ${entityId}:`, error.message);
