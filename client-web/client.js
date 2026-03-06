@@ -92,7 +92,6 @@ class OpenBotWorld {
         this.currentWikiEntityId = null;
         this.timelineFilter = 'all';
         this.wikiAvatarRenderers = [];
-        this.lastWorldUpdateAt = null;
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
         this.ignoredAnimationStateLogThrottleMs = 60_000;
@@ -1521,10 +1520,7 @@ class OpenBotWorld {
                 // Update server info from status endpoint
                 this.updateWorldClockAnchorFromPayload(data);
                 if (data.totalEntitiesCreated !== undefined) this.totalEntitiesCreated = data.totalEntitiesCreated;
-                if (data.uptimeMs !== undefined || data.uptimeFormatted) {
-                    this.lastWorldUpdateAt = Date.now();
-                    this.updateLastUpdateLabel();
-                }
+                this.updateTickLabel();
                 this.updateWorldClockLabel();
                 this.updateStatus();
                 // Trigger summarization check once on first successful connection
@@ -1631,9 +1627,6 @@ class OpenBotWorld {
     }
     
     handleWorldState(data) {
-        this.lastWorldUpdateAt = Date.now();
-        this.updateLastUpdateLabel();
-
         this.updateWorldClockAnchorFromPayload(data);
         this.updateWorldClockLabel();
         if (data.totalEntitiesCreated !== undefined) {
@@ -1643,6 +1636,7 @@ class OpenBotWorld {
         const payloadTick = Number.isFinite(Number(data.tick)) ? Number(data.tick) : null;
         if (payloadTick !== null) {
             this.worldTick = payloadTick;
+            this.updateTickLabel();
         }
 
         const isDeltaPayload = data.isDelta === true;
@@ -2506,21 +2500,21 @@ class OpenBotWorld {
         if (el) el.textContent = label;
     }
 
-    updateLastUpdateLabel() {
+    updateTickLabel() {
         const el = document.getElementById('uptime-display');
         if (!el) return;
-        if (!this.lastWorldUpdateAt) {
+        if (!Number.isFinite(this.worldTick)) {
             el.textContent = 'Waiting for data';
             return;
         }
-        el.textContent = this.formatRelativeTimeAgo(Date.now() - this.lastWorldUpdateAt);
+        el.textContent = String(this.worldTick);
     }
     
     startUptimeTimer() {
         // Update uptime display every second locally (avoids waiting for server poll)
         setInterval(() => {
             this.updateWorldClockLabel();
-            this.updateLastUpdateLabel();
+            this.updateTickLabel();
         }, 1000);
     }
 
