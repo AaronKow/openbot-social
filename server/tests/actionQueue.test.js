@@ -4,7 +4,7 @@ const { normalizeQueueActions, createRuntimeQueue, MAX_QUEUE_ACTIONS, MAX_QUEUE_
 
 process.env.NODE_ENV = 'test';
 const { worldState, __testHooks } = require('../index');
-const { applyQueueAction } = __testHooks;
+const { applyQueueAction, processActionQueues, actionQueues } = __testHooks;
 
 function createAgent(id, name, position) {
   return {
@@ -87,6 +87,19 @@ test('createRuntimeQueue initializes with first action tick budget', () => {
   assert.equal(queue.status, 'created');
   assert.equal(queue.remainingTicks, 2);
   assert.equal(queue.createdAtTick, 123);
+  assert.ok(queue.expiresAtTick > queue.createdAtTick);
+});
+
+test('processActionQueues auto-cleans expired queues past tick budget', async () => {
+  actionQueues.clear();
+  const queue = createRuntimeQueue('lobster-expired', [{ type: 'wait', requiredTicks: 1 }], 100);
+  queue.expiresAtTick = 100;
+  actionQueues.set('lobster-expired', queue);
+
+  worldState.tick = 101;
+  await processActionQueues();
+
+  assert.equal(actionQueues.has('lobster-expired'), false);
 });
 
 
