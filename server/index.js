@@ -271,6 +271,7 @@ function buildWorldStateDelta(sinceTick, limit) {
 const actionQueues = new Map(); // entityId -> runtime queue
 const queueLifecyclePersistBuffer = new Map(); // queueId -> snapshot
 const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RETENTION_MS || 120000);
+const QUEUE_EXPIRY_GRACE_TICKS = Math.max(1, Math.floor(Number(process.env.ACTION_QUEUE_EXPIRY_GRACE_TICKS || 30)));
 let mapRefillTimer = null;
 let mapRefillInProgress = false;
 
@@ -918,6 +919,16 @@ async function processActionQueues() {
   if (actionQueues.size === 0) return;
   const now = Date.now();
   for (const [entityId, queue] of actionQueues.entries()) {
+    if (queue.expiresAtTick !== null && queue.expiresAtTick !== undefined && worldState.tick > queue.expiresAtTick) {
+      queue.status = 'expired';
+      queue.lastError = 'Action queue expired past tick budget';
+      queue.completedAtTick = worldState.tick;
+      queue.completedAtMs = now;
+      persistQueueLifecycle(queue);
+      actionQueues.delete(entityId);
+      continue;
+    }
+
     if (queue.status !== 'running') {
       if (queue.completedAtMs && now - queue.completedAtMs > QUEUE_TERMINAL_RETENTION_MS) {
         actionQueues.delete(entityId);
@@ -1051,6 +1062,7 @@ app.post('/entity/:entityId/action-queue/execute', requireAuth, rateLimiters.act
     queue.status = 'running';
     queue.startedAtTick = worldState.tick;
     queue.remainingTicks = queue.actions[queue.currentIndex]?.requiredTicks || 0;
+    queue.expiresAtTick = worldState.tick + queue.totalRequiredTicks + QUEUE_EXPIRY_GRACE_TICKS;
     persistQueueLifecycle(queue);
     _entityWikiCache.delete(entityId);
 
@@ -2038,6 +2050,8 @@ module.exports = {
   getMemorySessions,
   __testHooks: {
     gameLoop,
+    processActionQueues,
+    actionQueues,
     applyQueueAction,
     findAgentByName,
     buildDeterministicNearbyTarget,

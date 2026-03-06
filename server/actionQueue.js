@@ -115,6 +115,7 @@ function normalizeQueueActions(actions) {
 
 function createRuntimeQueue(entityId, actions, worldTick) {
   const normalized = normalizeQueueActions(actions);
+  const queueExpiryGraceTicks = Math.max(1, Math.floor(Number(process.env.ACTION_QUEUE_EXPIRY_GRACE_TICKS || 30)));
   return {
     queueId: uuidv4(),
     entityId,
@@ -129,6 +130,7 @@ function createRuntimeQueue(entityId, actions, worldTick) {
     lastError: null,
     executedActions: [],
     createdAtTick: worldTick,
+    expiresAtTick: worldTick + normalized.totalRequiredTicks + queueExpiryGraceTicks,
   };
 }
 
