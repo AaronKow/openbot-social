@@ -342,6 +342,83 @@ test('buildEntityWikiPublic ignores stale non-terminal persisted queue actions (
   assert.equal(wiki.currentState.actionSequence.sequence[1].type, 'emoji');
 });
 
+test('buildEntityWikiPublic ignores expired queues and falls back to most recent non-expired terminal queue', async () => {
+  const now = Date.now();
+  const fakeDb = {
+    async getEntity() {
+      return {
+        entity_id: 'alpha-lobster',
+        entity_name: 'alpha-lobster',
+        entity_type: 'lobster',
+        created_at: new Date(now - 1000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    },
+    async getLatestEntityGoalSnapshot() {
+      return null;
+    },
+    async getRecentEntityActionQueues() {
+      return [
+        {
+          queueId: 'expired-queue-1',
+          status: 'expired',
+          currentIndex: 0,
+          totalItems: 2,
+          totalRequiredTicks: 20,
+          queueSpec: {
+            actions: [
+              { type: 'jump', requiredTicks: 10 },
+              { type: 'dance', requiredTicks: 10 }
+            ]
+          }
+        },
+        {
+          queueId: 'completed-queue-1',
+          status: 'completed',
+          currentIndex: 2,
+          totalItems: 2,
+          totalRequiredTicks: 4,
+          queueSpec: {
+            actions: [
+              { type: 'jump', requiredTicks: 2 },
+              { type: 'emoji', requiredTicks: 2 }
+            ]
+          }
+        }
+      ];
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb, {
+    runtimeActionQueue: {
+      queueId: 'runtime-expired-queue',
+      status: 'expired',
+      currentIndex: 0,
+      actions: [{ type: 'jump', requiredTicks: 1200 }],
+      totalItems: 1,
+      totalRequiredTicks: 1200,
+      remainingTicks: 1200
+    }
+  });
+
+  assert.equal(wiki.currentState.actionSequence.queueId, 'completed-queue-1');
+  assert.equal(wiki.currentState.actionSequence.status, 'completed');
+  assert.equal(wiki.currentState.actionSequence.sequence.length, 2);
+  assert.equal(wiki.currentState.actionSequence.sequence[0].status, 'completed');
+  assert.equal(wiki.currentState.actionSequence.sequence[1].status, 'completed');
+});
+
 
 test('buildEntityWikiPublic preserves payload parity with sequential composition', async () => {
   const now = Date.now();

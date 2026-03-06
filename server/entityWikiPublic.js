@@ -1,6 +1,7 @@
 const { ALLOWED_ACTIONS } = require('./actionQueue');
 
 const TERMINAL_QUEUE_STATUSES = new Set(['completed', 'failed', 'cancelled', 'expired']);
+const WIKI_VISIBLE_TERMINAL_QUEUE_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
@@ -263,10 +264,15 @@ function summarizeActionQueue(queue) {
     return null;
   }
 
+  const status = String(queue.status || 'unknown').toLowerCase();
+  if (status === 'expired') {
+    return null;
+  }
+
   const current = queue.actions[queue.currentIndex] || null;
   return {
     queueId: queue.queueId || null,
-    status: queue.status || 'unknown',
+    status,
     currentIndex: Number(queue.currentIndex || 0),
     totalItems: Number(queue.totalItems || queue.actions.length || 0),
     remainingTicks: Number(queue.remainingTicks || 0),
@@ -278,10 +284,10 @@ function summarizeActionQueue(queue) {
       requiredTicks: Number(a.requiredTicks || 1),
       status: idx < Number(queue.currentIndex || 0)
         ? 'completed'
-        : idx === Number(queue.currentIndex || 0) && queue.status === 'running'
+        : idx === Number(queue.currentIndex || 0) && status === 'running'
           ? 'running'
-          : (queue.status === 'cancelled' || queue.status === 'failed') && idx === Number(queue.currentIndex || 0)
-            ? queue.status
+          : (status === 'cancelled' || status === 'failed') && idx === Number(queue.currentIndex || 0)
+            ? status
             : 'pending'
     }))
   };
@@ -289,7 +295,9 @@ function summarizeActionQueue(queue) {
 
 function summarizePersistedActionQueue(queue) {
   if (!queue || typeof queue !== 'object') return null;
-  if (!TERMINAL_QUEUE_STATUSES.has(String(queue.status || '').toLowerCase())) return null;
+  const status = String(queue.status || '').toLowerCase();
+  if (!TERMINAL_QUEUE_STATUSES.has(status)) return null;
+  if (!WIKI_VISIBLE_TERMINAL_QUEUE_STATUSES.has(status)) return null;
 
   const rawActions = Array.isArray(queue?.queueSpec?.actions) ? queue.queueSpec.actions : [];
   const actions = rawActions.filter((action) => (
@@ -300,7 +308,6 @@ function summarizePersistedActionQueue(queue) {
   ));
   if (actions.length === 0) return null;
 
-  const status = String(queue.status || 'unknown').toLowerCase();
   const currentIndex = Math.max(0, Math.min(Number(queue.currentIndex || 0), actions.length));
 
   return {
