@@ -1471,6 +1471,7 @@ const PERSIST_FLUSH_INTERVAL_MS = 1000;
 const PERSIST_AGENT_SAVE_INTERVAL_MS = 5000;
 const PERSIST_CHAT_CLEANUP_INTERVAL_MS = 60000;
 const PERSIST_SESSION_CLEANUP_INTERVAL_MS = 300000;
+const ENTITY_REFLECTION_CHECK_INTERVAL_MS = Number(process.env.ENTITY_REFLECTION_CHECK_INTERVAL_MS || 10 * 60 * 1000);
 
 const tickSchedulerMetrics = {
   lastTickDurationMs: 0,
@@ -1494,6 +1495,62 @@ let tickTimer = null;
 
 let isPersistRunning = false;
 let persistTimer = null;
+let entityReflectionCheckTimer = null;
+let isEntityReflectionCheckRunning = false;
+
+async function runEntityReflectionCheckCycle() {
+  if (!process.env.DATABASE_URL) {
+    return { skipped: true, reason: 'database_disabled' };
+  }
+
+  if (isEntityReflectionCheckRunning) {
+    console.log('[entity-reflection-scheduler] skipped (in_flight)');
+    return { skipped: true, reason: 'in_flight' };
+  }
+
+  isEntityReflectionCheckRunning = true;
+  const startedAt = Date.now();
+
+  try {
+    const result = await entityReflectionSummary.checkAndSummarizeEntityReflections();
+    const durationMs = Date.now() - startedAt;
+    console.log('[entity-reflection-scheduler] success', {
+      durationMs,
+      triggered: Boolean(result?.triggered),
+      message: result?.message || null
+    });
+    return { skipped: false, durationMs, result };
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    console.error('[entity-reflection-scheduler] failure', {
+      durationMs,
+      error: error?.message || String(error)
+    });
+    return { skipped: false, durationMs, error };
+  } finally {
+    isEntityReflectionCheckRunning = false;
+  }
+}
+
+function scheduleEntityReflectionChecks() {
+  if (!process.env.DATABASE_URL) {
+    return null;
+  }
+
+  entityReflectionCheckTimer = setInterval(() => {
+    runEntityReflectionCheckCycle();
+  }, ENTITY_REFLECTION_CHECK_INTERVAL_MS);
+
+  if (typeof entityReflectionCheckTimer.unref === 'function') {
+    entityReflectionCheckTimer.unref();
+  }
+
+  console.log('[entity-reflection-scheduler] started', {
+    intervalMs: ENTITY_REFLECTION_CHECK_INTERVAL_MS
+  });
+
+  return entityReflectionCheckTimer;
+}
 
 function scheduleNextTick() {
   const delayMs = Math.max(0, nextTickAt - Date.now());
@@ -1630,6 +1687,7 @@ if (process.env.NODE_ENV !== 'test') {
   scheduleNextTick();
   schedulePersistRun();
   scheduleMapRefill();
+  scheduleEntityReflectionChecks();
 }
 
 // Status API endpoint
@@ -2080,6 +2138,12 @@ module.exports = {
     clampMovement,
     validatePosition,
     refillMapObjects,
-    MAP_OBJECT_TARGETS
+    MAP_OBJECT_TARGETS,
+    runEntityReflectionCheckCycle,
+    scheduleEntityReflectionChecks,
+    ENTITY_REFLECTION_CHECK_INTERVAL_MS,
+    getEntityReflectionSchedulerState: () => ({
+      isEntityReflectionCheckRunning
+    })
   }
 };
