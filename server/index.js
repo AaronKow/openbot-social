@@ -1034,6 +1034,14 @@ app.post('/entity/:entityId/action-queue', requireAuth, rateLimiters.action, asy
       return res.status(409).json({ success: false, error: 'Queue already exists. Use mode=replace to overwrite.' });
     }
 
+    // Start queue immediately on creation so callers don't need a second
+    // /execute call. This prevents large CREATED/PENDING queues from sitting
+    // idle forever when clients submit but never execute.
+    queue.status = 'running';
+    queue.startedAtTick = worldState.tick;
+    queue.remainingTicks = queue.actions[queue.currentIndex]?.requiredTicks || 0;
+    queue.expiresAtTick = worldState.tick + queue.totalRequiredTicks + QUEUE_EXPIRY_GRACE_TICKS;
+
     actionQueues.set(entityId, queue);
     persistQueueLifecycle(queue);
     _entityWikiCache.delete(entityId);
