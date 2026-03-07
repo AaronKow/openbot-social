@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const WORLD_SIZE = 100;
 const GROUND_Y = 0;
+const BUILD_ACTIONS = new Set(['buildRoad', 'buildShelter', 'expandMap']);
 
 function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
@@ -38,11 +39,13 @@ function createLobsterModel() {
   const clawGeometry = new THREE.BoxGeometry(0.6, 0.2, 0.2);
   const leftClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
   leftClaw.position.set(0.8, 0.4, 0);
+  leftClaw.name = 'lobster-left-claw';
   leftClaw.castShadow = true;
   group.add(leftClaw);
 
   const rightClaw = new THREE.Mesh(clawGeometry, bodyMaterial);
   rightClaw.position.set(0.8, -0.4, 0);
+  rightClaw.name = 'lobster-right-claw';
   rightClaw.castShadow = true;
   group.add(rightClaw);
 
@@ -605,8 +608,16 @@ export class Example3DWorld {
 
     this.lobsters = new Map();
     this.foodMeshes = new Map();
+    this.resourceMeshes = new Map();
+    this.roadMeshes = new Map();
+    this.shelterMeshes = new Map();
     this.hazardVisuals = new Map();
     this.rescueMeshes = new Map();
+    this.worldWidth = WORLD_SIZE;
+    this.worldHeight = WORLD_SIZE;
+    this.worldBorder = null;
+    this.worldCornerMarkers = [];
+    this.expansionTileMeshes = new Map();
     this.clouds = [];
     this.lastCloudUpdateAt = null;
     this.cloudUpdateAccumulator = 0;
@@ -653,6 +664,8 @@ export class Example3DWorld {
     floor.position.set(50, -1.5, 50);
     floor.receiveShadow = true;
     this.scene.add(floor);
+    this.floorMesh = floor;
+    this.createWorldBorder();
 
     // Night effect: circular moonlight zone centered on the floor.
     this.moonDiscTexture = createMoonlightTexture({
@@ -775,6 +788,89 @@ export class Example3DWorld {
     this.moonLight.target.position.set(50, 0, 50);
     this.scene.add(this.moonLight);
     this.scene.add(this.moonLight.target);
+  }
+
+  createWorldBorder() {
+    const points = [
+      new THREE.Vector3(0, 0.12, 0),
+      new THREE.Vector3(this.worldWidth, 0.12, 0),
+      new THREE.Vector3(this.worldWidth, 0.12, this.worldHeight),
+      new THREE.Vector3(0, 0.12, this.worldHeight)
+    ];
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ color: 0xfff29a });
+    this.worldBorder = new THREE.LineLoop(geometry, material);
+    this.scene.add(this.worldBorder);
+
+    for (let i = 0; i < 4; i += 1) {
+      const marker = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.22, 1.8, 10),
+        new THREE.MeshStandardMaterial({ color: 0xf8e36a, emissive: 0x6f6519, emissiveIntensity: 0.35 })
+      );
+      marker.position.y = 0.9;
+      marker.castShadow = true;
+      this.scene.add(marker);
+      this.worldCornerMarkers.push(marker);
+    }
+    this.updateWorldBorder();
+  }
+
+  updateWorldBorder() {
+    if (!this.worldBorder) return;
+    const borderW = this.worldWidth;
+    const borderH = this.worldHeight;
+    const points = [
+      new THREE.Vector3(0, 0.12, 0),
+      new THREE.Vector3(borderW, 0.12, 0),
+      new THREE.Vector3(borderW, 0.12, borderH),
+      new THREE.Vector3(0, 0.12, borderH)
+    ];
+    this.worldBorder.geometry.setFromPoints(points);
+    this.worldBorder.geometry.computeBoundingSphere();
+
+    const corners = [
+      [0, 0],
+      [borderW, 0],
+      [borderW, borderH],
+      [0, borderH]
+    ];
+    this.worldCornerMarkers.forEach((marker, idx) => {
+      const [x, z] = corners[idx];
+      marker.position.x = x;
+      marker.position.z = z;
+    });
+  }
+
+  syncExpansionTiles(tiles = []) {
+    const ids = new Set(tiles.map((t) => t.id));
+    for (const [id, mesh] of this.expansionTileMeshes) {
+      if (!ids.has(id)) {
+        this.scene.remove(mesh);
+        disposeObject3D(mesh);
+        this.expansionTileMeshes.delete(id);
+      }
+    }
+
+    tiles.forEach((tile) => {
+      let tileGroup = this.expansionTileMeshes.get(tile.id);
+      if (!tileGroup) {
+        tileGroup = new THREE.Group();
+        const baseGeo = new THREE.BoxGeometry(1, 3, 1);
+        const baseMat = new THREE.MeshStandardMaterial({
+          color: 0xc2b280,
+          roughness: 0.82,
+          metalness: 0.08
+        });
+        const base = new THREE.Mesh(baseGeo, baseMat);
+        base.receiveShadow = true;
+        base.castShadow = true;
+        tileGroup.add(base);
+
+        this.scene.add(tileGroup);
+        this.expansionTileMeshes.set(tile.id, tileGroup);
+      }
+      tileGroup.position.set(Number(tile.x) || 0, -1.5, Number(tile.z) || 0);
+    });
   }
 
   createCloudField() {
@@ -992,6 +1088,20 @@ export class Example3DWorld {
     hammerPivot.add(hammerMesh);
     mesh.add(hammerPivot);
 
+    const buildHammerPivot = new THREE.Group();
+    buildHammerPivot.position.set(0.18, 0.06, 0.02);
+    buildHammerPivot.rotation.set(0.2, -0.08, 0.45);
+    const buildHammerMesh = createHammerModel();
+    buildHammerMesh.scale.set(1.15, 1.15, 1.15);
+    buildHammerPivot.visible = false;
+    buildHammerPivot.add(buildHammerMesh);
+    const rightClaw = mesh.getObjectByName('lobster-right-claw');
+    if (rightClaw) {
+      rightClaw.add(buildHammerPivot);
+    } else {
+      mesh.add(buildHammerPivot);
+    }
+
     const record = {
       mesh,
       tag,
@@ -1004,6 +1114,9 @@ export class Example3DWorld {
       shockGroup,
       tornadoRing,
       hammerPivot,
+      hammerMesh,
+      buildHammerPivot,
+      buildHammerMesh,
       seenDamageIds: new Set(),
       damageMarkers: new Map()
     };
@@ -1019,6 +1132,8 @@ export class Example3DWorld {
     const shock = clamp((effects.electrocuted || 0) / 2.8, 0, 1);
     const tornado = clamp((effects.tornadoSpin || 0) / 2.6, 0, 1);
     const swing = clamp((combat.swingUntil || 0) / 0.42, 0, 1);
+    const queuedAction = lobster.actionQueue?.[0]?.type || '';
+    const buildIntent = BUILD_ACTIONS.has(lobster.state) || BUILD_ACTIONS.has(queuedAction);
     const dodge = clamp((combat.dodgeUntil || 0) / 1.0, 0, 1);
     const hitReact = clamp((combat.tookHitUntil || 0) / 0.6, 0, 1);
 
@@ -1052,7 +1167,7 @@ export class Example3DWorld {
     }
 
     record.hammerPivot.visible = swing > 0.01;
-    if (record.hammerPivot.visible) {
+    if (swing > 0.01) {
       const swingProgress = 1 - swing;
       if (swingProgress < 0.45) {
         // Wind-up above head.
@@ -1075,6 +1190,16 @@ export class Example3DWorld {
       record.hammerPivot.position.x = 0;
       record.hammerPivot.position.y = 2.45;
       record.hammerPivot.rotation.set(0, 0, 0);
+    }
+
+    record.buildHammerPivot.visible = buildIntent;
+    if (record.buildHammerPivot.visible) {
+      record.buildHammerPivot.position.x = 0.18 + (Math.sin(timeSec * 6) * 0.015);
+      record.buildHammerPivot.position.y = 0.06 + (Math.sin(timeSec * 8) * 0.02);
+      record.buildHammerPivot.position.z = 0.02 + (Math.cos(timeSec * 6) * 0.01);
+      record.buildHammerPivot.rotation.x = 0.2;
+      record.buildHammerPivot.rotation.y = -0.08 + (Math.sin(timeSec * 5) * 0.04);
+      record.buildHammerPivot.rotation.z = 0.45;
     }
 
     record.mesh.rotation.x = Math.sin(timeSec * 18) * 0.12 * dodge;
@@ -1107,6 +1232,7 @@ export class Example3DWorld {
     if ((effects.paralyzed || 0) > 0.1) statuses.push('PARALYZED');
     if (tornado > 0.1) statuses.push('TWISTED');
     if (swing > 0.1) statuses.push('HAMMER SWING');
+    if (buildIntent && swing <= 0.1) statuses.push('BUILDING');
     if (dodge > 0.1) statuses.push('DODGING');
     if (hitReact > 0.1) statuses.push('HIT');
 
@@ -1178,6 +1304,161 @@ export class Example3DWorld {
     }
   }
 
+  setWorldBounds(width = WORLD_SIZE, height = WORLD_SIZE) {
+    this.worldWidth = Math.max(WORLD_SIZE, Number(width) || WORLD_SIZE);
+    this.worldHeight = Math.max(WORLD_SIZE, Number(height) || WORLD_SIZE);
+    // Keep the base map stable visually; show growth via per-tile expansion meshes.
+    this.updateWorldBorder();
+  }
+
+  clampWorldX(x) {
+    return clamp(x, 0, this.worldWidth);
+  }
+
+  clampWorldZ(z) {
+    return clamp(z, 0, this.worldHeight);
+  }
+
+  createResourceMesh(type) {
+    if (type === 'rock') {
+      return new THREE.Mesh(
+        new THREE.DodecahedronGeometry(0.7, 0),
+        new THREE.MeshStandardMaterial({ color: 0x8c9098, roughness: 0.9, metalness: 0.08 })
+      );
+    }
+    if (type === 'kelp') {
+      const kelp = new THREE.Group();
+      const stem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.14, 0.18, 2.4, 8),
+        new THREE.MeshStandardMaterial({ color: 0x2ca86f, roughness: 0.7 })
+      );
+      stem.position.y = 1.1;
+      kelp.add(stem);
+      const leaf = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.8, 1.9),
+        new THREE.MeshStandardMaterial({ color: 0x3ecf8e, side: THREE.DoubleSide })
+      );
+      leaf.position.set(0.16, 1.2, 0);
+      leaf.rotation.y = Math.PI / 3;
+      kelp.add(leaf);
+      return kelp;
+    }
+    const seaweed = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x5fcf65, roughness: 0.72 });
+    for (let i = 0; i < 3; i += 1) {
+      const blade = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.12, 1.8, 8), mat);
+      blade.position.set((i - 1) * 0.22, 0.9, 0);
+      blade.rotation.z = (i - 1) * 0.2;
+      seaweed.add(blade);
+    }
+    return seaweed;
+  }
+
+  syncResources(resources = []) {
+    const ids = new Set(resources.map((r) => r.id));
+    for (const [id, mesh] of this.resourceMeshes) {
+      if (!ids.has(id)) {
+        this.scene.remove(mesh);
+        disposeObject3D(mesh);
+        this.resourceMeshes.delete(id);
+      }
+    }
+
+    resources.forEach((resource) => {
+      let mesh = this.resourceMeshes.get(resource.id);
+      if (!mesh) {
+        mesh = this.createResourceMesh(resource.type);
+        mesh.castShadow = true;
+        this.scene.add(mesh);
+        this.resourceMeshes.set(resource.id, mesh);
+      }
+      mesh.position.set(this.clampWorldX(resource.x), 0.35, this.clampWorldZ(resource.z));
+    });
+  }
+
+  syncRoads(roads = []) {
+    const ids = new Set(roads.map((r) => r.id));
+    for (const [id, mesh] of this.roadMeshes) {
+      if (!ids.has(id)) {
+        this.scene.remove(mesh);
+        disposeObject3D(mesh);
+        this.roadMeshes.delete(id);
+      }
+    }
+
+    roads.forEach((road) => {
+      let mesh = this.roadMeshes.get(road.id);
+      const dx = road.x2 - road.x1;
+      const dz = road.z2 - road.z1;
+      const length = Math.max(0.2, Math.hypot(dx, dz));
+      if (!mesh) {
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1, 0.08, 1),
+          new THREE.MeshStandardMaterial({ color: 0x6d4c41, roughness: 0.85, metalness: 0.05 })
+        );
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        this.roadMeshes.set(road.id, mesh);
+      }
+      mesh.scale.set(length, 1, 1);
+      mesh.position.set(this.clampWorldX((road.x1 + road.x2) * 0.5), 0.05, this.clampWorldZ((road.z1 + road.z2) * 0.5));
+      mesh.rotation.y = Math.atan2(dz, dx);
+    });
+  }
+
+  syncShelters(shelters = [], lobsters = []) {
+    const ids = new Set(shelters.map((s) => s.id));
+    const ownerNameById = new Map(lobsters.map((l) => [l.id, l.name]));
+    for (const [id, record] of this.shelterMeshes) {
+      if (!ids.has(id)) {
+        this.scene.remove(record.group);
+        this.scene.remove(record.tag.sprite);
+        disposeObject3D(record.group);
+        record.tag.sprite.material?.map?.dispose?.();
+        record.tag.sprite.material?.dispose?.();
+        this.shelterMeshes.delete(id);
+      }
+    }
+
+    shelters.forEach((shelter) => {
+      let record = this.shelterMeshes.get(shelter.id);
+      if (!record) {
+        const group = new THREE.Group();
+        const base = new THREE.Mesh(
+          new THREE.BoxGeometry(3.4, 2.2, 3.2),
+          new THREE.MeshStandardMaterial({ color: 0xbfa46a, roughness: 0.72 })
+        );
+        base.position.y = 1.1;
+        base.castShadow = true;
+        group.add(base);
+        const roof = new THREE.Mesh(
+          new THREE.ConeGeometry(2.6, 1.5, 4),
+          new THREE.MeshStandardMaterial({ color: 0x7a5337, roughness: 0.8 })
+        );
+        roof.position.y = 2.8;
+        roof.rotation.y = Math.PI / 4;
+        roof.castShadow = true;
+        group.add(roof);
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(1.8, Number(shelter.radius) || 5, 40),
+          new THREE.MeshBasicMaterial({ color: 0x9cf2d1, transparent: true, opacity: 0.26, side: THREE.DoubleSide })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = 0.08;
+        group.add(ring);
+        const tag = createTextSprite(ownerNameById.get(shelter.ownerId) || shelter.ownerId || 'Shelter');
+        tag.sprite.scale.set(6, 1.4, 1);
+        this.scene.add(group);
+        this.scene.add(tag.sprite);
+        record = { group, tag };
+        this.shelterMeshes.set(shelter.id, record);
+      }
+
+      record.group.position.set(this.clampWorldX(shelter.x), 0, this.clampWorldZ(shelter.z));
+      record.tag.sprite.position.set(this.clampWorldX(shelter.x), 4.6, this.clampWorldZ(shelter.z));
+    });
+  }
+
   syncFoods(foods = []) {
     const ids = new Set(foods.map((f) => f.id));
 
@@ -1199,7 +1480,7 @@ export class Example3DWorld {
         this.scene.add(mesh);
         this.foodMeshes.set(food.id, mesh);
       }
-      mesh.position.set(clamp(food.x, 0, 100), 0.3, clamp(food.z, 0, 100));
+      mesh.position.set(this.clampWorldX(food.x), 0.3, this.clampWorldZ(food.z));
     });
   }
 
@@ -1222,7 +1503,7 @@ export class Example3DWorld {
         this.hazardVisuals.set(hazard.id, record);
       }
 
-      record.group.position.set(clamp(hazard.x, 0, 100), 0, clamp(hazard.z, 0, 100));
+      record.group.position.set(this.clampWorldX(hazard.x), 0, this.clampWorldZ(hazard.z));
     });
   }
 
@@ -1248,7 +1529,7 @@ export class Example3DWorld {
         this.rescueMeshes.set(rescue.id, mesh);
       }
       ensureMaterialColor(mesh.material, rescue.rescuedBy ? 0x7ae582 : 0xff9f1c);
-      mesh.position.set(clamp(rescue.x, 0, 100), 0.22, clamp(rescue.z, 0, 100));
+      mesh.position.set(this.clampWorldX(rescue.x), 0.22, this.clampWorldZ(rescue.z));
     });
   }
 
@@ -1346,6 +1627,7 @@ export class Example3DWorld {
 
   update(snapshot) {
     const { world, lobsters } = snapshot;
+    this.setWorldBounds(world.width, world.height);
     const celestial = this.updateCelestialBodies(world.timeHours);
     this.setPhaseLighting(world.dayPhase, celestial);
     // Prevent underside artifacts: never render moon beam when camera is below the floor plane.
@@ -1361,6 +1643,10 @@ export class Example3DWorld {
     }
 
     this.syncFoods(world.foods);
+    this.syncExpansionTiles(world.expansionTiles || []);
+    this.syncResources(world.resources);
+    this.syncRoads(world.roads);
+    this.syncShelters(world.shelters, lobsters);
     this.syncHazards(world.hazards);
     const hzTime = Number.isFinite(world.elapsedSeconds) ? world.elapsedSeconds : (world.tick / 12);
     for (const hazard of this.hazardVisuals.values()) {
@@ -1374,8 +1660,8 @@ export class Example3DWorld {
       const record = this.getOrCreateLobster(lobster);
       seen.add(lobster.id);
 
-      const px = clamp(lobster.position.x, 0, 100);
-      const pz = clamp(lobster.position.z, 0, 100);
+      const px = this.clampWorldX(lobster.position.x);
+      const pz = this.clampWorldZ(lobster.position.z);
       record.mesh.position.x = px;
       record.mesh.position.z = pz;
       record.mesh.position.y = Math.max(record.baseY, record.baseY + (lobster.position.y || 0));
@@ -1474,10 +1760,54 @@ export class Example3DWorld {
       record.statusTag.sprite.material?.dispose?.();
     }
     this.lobsters.clear();
+    for (const mesh of this.foodMeshes.values()) {
+      this.scene.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.foodMeshes.clear();
+    for (const mesh of this.resourceMeshes.values()) {
+      this.scene.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.resourceMeshes.clear();
+    for (const mesh of this.roadMeshes.values()) {
+      this.scene.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.roadMeshes.clear();
+    for (const record of this.shelterMeshes.values()) {
+      this.scene.remove(record.group);
+      this.scene.remove(record.tag.sprite);
+      disposeObject3D(record.group);
+      record.tag.sprite.material?.map?.dispose?.();
+      record.tag.sprite.material?.dispose?.();
+    }
+    this.shelterMeshes.clear();
+    for (const mesh of this.rescueMeshes.values()) {
+      this.scene.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.rescueMeshes.clear();
     for (const record of this.hazardVisuals.values()) {
       disposeObject3D(record.group);
     }
     this.hazardVisuals.clear();
+    if (this.worldBorder) {
+      this.scene.remove(this.worldBorder);
+      this.worldBorder.geometry?.dispose?.();
+      this.worldBorder.material?.dispose?.();
+      this.worldBorder = null;
+    }
+    this.worldCornerMarkers.forEach((marker) => {
+      this.scene.remove(marker);
+      disposeObject3D(marker);
+    });
+    this.worldCornerMarkers = [];
+    for (const mesh of this.expansionTileMeshes.values()) {
+      this.scene.remove(mesh);
+      disposeObject3D(mesh);
+    }
+    this.expansionTileMeshes.clear();
     this.renderer.dispose();
   }
 }

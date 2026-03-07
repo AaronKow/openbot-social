@@ -58,7 +58,11 @@ export function renderShell({ root, title, subtitle, nextHref, mappingNote }) {
     <button data-action="jump">Jump</button>
     <button data-action="patrol">Patrol</button>
     <button data-action="forage">Forage</button>
+    <button data-action="harvest">Harvest</button>
     <button data-action="skill:scout">Skill</button>
+    <button data-action="buildRoad">Build Road</button>
+    <button data-action="expandMap">Expand Map</button>
+    <button data-action="buildShelter">Build Shelter</button>
     <button data-action="attack">Attack</button>
     <button data-action="defend">Defend</button>
     <button data-action="retreat">Retreat</button>
@@ -100,6 +104,10 @@ export function renderSnapshot(ui, snapshot) {
     <div><strong>Day</strong><br>${world.day}</div>
     <div><strong>Hour</strong><br>${world.timeHours.toFixed(1)}</div>
     <div><strong>Phase</strong><br>${world.dayPhase}</div>
+    <div><strong>Map</strong><br>${world.width}x${world.height}</div>
+    <div><strong>Resources</strong><br>${(world.resources || []).length}</div>
+    <div><strong>Roads</strong><br>${(world.roads || []).length}</div>
+    <div><strong>Shelters</strong><br>${(world.shelters || []).length}</div>
   `;
 
   ui.eventLog.innerHTML = events.slice(0, 40).map((event) => (
@@ -125,19 +133,25 @@ export function renderSnapshot(ui, snapshot) {
         <th>State</th>
         <th>Queue</th>
         <th>Energy</th>
+        <th>Inventory</th>
         <th>Scout</th>
+        <th>Builder</th>
       </tr>
     </thead>
     <tbody>
       ${lobsters.map((lobster) => {
         const scout = lobster.skills?.scout || { level: 1, cooldown: 0 };
+        const builder = lobster.skills?.builder || { level: 1, cooldown: 0 };
+        const inventory = lobster.inventory || { rock: 0, kelp: 0, seaweed: 0 };
         return `
           <tr>
             <td>${lobster.name}</td>
             <td>${lobster.state}</td>
             <td>${lobster.actionQueue.length}</td>
             <td>${bar(lobster.stats.energy)} ${lobster.stats.energy.toFixed(1)}</td>
+            <td>R ${inventory.rock || 0} · K ${inventory.kelp || 0} · S ${inventory.seaweed || 0}</td>
             <td>L${scout.level} · cd ${Number(scout.cooldown).toFixed(1)}</td>
+            <td>L${builder.level} · cd ${Number(builder.cooldown).toFixed(1)}</td>
           </tr>
         `;
       }).join('')}

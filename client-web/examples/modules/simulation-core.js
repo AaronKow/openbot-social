@@ -6,6 +6,20 @@ const MAX_TURN_RATE = 5.0;
 const LOBSTER_COLLISION_RADIUS = 1.2;
 const COLLISION_PUSH_BUFFER = 0.35;
 const MAP_EDGE_BUFFER = LOBSTER_COLLISION_RADIUS + 0.35;
+const RESOURCE_REFILL_SECONDS = 15 * 60;
+const MAP_EXPAND_STEP = 1;
+const MAP_MAX_SIZE = 160;
+const RESOURCE_TYPES = ['rock', 'kelp', 'seaweed'];
+const RESOURCE_TARGETS = {
+  rock: 16,
+  kelp: 18,
+  seaweed: 20
+};
+const BUILD_COSTS = {
+  road: { rock: 2, kelp: 1, seaweed: 1 },
+  shelter: { rock: 5, kelp: 3, seaweed: 4 },
+  expand: { rock: 1, kelp: 1, seaweed: 1 }
+};
 
 function hashSeed(text) {
   const value = String(text || 'openbot-seed');
@@ -54,8 +68,8 @@ export function createSimulation({ seed, moduleId }) {
   const rng = createRng(seed);
   const moduleNumber = Number(String(moduleId || '1').split('_')[0]) || 1;
   const subscribers = new Set();
-  const width = 100;
-  const height = 100;
+  const initialWidth = 100;
+  const initialHeight = 100;
 
   const state = {
     world: {
@@ -66,11 +80,17 @@ export function createSimulation({ seed, moduleId }) {
       timeHours: 9,
       day: 1,
       dayPhase: 'morning',
-      width,
-      height,
+      width: initialWidth,
+      height: initialHeight,
       hazards: [],
       foods: [],
-      rescues: []
+      rescues: [],
+      resources: [],
+      roads: [],
+      shelters: [],
+      expansionTiles: [],
+      mapExpansionLevel: 0,
+      nextResourceRefillAt: RESOURCE_REFILL_SECONDS
     },
     lobsters: Array.from({ length: 6 }, (_, i) => {
       const x = 10 + i * 12;
@@ -108,8 +128,16 @@ export function createSimulation({ seed, moduleId }) {
         skills: {
           scout: { level: 1 + (i % 2), xp: 0, cooldown: 0 },
           forage: { level: 1, xp: 0, cooldown: 0 },
-          shellGuard: { level: 1, xp: 0, cooldown: 0 }
+          shellGuard: { level: 1, xp: 0, cooldown: 0 },
+          builder: { level: 1, xp: 0, cooldown: 0 }
         },
+        inventory: {
+          rock: 3 + Math.floor(rng() * 2),
+          kelp: 3 + Math.floor(rng() * 2),
+          seaweed: 3 + Math.floor(rng() * 2)
+        },
+        structuresBuilt: 0,
+        lastExpansionTile: null,
         combat: {
           mode: 'neutral',
           targetId: null,
@@ -145,6 +173,14 @@ export function createSimulation({ seed, moduleId }) {
 
   function enabled(minModule) {
     return moduleNumber >= minModule;
+  }
+
+  function worldWidth() {
+    return state.world.width || initialWidth;
+  }
+
+  function worldHeight() {
+    return state.world.height || initialHeight;
   }
 
   function notify() {
@@ -198,15 +234,59 @@ export function createSimulation({ seed, moduleId }) {
   }
 
   function randomPlayablePoint() {
+    const maxW = worldWidth();
+    const maxH = worldHeight();
+    for (let i = 0; i < 24; i += 1) {
+      const candidate = {
+        x: Math.round(rng() * (maxW - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER),
+        z: Math.round(rng() * (maxH - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER)
+      };
+      if (hasGroundAt(candidate.x, candidate.z)) return candidate;
+    }
     return {
-      x: Math.round(rng() * (width - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER),
-      z: Math.round(rng() * (height - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER)
+      x: Math.round(rng() * (initialWidth - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER),
+      z: Math.round(rng() * (initialHeight - MAP_EDGE_BUFFER * 2) + MAP_EDGE_BUFFER)
     };
   }
 
+  function hasGroundAt(x, z) {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return false;
+    if (x >= 0 && x <= initialWidth && z >= 0 && z <= initialHeight) return true;
+    return state.world.expansionTiles.some((tile) => (
+      x >= (tile.x - 0.5) && x <= (tile.x + 0.5) && z >= (tile.z - 0.5) && z <= (tile.z + 0.5)
+    ));
+  }
+
+  function nearestGroundPoint(x, z) {
+    let best = {
+      x: clamp(x, MAP_EDGE_BUFFER, initialWidth - MAP_EDGE_BUFFER),
+      z: clamp(z, MAP_EDGE_BUFFER, initialHeight - MAP_EDGE_BUFFER)
+    };
+    let bestDist = Math.hypot(best.x - x, best.z - z);
+
+    state.world.expansionTiles.forEach((tile) => {
+      const candidate = {
+        x: clamp(x, tile.x - 0.48, tile.x + 0.48),
+        z: clamp(z, tile.z - 0.48, tile.z + 0.48)
+      };
+      const d = Math.hypot(candidate.x - x, candidate.z - z);
+      if (d < bestDist) {
+        best = candidate;
+        bestDist = d;
+      }
+    });
+
+    return best;
+  }
+
   function clampPlayable(position) {
-    position.x = clamp(position.x, MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
-    position.z = clamp(position.z, MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+    position.x = clamp(position.x, MAP_EDGE_BUFFER, worldWidth() - MAP_EDGE_BUFFER);
+    position.z = clamp(position.z, MAP_EDGE_BUFFER, worldHeight() - MAP_EDGE_BUFFER);
+    if (!hasGroundAt(position.x, position.z)) {
+      const grounded = nearestGroundPoint(position.x, position.z);
+      position.x = grounded.x;
+      position.z = grounded.z;
+    }
   }
 
   function distance2D(a, b) {
@@ -229,6 +309,134 @@ export function createSimulation({ seed, moduleId }) {
     state.world.foods = state.world.foods.slice(-50);
   }
 
+  function spendInventory(lobster, cost) {
+    return Object.entries(cost).every(([key, amount]) => (lobster.inventory[key] || 0) >= amount);
+  }
+
+  function applyInventoryCost(lobster, cost) {
+    Object.entries(cost).forEach(([key, amount]) => {
+      lobster.inventory[key] = Math.max(0, (lobster.inventory[key] || 0) - amount);
+    });
+  }
+
+  function awardBuilderXp(lobster, amount = 8) {
+    const skill = lobster.skills.builder;
+    skill.xp += amount;
+    if (skill.xp >= skill.level * 45) {
+      skill.level += 1;
+      skill.xp = 0;
+      pointsFor(lobster.id, 14, `builder leveled to ${skill.level}`);
+      pushEvent('skill', `${lobster.name} leveled builder to ${skill.level}.`);
+    }
+  }
+
+  function spawnResource(type, reason = 'spawn') {
+    const point = randomPlayablePoint();
+    state.world.resources.push({
+      id: `${type}-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+      type,
+      x: point.x,
+      z: point.z,
+      reason
+    });
+  }
+
+  function refillResources({ force = false } = {}) {
+    if (!force && state.world.elapsedSeconds < state.world.nextResourceRefillAt) return;
+
+    RESOURCE_TYPES.forEach((type) => {
+      const have = state.world.resources.filter((entry) => entry.type === type).length;
+      const target = RESOURCE_TARGETS[type];
+      const missing = Math.max(0, target - have);
+      for (let i = 0; i < missing; i += 1) {
+        spawnResource(type, 'refill');
+      }
+      if (missing > 0) {
+        pushEvent('resource', `${missing} ${type} node(s) respawned on the map.`);
+      }
+    });
+
+    state.world.resources = state.world.resources.slice(-220);
+    state.world.nextResourceRefillAt = state.world.elapsedSeconds + RESOURCE_REFILL_SECONDS;
+  }
+
+  function tickSkillModuleRandomResourceSpawn() {
+    // Keep module 3 visually active: trickle-spawn random resource nodes.
+    if (moduleNumber !== 3) return;
+    if (state.world.tick % 18 !== 0) return;
+    const type = RESOURCE_TYPES[Math.floor(rng() * RESOURCE_TYPES.length)];
+    spawnResource(type, 'skill-random');
+    state.world.resources = state.world.resources.slice(-220);
+  }
+
+  function findNearestResource(lobster) {
+    return state.world.resources
+      .map((resource) => ({ resource, d: distance2D(lobster.position, resource) }))
+      .sort((a, b) => a.d - b.d)[0] || null;
+  }
+
+  function getOwnedShelter(lobsterId) {
+    return state.world.shelters.find((entry) => entry.ownerId === lobsterId) || null;
+  }
+
+  function distancePointToSegment2D(point, from, to) {
+    const vx = to.x - from.x;
+    const vz = to.z - from.z;
+    const wx = point.x - from.x;
+    const wz = point.z - from.z;
+    const lenSq = (vx * vx) + (vz * vz);
+    if (lenSq <= 0.0001) return Math.hypot(wx, wz);
+    const t = clamp(((wx * vx) + (wz * vz)) / lenSq, 0, 1);
+    const px = from.x + (vx * t);
+    const pz = from.z + (vz * t);
+    return Math.hypot(point.x - px, point.z - pz);
+  }
+
+  function isOnRoad(lobster) {
+    return state.world.roads.some((road) => (
+      distancePointToSegment2D(lobster.position, { x: road.x1, z: road.z1 }, { x: road.x2, z: road.z2 }) <= 1.35
+    ));
+  }
+
+  function nearestEdgeInfo(position) {
+    const maxW = worldWidth();
+    const maxH = worldHeight();
+    const edges = [
+      { key: 'west', distance: position.x },
+      { key: 'east', distance: maxW - position.x },
+      { key: 'north', distance: position.z },
+      { key: 'south', distance: maxH - position.z }
+    ].sort((a, b) => a.distance - b.distance);
+    return edges[0];
+  }
+
+  function nearestGrowEdgeInfo(position) {
+    const maxW = worldWidth();
+    const maxH = worldHeight();
+    const edges = [
+      { key: 'east', distance: maxW - position.x },
+      { key: 'south', distance: maxH - position.z }
+    ].sort((a, b) => a.distance - b.distance);
+    return edges[0];
+  }
+
+  function edgeApproachPoint(edgeKey, fromPosition) {
+    const maxW = worldWidth();
+    const maxH = worldHeight();
+    const pad = MAP_EDGE_BUFFER + 0.15;
+    const fallback = fromPosition || { x: maxW * 0.5, z: maxH * 0.5 };
+    if (edgeKey === 'west') {
+      return { x: pad, z: clamp(fallback.z, pad, maxH - pad) };
+    }
+    if (edgeKey === 'east') {
+      return { x: maxW - pad, z: clamp(fallback.z, pad, maxH - pad) };
+    }
+    if (edgeKey === 'north') {
+      return { x: clamp(fallback.x, pad, maxW - pad), z: pad };
+    }
+    return { x: clamp(fallback.x, pad, maxW - pad), z: maxH - pad };
+  }
+
   function ensureHazards() {
     if (!enabled(6)) return;
     if (state.world.hazards.length > 0) return;
@@ -249,11 +457,13 @@ export function createSimulation({ seed, moduleId }) {
 
   function tickHazardMovement() {
     if (!enabled(6)) return;
+    const maxW = worldWidth();
+    const maxH = worldHeight();
     state.world.hazards.forEach((hazard) => {
       const minX = MAP_EDGE_BUFFER + hazard.radius + 0.5;
-      const maxX = width - MAP_EDGE_BUFFER - hazard.radius - 0.5;
+      const maxX = maxW - MAP_EDGE_BUFFER - hazard.radius - 0.5;
       const minZ = MAP_EDGE_BUFFER + hazard.radius + 0.5;
-      const maxZ = height - MAP_EDGE_BUFFER - hazard.radius - 0.5;
+      const maxZ = maxH - MAP_EDGE_BUFFER - hazard.radius - 0.5;
 
       hazard.x += hazard.vx;
       hazard.z += hazard.vz;
@@ -315,13 +525,15 @@ export function createSimulation({ seed, moduleId }) {
   }
 
   function findSafeMoveTarget(originX, originZ, preferredYaw = null) {
+    const maxW = worldWidth();
+    const maxH = worldHeight();
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const distance = 10 + rng() * 12;
       const baseYaw = preferredYaw === null ? rng() * Math.PI * 2 : preferredYaw;
       const yaw = baseYaw + (preferredYaw === null ? 0 : (rng() - 0.5) * 1.6);
       const candidate = {
-        x: clamp(originX + Math.cos(yaw) * distance, MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER),
-        z: clamp(originZ + Math.sin(yaw) * distance, MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER)
+        x: clamp(originX + Math.cos(yaw) * distance, MAP_EDGE_BUFFER, maxW - MAP_EDGE_BUFFER),
+        z: clamp(originZ + Math.sin(yaw) * distance, MAP_EDGE_BUFFER, maxH - MAP_EDGE_BUFFER)
       };
 
       const blockedByHazard = state.world.hazards.some((hazard) => {
@@ -334,8 +546,8 @@ export function createSimulation({ seed, moduleId }) {
     }
 
     return {
-      x: clamp(originX, MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER),
-      z: clamp(originZ, MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER)
+      x: clamp(originX, MAP_EDGE_BUFFER, maxW - MAP_EDGE_BUFFER),
+      z: clamp(originZ, MAP_EDGE_BUFFER, maxH - MAP_EDGE_BUFFER)
     };
   }
 
@@ -383,6 +595,7 @@ export function createSimulation({ seed, moduleId }) {
     state.lobsters.forEach((lobster, idx) => {
       queueAction(lobster, 'patrol', { to: { x: 10 + idx * 13, z: 40 + idx * 6 }, ttl: 22 });
       if (enabled(2)) queueAction(lobster, 'forage', { ttl: 10 });
+      queueAction(lobster, 'harvest', { ttl: 14 });
       if (enabled(3) && idx % 2 === 0) queueAction(lobster, 'skill:scout', { ttl: 8 });
       if (enabled(5)) queueAction(lobster, 'defend', { ttl: 10 });
     });
@@ -409,6 +622,7 @@ export function createSimulation({ seed, moduleId }) {
     const speedFactor = isNight ? 0.55 : state.world.dayPhase === 'dusk' ? 0.78 : 1;
     const frozenFactor = lobster.statusEffects.frozen > 0 ? 0.42 : 1;
     const burntFactor = lobster.statusEffects.burning > 0 ? 0.88 : 1;
+    const roadFactor = isOnRoad(lobster) ? 1.18 : 1;
     const maxTurnThisTick = (isNight ? MAX_TURN_RATE * 0.78 : MAX_TURN_RATE) * dt;
     const yawDelta = shortestAngleDelta(lobster.rotation, locomotion.travelYaw);
     const headingError = Math.abs(yawDelta);
@@ -426,7 +640,7 @@ export function createSimulation({ seed, moduleId }) {
         // Slight steering drift in darkness makes navigation harder.
         lobster.rotation += (rng() - 0.5) * 0.14 * dt;
       }
-      const moveStep = Math.min(distance, lobster.speed * speedFactor * frozenFactor * burntFactor * dt);
+      const moveStep = Math.min(distance, lobster.speed * speedFactor * frozenFactor * burntFactor * roadFactor * dt);
       lobster.position.x += Math.cos(lobster.rotation) * moveStep;
       lobster.position.z += Math.sin(lobster.rotation) * moveStep;
     }
@@ -498,6 +712,19 @@ export function createSimulation({ seed, moduleId }) {
         startJumpIfNeeded(lobster);
       }
 
+      if (action.type === 'buildRoad' || action.type === 'buildShelter') {
+        const target = action.payload.to || randomPlayablePoint();
+        action.payload.to = target;
+        action.payload.from = { x: lobster.position.x, z: lobster.position.z };
+        assignMoveTarget(lobster, target.x, target.z, 1.0);
+      }
+
+      if (action.type === 'expandMap' && action.payload?.manual === true) {
+        const edge = nearestGrowEdgeInfo(lobster.position);
+        action.payload.edgeKey = edge.key;
+        action.ttl = Math.max(action.ttl || 0, 40);
+      }
+
       action.initialized = true;
     }
 
@@ -566,6 +793,26 @@ export function createSimulation({ seed, moduleId }) {
       }
     }
 
+    if (action.type === 'harvest') {
+      const nearest = findNearestResource(lobster);
+      if (nearest) {
+        ensureMoveTarget(lobster, nearest.resource.x, nearest.resource.z, 0.9);
+        const done = updateMoveLocomotion(lobster, dt);
+        if (nearest.d < 2.1 || done) {
+          const gatherType = nearest.resource.type;
+          const gathered = 1 + Math.floor(rng() * 2);
+          lobster.inventory[gatherType] = (lobster.inventory[gatherType] || 0) + gathered;
+          state.world.resources = state.world.resources.filter((entry) => entry.id !== nearest.resource.id);
+          lobster.skills.forage.xp += 4 + gathered;
+          pointsFor(lobster.id, 9, `harvested ${gatherType}`);
+          pushEvent('resource', `${lobster.name} harvested ${gathered} ${gatherType}.`);
+          finishAction(lobster);
+        }
+      } else if (action.ttl <= 0) {
+        finishAction(lobster);
+      }
+    }
+
     if (enabled(3) && action.type.startsWith('skill:')) {
       const skillName = action.type.split(':')[1] || 'scout';
       const skill = lobster.skills[skillName] || lobster.skills.scout;
@@ -582,6 +829,160 @@ export function createSimulation({ seed, moduleId }) {
         }
       }
       if (action.ttl <= 0) finishAction(lobster);
+    }
+
+    if (action.type === 'buildRoad') {
+      if (!spendInventory(lobster, BUILD_COSTS.road)) {
+        pushEvent('build', `${lobster.name} lacks materials for a road.`);
+        finishAction(lobster);
+      } else {
+        ensureMoveTarget(lobster, action.payload.to.x, action.payload.to.z, 1.0);
+        const done = updateMoveLocomotion(lobster, dt);
+        if (done || distance2D(lobster.position, action.payload.to) < 1.7) {
+          applyInventoryCost(lobster, BUILD_COSTS.road);
+          state.world.roads.push({
+            id: `road-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+            ownerId: lobster.id,
+            x1: action.payload.from.x,
+            z1: action.payload.from.z,
+            x2: action.payload.to.x,
+            z2: action.payload.to.z
+          });
+          state.world.roads = state.world.roads.slice(-120);
+          lobster.structuresBuilt += 1;
+          awardBuilderXp(lobster, 10);
+          pointsFor(lobster.id, 12, 'built road');
+          pushEvent('build', `${lobster.name} built a new road path.`);
+          finishAction(lobster);
+        }
+      }
+    }
+
+    if (action.type === 'expandMap') {
+      const manualExpand = action.payload?.manual === true;
+      if (!manualExpand) {
+        finishAction(lobster);
+      } else if (!spendInventory(lobster, BUILD_COSTS.expand)) {
+        pushEvent('build', `${lobster.name} needs 1 rock + 1 kelp + 1 seaweed to expand.`);
+        finishAction(lobster);
+      } else {
+        const edge = action.payload?.edgeKey
+          ? { key: action.payload.edgeKey }
+          : nearestEdgeInfo(lobster.position);
+        const effectiveEdge = edge.key === 'south' ? 'south' : 'east';
+
+        if (state.world.width >= MAP_MAX_SIZE && state.world.height >= MAP_MAX_SIZE) {
+          pushEvent('build', `${lobster.name} reached max map size.`);
+          finishAction(lobster);
+          return;
+        }
+
+        const prevWidth = state.world.width;
+        const prevHeight = state.world.height;
+        const canGrowEast = prevWidth < MAP_MAX_SIZE;
+        const canGrowSouth = prevHeight < MAP_MAX_SIZE;
+        let growAxis = effectiveEdge;
+        if (growAxis === 'east' && !canGrowEast) growAxis = canGrowSouth ? 'south' : '';
+        if (growAxis === 'south' && !canGrowSouth) growAxis = canGrowEast ? 'east' : '';
+        if (!growAxis) {
+          pushEvent('build', `${lobster.name} could not expand further.`);
+          finishAction(lobster);
+          return;
+        }
+
+        const prevTile = lobster.lastExpansionTile;
+        let tileGrid = null;
+        if (prevTile) {
+          tileGrid = growAxis === 'south'
+            ? { gx: prevTile.gx, gz: prevTile.gz + 1 }
+            : { gx: prevTile.gx + 1, gz: prevTile.gz };
+        } else {
+          let tileX = prevWidth + 0.5;
+          let tileZ = Math.floor(clamp(lobster.position.z, 0, Math.max(0, prevHeight - 0.001))) + 0.5;
+          if (growAxis === 'south') {
+            tileX = Math.floor(clamp(lobster.position.x, 0, Math.max(0, prevWidth - 0.001))) + 0.5;
+            tileZ = prevHeight + 0.5;
+          }
+          tileGrid = { gx: Math.floor(tileX), gz: Math.floor(tileZ) };
+        }
+        const tileX = tileGrid.gx + 0.5;
+        const tileZ = tileGrid.gz + 0.5;
+        const duplicate = state.world.expansionTiles.some((tile) => (
+          Math.floor(tile.x) === tileGrid.gx && Math.floor(tile.z) === tileGrid.gz
+        ));
+        if (duplicate) {
+          pushEvent('build', `${lobster.name} tile already exists there.`);
+          finishAction(lobster);
+          return;
+        }
+
+        const tileLimitHit = (tileGrid.gx + 1) > MAP_MAX_SIZE || (tileGrid.gz + 1) > MAP_MAX_SIZE;
+        if (tileLimitHit) {
+          pushEvent('build', `${lobster.name} cannot place tile beyond map limit.`);
+          finishAction(lobster);
+          return;
+        }
+
+        const nextWidth = Math.max(prevWidth, tileGrid.gx + 1);
+        const nextHeight = Math.max(prevHeight, tileGrid.gz + 1);
+        const extendsGround = nextWidth > prevWidth || nextHeight > prevHeight;
+        if (!extendsGround) {
+          pushEvent('build', `${lobster.name} must place the tile at the map frontier.`);
+          finishAction(lobster);
+          return;
+        }
+
+        applyInventoryCost(lobster, BUILD_COSTS.expand);
+        state.world.mapExpansionLevel += 1;
+        state.world.expansionTiles.push({
+          id: `tile-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+          x: tileX,
+          z: tileZ
+        });
+        if (state.world.expansionTiles.length > 500) {
+          state.world.expansionTiles = state.world.expansionTiles.slice(-500);
+        }
+        state.world.width = nextWidth;
+        state.world.height = nextHeight;
+        lobster.lastExpansionTile = tileGrid;
+        lobster.structuresBuilt += 1;
+        awardBuilderXp(lobster, 14);
+        pointsFor(lobster.id, 20, 'expanded map');
+        pushEvent('build', `${lobster.name} manually expanded the map by 1 tile (${state.world.width}x${state.world.height}).`);
+        finishAction(lobster);
+      }
+    }
+
+    if (action.type === 'buildShelter') {
+      if (!spendInventory(lobster, BUILD_COSTS.shelter)) {
+        pushEvent('build', `${lobster.name} lacks materials for a shelter.`);
+        finishAction(lobster);
+      } else {
+        ensureMoveTarget(lobster, action.payload.to.x, action.payload.to.z, 1.0);
+        const done = updateMoveLocomotion(lobster, dt);
+        if (done || distance2D(lobster.position, action.payload.to) < 1.8) {
+          applyInventoryCost(lobster, BUILD_COSTS.shelter);
+          const existing = getOwnedShelter(lobster.id);
+          if (existing) {
+            existing.x = action.payload.to.x;
+            existing.z = action.payload.to.z;
+            existing.radius = 5;
+          } else {
+            state.world.shelters.push({
+              id: `shelter-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+              ownerId: lobster.id,
+              x: action.payload.to.x,
+              z: action.payload.to.z,
+              radius: 5
+            });
+          }
+          lobster.structuresBuilt += 1;
+          awardBuilderXp(lobster, 12);
+          pointsFor(lobster.id, 16, 'built shelter');
+          pushEvent('build', `${lobster.name} built a shelter for hazard cover.`);
+          finishAction(lobster);
+        }
+      }
     }
 
     if (enabled(5) && (action.type === 'attack' || action.type === 'defend' || action.type === 'retreat')) {
@@ -623,12 +1024,12 @@ export function createSimulation({ seed, moduleId }) {
               target.position.x = clamp(
                 target.position.x + ((pushDx / pushMag) * knockback),
                 MAP_EDGE_BUFFER,
-                width - MAP_EDGE_BUFFER
+                worldWidth() - MAP_EDGE_BUFFER
               );
               target.position.z = clamp(
                 target.position.z + ((pushDz / pushMag) * knockback),
                 MAP_EDGE_BUFFER,
-                height - MAP_EDGE_BUFFER
+                worldHeight() - MAP_EDGE_BUFFER
               );
               target.position.y = Math.max(target.position.y, 1.05);
               drainEnergy(target, damage, 'hammer', 0.1);
@@ -720,9 +1121,21 @@ export function createSimulation({ seed, moduleId }) {
   function backgroundBehaviors(lobster) {
     if (lobster.sleeping) return;
     if (lobster.actionQueue.length > 0) return;
+    const hasShelter = Boolean(getOwnedShelter(lobster.id));
+    const lowStock = RESOURCE_TYPES.some((key) => (lobster.inventory[key] || 0) < 2);
 
     if (enabled(7) && state.world.rescues.some((entry) => !entry.rescuedBy)) {
       queueAction(lobster, 'rescue', { ttl: 24 });
+      return;
+    }
+
+    if (!hasShelter && spendInventory(lobster, BUILD_COSTS.shelter) && rng() > 0.68) {
+      queueAction(lobster, 'buildShelter', { ttl: 24, to: randomPlayablePoint() });
+      return;
+    }
+
+    if (lowStock && state.world.resources.length > 0) {
+      queueAction(lobster, 'harvest', { ttl: 22 });
       return;
     }
 
@@ -738,12 +1151,12 @@ export function createSimulation({ seed, moduleId }) {
     }
 
     if (enabled(3) && rng() > 0.6) {
-      const pool = ['skill:scout', 'skill:forage', 'skill:shellGuard'];
+      const pool = ['skill:scout', 'skill:forage', 'skill:shellGuard', 'skill:builder'];
       queueAction(lobster, pool[Math.floor(rng() * pool.length)], { ttl: 8 });
       return;
     }
 
-    const genericPool = ['move', 'idle', 'emote', 'jump', 'patrol'];
+    const genericPool = ['move', 'idle', 'emote', 'jump', 'patrol', 'harvest'];
     const selected = genericPool[Math.floor(rng() * genericPool.length)];
     queueAction(lobster, selected, {
       to: randomPlayablePoint(),
@@ -802,11 +1215,16 @@ export function createSimulation({ seed, moduleId }) {
 
   function tickHazards(lobster, dt) {
     if (!enabled(6)) return;
+    const ownShelter = getOwnedShelter(lobster.id);
+    const inShelter = ownShelter && distance2D(lobster.position, ownShelter) <= ownShelter.radius;
+    const maxW = worldWidth();
+    const maxH = worldHeight();
     let touchedHazard = false;
     let exposure = 0;
     state.world.hazards.forEach((hazard) => {
       const d = distance2D(lobster.position, hazard);
       if (d <= hazard.radius) {
+        if (inShelter) return;
         touchedHazard = true;
         const zoneRatio = 1 - (d / Math.max(0.001, hazard.radius)); // 0 at edge, 1 at center
         const zonePower = 0.75 + (zoneRatio * 0.65); // keeps high baseline impact across hazard circle
@@ -815,12 +1233,12 @@ export function createSimulation({ seed, moduleId }) {
           lobster.position.x = clamp(
             lobster.position.x + ((rng() - 0.5) * 2.4 * zonePower),
             MAP_EDGE_BUFFER,
-            width - MAP_EDGE_BUFFER
+            maxW - MAP_EDGE_BUFFER
           );
           lobster.position.z = clamp(
             lobster.position.z + ((rng() - 0.5) * 2.4 * zonePower),
             MAP_EDGE_BUFFER,
-            height - MAP_EDGE_BUFFER
+            maxH - MAP_EDGE_BUFFER
           );
           const blizzardDrain = (dt * 2.6 * zonePower) + (dt * 1.4 * zonePower);
           drainEnergy(lobster, blizzardDrain, 'blizzard', 0.35);
@@ -840,12 +1258,12 @@ export function createSimulation({ seed, moduleId }) {
             lobster.position.x = clamp(
               lobster.position.x + ((rng() - 0.5) * (5.8 * zonePower)),
               MAP_EDGE_BUFFER,
-              width - MAP_EDGE_BUFFER
+              maxW - MAP_EDGE_BUFFER
             );
             lobster.position.z = clamp(
               lobster.position.z + ((rng() - 0.5) * (5.8 * zonePower)),
               MAP_EDGE_BUFFER,
-              height - MAP_EDGE_BUFFER
+              maxH - MAP_EDGE_BUFFER
             );
             applyHazardEffect(lobster, 'electrocuted', 2.4 + (zonePower * 0.6));
             applyHazardEffect(lobster, 'paralyzed', 0.85 + (zonePower * 0.45));
@@ -858,12 +1276,12 @@ export function createSimulation({ seed, moduleId }) {
           lobster.position.x = clamp(
             lobster.position.x + ((-dz / swirl) * dt * 10.5 * zonePower),
             MAP_EDGE_BUFFER,
-            width - MAP_EDGE_BUFFER
+            maxW - MAP_EDGE_BUFFER
           );
           lobster.position.z = clamp(
             lobster.position.z + ((dx / swirl) * dt * 10.5 * zonePower),
             MAP_EDGE_BUFFER,
-            height - MAP_EDGE_BUFFER
+            maxH - MAP_EDGE_BUFFER
           );
           lobster.position.y = Math.max(lobster.position.y, 0.35 + (zonePower * 0.9));
           drainEnergy(lobster, (dt * 2.2 * zonePower) + (dt * 2.7 * zonePower), 'tornado', 0.55);
@@ -887,6 +1305,8 @@ export function createSimulation({ seed, moduleId }) {
 
   function tickStatusEffects(lobster, dt) {
     const fx = lobster.statusEffects;
+    const maxW = worldWidth();
+    const maxH = worldHeight();
     fx.burning = Math.max(0, fx.burning - dt);
     fx.frozen = Math.max(0, fx.frozen - dt);
     fx.electrocuted = Math.max(0, fx.electrocuted - dt);
@@ -906,8 +1326,8 @@ export function createSimulation({ seed, moduleId }) {
     if (fx.electrocuted > 0 && fx.shockTick <= 0) {
       const shockDamage = 1.6 + (rng() * 2.4);
       drainEnergy(lobster, shockDamage + (1.4 + rng() * 1.6), 'shock', 0.2);
-      lobster.position.x = clamp(lobster.position.x + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
-      lobster.position.z = clamp(lobster.position.z + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+      lobster.position.x = clamp(lobster.position.x + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, maxW - MAP_EDGE_BUFFER);
+      lobster.position.z = clamp(lobster.position.z + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, maxH - MAP_EDGE_BUFFER);
       fx.shockTick = 0.32;
     }
 
@@ -925,8 +1345,8 @@ export function createSimulation({ seed, moduleId }) {
       vx /= mag;
       vz /= mag;
       const throwDistance = 7 + (rng() * 7);
-      lobster.position.x = clamp(lobster.position.x + (vx * throwDistance), MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
-      lobster.position.z = clamp(lobster.position.z + (vz * throwDistance), MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+      lobster.position.x = clamp(lobster.position.x + (vx * throwDistance), MAP_EDGE_BUFFER, maxW - MAP_EDGE_BUFFER);
+      lobster.position.z = clamp(lobster.position.z + (vz * throwDistance), MAP_EDGE_BUFFER, maxH - MAP_EDGE_BUFFER);
       lobster.position.y = Math.max(lobster.position.y, 0.9);
       const throwDamage = 5 + (rng() * 4);
       drainEnergy(lobster, throwDamage, 'tornado', 0.2);
@@ -948,6 +1368,20 @@ export function createSimulation({ seed, moduleId }) {
         pushEvent('rescue', 'Distress beacon relocated after timeout.');
       }
     });
+  }
+
+  function clampWorldObjectsToGround() {
+    const clampEntry = (entry) => {
+      if (!entry || !Number.isFinite(entry.x) || !Number.isFinite(entry.z)) return;
+      if (hasGroundAt(entry.x, entry.z)) return;
+      const grounded = nearestGroundPoint(entry.x, entry.z);
+      entry.x = grounded.x;
+      entry.z = grounded.z;
+    };
+
+    state.world.foods.forEach(clampEntry);
+    state.world.resources.forEach(clampEntry);
+    state.world.rescues.forEach(clampEntry);
   }
 
   function updateTime(dt) {
@@ -990,6 +1424,8 @@ export function createSimulation({ seed, moduleId }) {
     if (enabled(2) && state.world.tick % 40 === 0) {
       spawnFood(2 + Math.floor(rng() * 3));
     }
+    refillResources();
+    tickSkillModuleRandomResourceSpawn();
 
     ensureHazards();
     ensureRescueCases();
@@ -1016,6 +1452,7 @@ export function createSimulation({ seed, moduleId }) {
 
     resolveLobsterCollisions();
     tickRescueCases();
+    clampWorldObjectsToGround();
     rebuildLeaderboard();
     notify();
   }
@@ -1023,7 +1460,15 @@ export function createSimulation({ seed, moduleId }) {
   function dispatchAction(lobsterId, actionType, payload = {}) {
     const lobster = state.lobsters.find((entry) => entry.id === lobsterId);
     if (!lobster) return false;
-    queueAction(lobster, actionType, payload);
+    const manualPayload = {
+      ...payload,
+      manual: true
+    };
+    if (actionType === 'expandMap') {
+      queuePriorityAction(lobster, actionType, manualPayload);
+    } else {
+      queueAction(lobster, actionType, manualPayload);
+    }
     pushEvent('manual', `Manual action ${actionType} queued for ${lobster.name}.`);
     notify();
     return true;
@@ -1045,6 +1490,7 @@ export function createSimulation({ seed, moduleId }) {
 
   bootstrapBehavior();
   spawnFood(8);
+  refillResources({ force: true });
   ensureHazards();
   ensureRescueCases();
   notify();
