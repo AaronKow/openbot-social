@@ -113,7 +113,11 @@ export function createSimulation({ seed, moduleId }) {
         combat: {
           mode: 'neutral',
           targetId: null,
-          lastHitTick: 0
+          lastHitTick: 0,
+          swingUntil: 0,
+          dodgeUntil: 0,
+          tookHitUntil: 0,
+          lastAttackerId: null
         },
         statusEffects: {
           burning: 0,
@@ -347,6 +351,34 @@ export function createSimulation({ seed, moduleId }) {
     pointsFor(lobster.id, 1, `queued ${actionType}`);
   }
 
+  function queuePriorityAction(lobster, actionType, payload = {}) {
+    const first = lobster.actionQueue[0];
+    if (first && first.type === actionType) return;
+    lobster.actionQueue.unshift({
+      id: `a-priority-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+      type: actionType,
+      payload,
+      ttl: payload.ttl || 10,
+      initialized: false
+    });
+    lobster.stats.actions += 1;
+    pointsFor(lobster.id, 1, `priority ${actionType}`);
+  }
+
+  function findClosestOpponent(lobster) {
+    let chosen = null;
+    let bestDistance = Infinity;
+    state.lobsters.forEach((other) => {
+      if (other.id === lobster.id || other.sleeping) return;
+      const d = distance2D(lobster.position, other.position);
+      if (d < bestDistance) {
+        bestDistance = d;
+        chosen = other;
+      }
+    });
+    return chosen;
+  }
+
   function bootstrapBehavior() {
     state.lobsters.forEach((lobster, idx) => {
       queueAction(lobster, 'patrol', { to: { x: 10 + idx * 13, z: 40 + idx * 6 }, ttl: 22 });
@@ -454,7 +486,10 @@ export function createSimulation({ seed, moduleId }) {
       }
 
       if (action.type === 'retreat') {
-        const target = findSafeMoveTarget(lobster.position.x, lobster.position.z, lobster.rotation + Math.PI);
+        const planned = action.payload.to;
+        const target = planned && Number.isFinite(planned.x) && Number.isFinite(planned.z)
+          ? planned
+          : findSafeMoveTarget(lobster.position.x, lobster.position.z, lobster.rotation + Math.PI);
         action.payload.to = target;
         assignMoveTarget(lobster, target.x, target.z, 1.1);
       }
@@ -550,8 +585,7 @@ export function createSimulation({ seed, moduleId }) {
     }
 
     if (enabled(5) && (action.type === 'attack' || action.type === 'defend' || action.type === 'retreat')) {
-      const opponents = state.lobsters.filter((other) => other.id !== lobster.id);
-      const target = opponents[Math.floor(rng() * opponents.length)];
+      const target = findClosestOpponent(lobster);
       if (target) {
         lobster.combat.targetId = target.id;
         lobster.combat.mode = action.type;
@@ -559,15 +593,58 @@ export function createSimulation({ seed, moduleId }) {
         if (action.type === 'attack') {
           ensureMoveTarget(lobster, target.position.x, target.position.z, 0.9);
           updateMoveLocomotion(lobster, dt);
-          if (distance2D(lobster.position, target.position) < 3.2) {
-            const damage = 4 + Math.floor(rng() * 6);
-            drainEnergy(target, damage);
+          const closeEnough = distance2D(lobster.position, target.position) < 3.6;
+          const hitCooldownReady = (state.world.tick - lobster.combat.lastHitTick) >= 8;
+          if (closeEnough && hitCooldownReady) {
+            lobster.combat.swingUntil = 0.42;
+            lobster.combat.lastHitTick = state.world.tick;
+
+            const dodgeChance = target.stats.energy > 42 ? 0.62 : 0.36;
+            if (rng() < dodgeChance) {
+              const awayYaw = Math.atan2(
+                target.position.z - lobster.position.z,
+                target.position.x - lobster.position.x
+              );
+              const escapeTarget = findSafeMoveTarget(target.position.x, target.position.z, awayYaw);
+              target.combat.mode = 'evading';
+              target.combat.dodgeUntil = 1.0;
+              target.combat.lastAttackerId = lobster.id;
+              queuePriorityAction(target, 'retreat', { ttl: 10, to: escapeTarget, fromCombat: true });
+              drainEnergy(target, 0.9, 'evade', 0.5);
+              pointsFor(target.id, 4, `dodged ${lobster.name}`);
+              pointsFor(lobster.id, 2, `forced retreat ${target.name}`);
+              pushEvent('combat', `${target.name} dodged ${lobster.name}'s hammer swing and ran.`);
+            } else {
+              const damage = 8 + Math.floor(rng() * 7);
+              const pushDx = target.position.x - lobster.position.x;
+              const pushDz = target.position.z - lobster.position.z;
+              const pushMag = Math.max(0.001, Math.hypot(pushDx, pushDz));
+              const knockback = 2.8 + (rng() * 1.7);
+              target.position.x = clamp(
+                target.position.x + ((pushDx / pushMag) * knockback),
+                MAP_EDGE_BUFFER,
+                width - MAP_EDGE_BUFFER
+              );
+              target.position.z = clamp(
+                target.position.z + ((pushDz / pushMag) * knockback),
+                MAP_EDGE_BUFFER,
+                height - MAP_EDGE_BUFFER
+              );
+              target.position.y = Math.max(target.position.y, 1.05);
+              drainEnergy(target, damage, 'hammer', 0.1);
+              target.combat.tookHitUntil = 0.52;
+              target.combat.lastAttackerId = lobster.id;
+              drainEnergy(lobster, 2.2);
+              pointsFor(lobster.id, 8, `hammer hit ${target.name}`);
+              pushEvent('combat', `${lobster.name} hit ${target.name} with a hammer (${damage} dmg).`);
+            }
+
             drainEnergy(lobster, 3);
-            pointsFor(lobster.id, 6, `hit ${target.name}`);
             if (target.stats.energy <= 0) {
               lobster.stats.wins += 1;
               target.stats.defeats += 1;
               target.stats.energy = 55;
+              target.combat.tookHitUntil = 0.6;
               pointsFor(lobster.id, 25, 'combat win');
               pushEvent('combat', `${lobster.name} won a duel vs ${target.name}.`);
               finishAction(lobster);
@@ -713,6 +790,13 @@ export function createSimulation({ seed, moduleId }) {
       Object.values(lobster.skills).forEach((skill) => {
         skill.cooldown = Math.max(0, skill.cooldown - dt * 2.6);
       });
+    }
+
+    lobster.combat.swingUntil = Math.max(0, lobster.combat.swingUntil - dt);
+    lobster.combat.dodgeUntil = Math.max(0, lobster.combat.dodgeUntil - dt);
+    lobster.combat.tookHitUntil = Math.max(0, lobster.combat.tookHitUntil - dt);
+    if (lobster.combat.dodgeUntil <= 0 && lobster.combat.mode === 'evading') {
+      lobster.combat.mode = 'neutral';
     }
   }
 

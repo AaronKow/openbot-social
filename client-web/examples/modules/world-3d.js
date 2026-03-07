@@ -61,6 +61,36 @@ function createLobsterModel() {
   return group;
 }
 
+function createHammerModel() {
+  const group = new THREE.Group();
+
+  const handle = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.045, 0.045, 1.3, 10),
+    new THREE.MeshStandardMaterial({ color: 0x7b4f2a, roughness: 0.76, metalness: 0.18 })
+  );
+  handle.rotation.z = Math.PI / 2;
+  handle.castShadow = true;
+  group.add(handle);
+
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.34, 0.24, 0.24),
+    new THREE.MeshStandardMaterial({ color: 0xb6bdc5, roughness: 0.32, metalness: 0.85 })
+  );
+  head.position.x = 0.62;
+  head.castShadow = true;
+  group.add(head);
+
+  const backWeight = new THREE.Mesh(
+    new THREE.BoxGeometry(0.16, 0.18, 0.18),
+    new THREE.MeshStandardMaterial({ color: 0x8f969e, roughness: 0.35, metalness: 0.8 })
+  );
+  backWeight.position.x = 0.42;
+  backWeight.castShadow = true;
+  group.add(backWeight);
+
+  return group;
+}
+
 function createTextSprite(text) {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
@@ -111,7 +141,8 @@ function createFloatingTextSprite(text, { color = '#ffd86b', stroke = '#281300',
 }
 
 function damageMarkerColor(type) {
-  void type;
+  if (type === 'hammer') return { color: '#ffb14a', stroke: '#2f1900' };
+  if (type === 'evade') return { color: '#9ee6ff', stroke: '#093447' };
   return { color: '#ff3b30', stroke: '#3b0503' };
 }
 
@@ -952,6 +983,15 @@ export class Example3DWorld {
     tornadoRing.visible = false;
     mesh.add(tornadoRing);
 
+    const hammerPivot = new THREE.Group();
+    hammerPivot.position.set(0, 2.45, 0);
+    hammerPivot.rotation.set(0, 0, 0);
+    const hammerMesh = createHammerModel();
+    hammerMesh.scale.set(3.35, 3.35, 3.35);
+    hammerPivot.visible = false;
+    hammerPivot.add(hammerMesh);
+    mesh.add(hammerPivot);
+
     const record = {
       mesh,
       tag,
@@ -963,6 +1003,7 @@ export class Example3DWorld {
       surfaceMaterials,
       shockGroup,
       tornadoRing,
+      hammerPivot,
       seenDamageIds: new Set(),
       damageMarkers: new Map()
     };
@@ -972,10 +1013,14 @@ export class Example3DWorld {
 
   updateLobsterEffects(record, lobster, timeSec) {
     const effects = lobster.statusEffects || {};
+    const combat = lobster.combat || {};
     const burn = clamp((effects.burning || 0) / 4.2, 0, 1);
     const frozen = clamp((effects.frozen || 0) / 3.2, 0, 1);
     const shock = clamp((effects.electrocuted || 0) / 2.8, 0, 1);
     const tornado = clamp((effects.tornadoSpin || 0) / 2.6, 0, 1);
+    const swing = clamp((combat.swingUntil || 0) / 0.42, 0, 1);
+    const dodge = clamp((combat.dodgeUntil || 0) / 1.0, 0, 1);
+    const hitReact = clamp((combat.tookHitUntil || 0) / 0.6, 0, 1);
 
     record.burnFlames.visible = burn > 0.02;
     if (record.burnFlames.visible) {
@@ -1006,6 +1051,38 @@ export class Example3DWorld {
       record.tornadoRing.material.opacity = tornado * 0.66;
     }
 
+    record.hammerPivot.visible = swing > 0.01;
+    if (record.hammerPivot.visible) {
+      const swingProgress = 1 - swing;
+      if (swingProgress < 0.45) {
+        // Wind-up above head.
+        const windup = swingProgress / 0.45;
+        record.hammerPivot.position.x = 0.7 + (windup * 0.55);
+        record.hammerPivot.position.y = 2.45 + (windup * 0.45);
+        record.hammerPivot.rotation.x = 0.25 + (windup * 0.35);
+        record.hammerPivot.rotation.y = Math.sin((timeSec * 8) + 0.3) * 0.2;
+        record.hammerPivot.rotation.z = 0.22 + (windup * 0.38);
+      } else {
+        // Downward strike: extends out and slams to floor level.
+        const smash = (swingProgress - 0.45) / 0.55;
+        record.hammerPivot.position.x = 1.25 + (smash * 4.1);
+        record.hammerPivot.position.y = 2.9 - (smash * 2.25);
+        record.hammerPivot.rotation.x = 0.6 + (smash * 0.28);
+        record.hammerPivot.rotation.y = Math.sin((timeSec * 9) + 0.3) * 0.14;
+        record.hammerPivot.rotation.z = 0.6 - (smash * 2.2);
+      }
+    } else {
+      record.hammerPivot.position.x = 0;
+      record.hammerPivot.position.y = 2.45;
+      record.hammerPivot.rotation.set(0, 0, 0);
+    }
+
+    record.mesh.rotation.x = Math.sin(timeSec * 18) * 0.12 * dodge;
+    record.mesh.rotation.z = (Math.sin(timeSec * 23) * 0.2 * dodge) + (Math.sin(timeSec * 38) * 0.12 * hitReact);
+    if (hitReact > 0.01) {
+      record.mesh.position.y += Math.abs(Math.sin(timeSec * 42)) * 0.16 * hitReact;
+    }
+
     const burnTint = new THREE.Color(0x6a2f18);
     const freezeTint = new THREE.Color(0x5fbbff);
     record.surfaceMaterials.forEach((mat) => {
@@ -1029,6 +1106,9 @@ export class Example3DWorld {
     if (shock > 0.1) statuses.push('ELECTROCUTED');
     if ((effects.paralyzed || 0) > 0.1) statuses.push('PARALYZED');
     if (tornado > 0.1) statuses.push('TWISTED');
+    if (swing > 0.1) statuses.push('HAMMER SWING');
+    if (dodge > 0.1) statuses.push('DODGING');
+    if (hitReact > 0.1) statuses.push('HIT');
 
     if (statuses.length) {
       const text = statuses.join(' | ');
