@@ -49,7 +49,7 @@ const MODULE_META = {
   },
   '6_hazards': {
     title: 'Example 6: Hazards',
-    subtitle: 'Currents, toxic zones, and predator routes visualized in 3D.',
+    subtitle: 'Blizzard, fire, thunder, and tornado hazards visualized in 3D.',
     note: 'Production mapping: hazard objects map to world objects and per-tick environment effects in runtime queues.'
   },
   '7_rescue': {

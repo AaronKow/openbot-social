@@ -237,6 +237,133 @@ function measureLobsterPhysics(mesh) {
   return { baseY };
 }
 
+function disposeObject3D(root) {
+  if (!root) return;
+  root.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (Array.isArray(obj.material)) {
+        obj.material.forEach((mat) => mat.dispose());
+      } else {
+        obj.material.dispose();
+      }
+    }
+  });
+}
+
+function createHazardVisual(hazard) {
+  const group = new THREE.Group();
+  const radius = Number(hazard.radius) || 8;
+  const type = String(hazard.type || '').toLowerCase();
+
+  if (type === 'blizzard') {
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.9, radius * 1.1, 0.3, 20),
+      new THREE.MeshStandardMaterial({ color: 0x67b8ff, transparent: true, opacity: 0.2 })
+    );
+    base.position.y = 0.14;
+    group.add(base);
+    for (let i = 0; i < 14; i += 1) {
+      const flake = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xeaf6ff, emissive: 0x2a5a8a, emissiveIntensity: 0.35 })
+      );
+      flake.userData.theta = (Math.PI * 2 * i) / 14;
+      flake.userData.ring = randomRange(radius * 0.35, radius * 0.95);
+      flake.userData.y = randomRange(0.8, 3.6);
+      group.add(flake);
+    }
+  } else if (type === 'fire') {
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.72, radius * 0.9, 0.28, 18),
+      new THREE.MeshStandardMaterial({ color: 0xff5a2a, emissive: 0xaa2600, emissiveIntensity: 0.6, transparent: true, opacity: 0.35 })
+    );
+    base.position.y = 0.14;
+    group.add(base);
+    for (let i = 0; i < 4; i += 1) {
+      const flame = new THREE.Mesh(
+        new THREE.ConeGeometry(randomRange(0.55, 1.1), randomRange(1.8, 3.6), 10),
+        new THREE.MeshStandardMaterial({ color: i % 2 ? 0xff8a2b : 0xffc64d, emissive: 0xff3b00, emissiveIntensity: 0.7 })
+      );
+      flame.position.set(randomRange(-radius * 0.35, radius * 0.35), randomRange(0.9, 1.5), randomRange(-radius * 0.35, radius * 0.35));
+      flame.userData.baseY = flame.position.y;
+      group.add(flame);
+    }
+  } else if (type === 'thunder') {
+    const base = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.78, radius, 0.24, 18),
+      new THREE.MeshStandardMaterial({ color: 0xffd84f, transparent: true, opacity: 0.26 })
+    );
+    base.position.y = 0.12;
+    group.add(base);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(radius * 0.52, 0.22, 10, 24),
+      new THREE.MeshStandardMaterial({ color: 0xffef86, emissive: 0xffea70, emissiveIntensity: 0.55 })
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 1.4;
+    group.add(ring);
+    for (let i = 0; i < 3; i += 1) {
+      const bolt = new THREE.Mesh(
+        new THREE.BoxGeometry(0.2, randomRange(2.2, 3.8), 0.2),
+        new THREE.MeshStandardMaterial({ color: 0xfff3b0, emissive: 0xffef7a, emissiveIntensity: 0.7, transparent: true, opacity: 0.65 })
+      );
+      bolt.position.set(randomRange(-radius * 0.35, radius * 0.35), randomRange(1.5, 2.8), randomRange(-radius * 0.35, radius * 0.35));
+      bolt.rotation.z = randomRange(-0.38, 0.38);
+      group.add(bolt);
+    }
+  } else if (type === 'tornado') {
+    for (let i = 0; i < 5; i += 1) {
+      const ringRadius = radius * (0.25 + i * 0.12);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(ringRadius, 0.12, 8, 18),
+        new THREE.MeshStandardMaterial({ color: 0x9aa4af, transparent: true, opacity: 0.28 })
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.8 + i * 0.95;
+      ring.userData.spin = randomRange(0.4, 1.2) * (i % 2 ? -1 : 1);
+      group.add(ring);
+    }
+    for (let i = 0; i < 8; i += 1) {
+      const debris = new THREE.Mesh(
+        new THREE.SphereGeometry(0.1, 6, 6),
+        new THREE.MeshStandardMaterial({ color: 0xcfd7df, emissive: 0x5f768d, emissiveIntensity: 0.3 })
+      );
+      debris.userData.theta = (Math.PI * 2 * i) / 8;
+      debris.userData.r = randomRange(radius * 0.3, radius * 0.65);
+      debris.userData.y = randomRange(0.8, 4.6);
+      group.add(debris);
+    }
+  }
+
+  const update = (timeSec = 0) => {
+    group.rotation.y += 0.006;
+    group.children.forEach((child, idx) => {
+      if (type === 'blizzard' && child.geometry?.type === 'SphereGeometry') {
+        const theta = child.userData.theta + (timeSec * 1.2);
+        const r = child.userData.ring;
+        child.position.set(Math.cos(theta) * r, child.userData.y + Math.sin(timeSec + idx) * 0.2, Math.sin(theta) * r);
+      } else if (type === 'fire' && child.geometry?.type === 'ConeGeometry') {
+        child.position.y = child.userData.baseY + Math.sin((timeSec * 6) + idx) * 0.35;
+        child.scale.y = 0.86 + ((Math.sin((timeSec * 7) + idx) + 1) * 0.14);
+      } else if (type === 'thunder' && child.geometry?.type === 'TorusGeometry') {
+        child.rotation.z += 0.02;
+      } else if (type === 'thunder' && child.geometry?.type === 'BoxGeometry') {
+        const pulse = ((Math.floor(timeSec * 8) + idx) % 7) === 0 ? 1 : 0.35;
+        child.material.opacity = pulse;
+      } else if (type === 'tornado' && child.geometry?.type === 'TorusGeometry') {
+        child.rotation.z += child.userData.spin * 0.03;
+      } else if (type === 'tornado' && child.geometry?.type === 'SphereGeometry') {
+        const theta = child.userData.theta + (timeSec * 2.8);
+        const r = child.userData.r + Math.sin(timeSec + idx) * 0.12;
+        child.position.set(Math.cos(theta) * r, child.userData.y, Math.sin(theta) * r);
+      }
+    });
+  };
+
+  return { group, update };
+}
+
 export class Example3DWorld {
   constructor(container) {
     this.container = container;
@@ -267,7 +394,7 @@ export class Example3DWorld {
 
     this.lobsters = new Map();
     this.foodMeshes = new Map();
-    this.hazardMeshes = new Map();
+    this.hazardVisuals = new Map();
     this.rescueMeshes = new Map();
     this.clouds = [];
     this.lastCloudUpdateAt = null;
@@ -607,29 +734,23 @@ export class Example3DWorld {
   syncHazards(hazards = []) {
     const ids = new Set(hazards.map((h) => h.id));
 
-    for (const [id, mesh] of this.hazardMeshes) {
+    for (const [id, record] of this.hazardVisuals) {
       if (!ids.has(id)) {
-        this.scene.remove(mesh);
-        this.hazardMeshes.delete(id);
+        this.scene.remove(record.group);
+        disposeObject3D(record.group);
+        this.hazardVisuals.delete(id);
       }
     }
 
     hazards.forEach((hazard) => {
-      let mesh = this.hazardMeshes.get(hazard.id);
-      if (!mesh) {
-        mesh = new THREE.Mesh(
-          new THREE.CylinderGeometry(hazard.radius, hazard.radius, 0.2, 24),
-          new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.35, color: 0x00c2ff })
-        );
-        mesh.position.y = 0.12;
-        this.scene.add(mesh);
-        this.hazardMeshes.set(hazard.id, mesh);
+      let record = this.hazardVisuals.get(hazard.id);
+      if (!record) {
+        record = createHazardVisual(hazard);
+        this.scene.add(record.group);
+        this.hazardVisuals.set(hazard.id, record);
       }
 
-      const color = hazard.type === 'toxic' ? 0xff5a5f : hazard.type === 'predator' ? 0xffd166 : 0x00c2ff;
-      ensureMaterialColor(mesh.material, color);
-      mesh.scale.set(1, 1, 1);
-      mesh.position.set(clamp(hazard.x, 0, 100), 0.12, clamp(hazard.z, 0, 100));
+      record.group.position.set(clamp(hazard.x, 0, 100), 0, clamp(hazard.z, 0, 100));
     });
   }
 
@@ -769,6 +890,10 @@ export class Example3DWorld {
 
     this.syncFoods(world.foods);
     this.syncHazards(world.hazards);
+    const hzTime = Number.isFinite(world.elapsedSeconds) ? world.elapsedSeconds : (world.tick / 12);
+    for (const hazard of this.hazardVisuals.values()) {
+      hazard.update(hzTime);
+    }
     this.syncRescues(world.rescues);
 
     const seen = new Set();
@@ -841,6 +966,10 @@ export class Example3DWorld {
       texture.dispose();
     });
     this.clouds = [];
+    for (const record of this.hazardVisuals.values()) {
+      disposeObject3D(record.group);
+    }
+    this.hazardVisuals.clear();
     this.renderer.dispose();
   }
 }

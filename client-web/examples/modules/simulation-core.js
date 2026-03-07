@@ -191,9 +191,10 @@ export function createSimulation({ seed, moduleId }) {
     if (!enabled(6)) return;
     if (state.world.hazards.length > 0) return;
     state.world.hazards = [
-      { id: 'current-rift', x: 28, z: 60, radius: 11, type: 'current' },
-      { id: 'toxic-pocket', x: 73, z: 34, radius: 9, type: 'toxic' },
-      { id: 'predator-route', x: 52, z: 50, radius: 13, type: 'predator' }
+      { id: 'blizzard-field', x: 26, z: 62, radius: 12, type: 'blizzard' },
+      { id: 'fire-rift', x: 73, z: 34, radius: 10, type: 'fire' },
+      { id: 'thunder-zone', x: 54, z: 50, radius: 11, type: 'thunder' },
+      { id: 'tornado-alley', x: 38, z: 27, radius: 9, type: 'tornado' }
     ];
   }
 
@@ -626,14 +627,55 @@ export function createSimulation({ seed, moduleId }) {
       const d = distance2D(lobster.position, hazard);
       if (d <= hazard.radius) {
         exposure += 1;
-        if (hazard.type === 'current') {
-          lobster.position.x = clamp(lobster.position.x + (rng() - 0.5) * 2.2, MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
-          lobster.position.z = clamp(lobster.position.z + (rng() - 0.5) * 2.2, MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+        if (hazard.type === 'blizzard') {
+          lobster.position.x = clamp(
+            lobster.position.x + ((rng() - 0.5) * 1.6),
+            MAP_EDGE_BUFFER,
+            width - MAP_EDGE_BUFFER
+          );
+          lobster.position.z = clamp(
+            lobster.position.z + ((rng() - 0.5) * 1.6),
+            MAP_EDGE_BUFFER,
+            height - MAP_EDGE_BUFFER
+          );
+          lobster.stats.energy = clamp(lobster.stats.energy - dt * 1.8, 0, 100);
+          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 0.8, 0, 100);
         }
-        if (hazard.type === 'toxic') {
+        if (hazard.type === 'fire') {
           lobster.stats.hp = clamp(lobster.stats.hp - dt * 2.4, 0, 100);
         }
-        if (hazard.type === 'predator') {
+        if (hazard.type === 'thunder') {
+          const pulse = ((state.world.tick + Math.floor(hazard.x + hazard.z)) % 18) === 0;
+          if (pulse) {
+            lobster.stats.hp = clamp(lobster.stats.hp - 6, 0, 100);
+            lobster.stats.stamina = clamp(lobster.stats.stamina - 8, 0, 100);
+            lobster.position.x = clamp(
+              lobster.position.x + ((rng() - 0.5) * 4),
+              MAP_EDGE_BUFFER,
+              width - MAP_EDGE_BUFFER
+            );
+            lobster.position.z = clamp(
+              lobster.position.z + ((rng() - 0.5) * 4),
+              MAP_EDGE_BUFFER,
+              height - MAP_EDGE_BUFFER
+            );
+          }
+        }
+        if (hazard.type === 'tornado') {
+          const dx = lobster.position.x - hazard.x;
+          const dz = lobster.position.z - hazard.z;
+          const swirl = Math.max(0.2, Math.hypot(dx, dz));
+          lobster.position.x = clamp(
+            lobster.position.x + ((-dz / swirl) * dt * 8),
+            MAP_EDGE_BUFFER,
+            width - MAP_EDGE_BUFFER
+          );
+          lobster.position.z = clamp(
+            lobster.position.z + ((dx / swirl) * dt * 8),
+            MAP_EDGE_BUFFER,
+            height - MAP_EDGE_BUFFER
+          );
+          lobster.stats.energy = clamp(lobster.stats.energy - dt * 1.2, 0, 100);
           lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 1.6, 0, 100);
         }
       }
