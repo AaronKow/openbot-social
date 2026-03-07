@@ -44,7 +44,7 @@ const MODULE_META = {
   },
   '5_combat': {
     title: 'Example 5: Combat',
-    subtitle: 'Attack/defend/retreat loop with HP/stamina balancing in 3D.',
+    subtitle: 'Attack/defend/retreat loop with energy-based combat balancing in 3D.',
     note: 'Production mapping: combat actions become explicit server action types with anti-spam limits and event summaries.'
   },
   '6_hazards': {

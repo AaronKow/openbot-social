@@ -82,6 +82,7 @@ export function createSimulation({ seed, moduleId }) {
         rotation: rng() * Math.PI * 2,
         speed: 8.2 + rng() * 2.6,
         state: 'idle',
+        sleeping: false,
         actionQueue: [],
         locomotion: {
           target: { x, z },
@@ -95,10 +96,7 @@ export function createSimulation({ seed, moduleId }) {
           jumpPhase: 0
         },
         stats: {
-          hunger: 22 + i * 5,
           energy: 72 - i * 3,
-          hp: 100,
-          stamina: 85,
           visibility: 1,
           hazardExposure: 0,
           rescued: 0,
@@ -116,7 +114,21 @@ export function createSimulation({ seed, moduleId }) {
           mode: 'neutral',
           targetId: null,
           lastHitTick: 0
-        }
+        },
+        statusEffects: {
+          burning: 0,
+          frozen: 0,
+          electrocuted: 0,
+          paralyzed: 0,
+          tornadoSpin: 0,
+          burnTick: 0,
+          shockTick: 0,
+          freezeTick: 0,
+          tornadoCenterX: x,
+          tornadoCenterZ: z,
+          tornadoThrowReady: false
+        },
+        damageMarkers: []
       };
     }),
     events: [],
@@ -153,6 +165,32 @@ export function createSimulation({ seed, moduleId }) {
       state.scoreboard.highlights.unshift(`${id}: ${reason} (${delta > 0 ? '+' : ''}${delta})`);
       if (state.scoreboard.highlights.length > 25) state.scoreboard.highlights.length = 25;
     }
+  }
+
+  function markDamage(lobster, amount, type) {
+    lobster.damageMarkers.push({
+      id: `dmg-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+      amount: Number(amount) || 0,
+      type: String(type || 'impact'),
+      at: state.world.elapsedSeconds
+    });
+    if (lobster.damageMarkers.length > 24) {
+      lobster.damageMarkers = lobster.damageMarkers.slice(-24);
+    }
+  }
+
+  function applyHazardEffect(lobster, key, durationSec) {
+    lobster.statusEffects[key] = Math.max(lobster.statusEffects[key] || 0, durationSec);
+  }
+
+  function drainEnergy(lobster, amount, markerType = null, markerThreshold = 0.25) {
+    const before = lobster.stats.energy;
+    lobster.stats.energy = clamp(before - Math.max(0, amount), 0, 100);
+    const lost = before - lobster.stats.energy;
+    if (markerType && lost >= markerThreshold) {
+      markDamage(lobster, lost, markerType);
+    }
+    return lost;
   }
 
   function randomPlayablePoint() {
@@ -196,6 +234,45 @@ export function createSimulation({ seed, moduleId }) {
       { id: 'thunder-zone', x: 54, z: 50, radius: 11, type: 'thunder' },
       { id: 'tornado-alley', x: 38, z: 27, radius: 9, type: 'tornado' }
     ];
+    state.world.hazards.forEach((hazard) => {
+      const baseSpeed = 0.12 + (rng() * 0.16);
+      const theta = rng() * Math.PI * 2;
+      hazard.vx = Math.cos(theta) * baseSpeed;
+      hazard.vz = Math.sin(theta) * baseSpeed;
+      hazard.turnIn = 18 + Math.floor(rng() * 36);
+    });
+  }
+
+  function tickHazardMovement() {
+    if (!enabled(6)) return;
+    state.world.hazards.forEach((hazard) => {
+      const minX = MAP_EDGE_BUFFER + hazard.radius + 0.5;
+      const maxX = width - MAP_EDGE_BUFFER - hazard.radius - 0.5;
+      const minZ = MAP_EDGE_BUFFER + hazard.radius + 0.5;
+      const maxZ = height - MAP_EDGE_BUFFER - hazard.radius - 0.5;
+
+      hazard.x += hazard.vx;
+      hazard.z += hazard.vz;
+
+      if (hazard.x <= minX || hazard.x >= maxX) {
+        hazard.vx *= -1;
+        hazard.x = clamp(hazard.x, minX, maxX);
+      }
+      if (hazard.z <= minZ || hazard.z >= maxZ) {
+        hazard.vz *= -1;
+        hazard.z = clamp(hazard.z, minZ, maxZ);
+      }
+
+      hazard.turnIn -= 1;
+      if (hazard.turnIn <= 0) {
+        const speed = Math.max(0.08, Math.hypot(hazard.vx, hazard.vz));
+        const angle = Math.atan2(hazard.vz, hazard.vx) + ((rng() - 0.5) * 1.8);
+        const speedJitter = clamp(speed + (((rng() - 0.5) * 0.22) - 0.01), 0.08, 0.34);
+        hazard.vx = Math.cos(angle) * speedJitter;
+        hazard.vz = Math.sin(angle) * speedJitter;
+        hazard.turnIn = 14 + Math.floor(rng() * 30);
+      }
+    });
   }
 
   function ensureRescueCases() {
@@ -298,6 +375,8 @@ export function createSimulation({ seed, moduleId }) {
 
     const isNight = state.world.dayPhase === 'night';
     const speedFactor = isNight ? 0.55 : state.world.dayPhase === 'dusk' ? 0.78 : 1;
+    const frozenFactor = lobster.statusEffects.frozen > 0 ? 0.42 : 1;
+    const burntFactor = lobster.statusEffects.burning > 0 ? 0.88 : 1;
     const maxTurnThisTick = (isNight ? MAX_TURN_RATE * 0.78 : MAX_TURN_RATE) * dt;
     const yawDelta = shortestAngleDelta(lobster.rotation, locomotion.travelYaw);
     const headingError = Math.abs(yawDelta);
@@ -315,7 +394,7 @@ export function createSimulation({ seed, moduleId }) {
         // Slight steering drift in darkness makes navigation harder.
         lobster.rotation += (rng() - 0.5) * 0.14 * dt;
       }
-      const moveStep = Math.min(distance, lobster.speed * speedFactor * dt);
+      const moveStep = Math.min(distance, lobster.speed * speedFactor * frozenFactor * burntFactor * dt);
       lobster.position.x += Math.cos(lobster.rotation) * moveStep;
       lobster.position.z += Math.sin(lobster.rotation) * moveStep;
     }
@@ -387,6 +466,15 @@ export function createSimulation({ seed, moduleId }) {
       action.initialized = true;
     }
 
+    if (lobster.statusEffects.paralyzed > 0) {
+      action.ttl -= 1;
+      lobster.state = 'paralyzed';
+      lobster.position.y = Math.max(lobster.position.y, 0.08 + (Math.abs(Math.sin(state.world.elapsedSeconds * 22)) * 0.24));
+      drainEnergy(lobster, dt * 0.42);
+      if (action.ttl <= 0 && lobster.actionQueue[0]?.id === action.id) finishAction(lobster);
+      return;
+    }
+
     action.ttl -= 1;
 
     if (action.type === 'idle') {
@@ -432,8 +520,7 @@ export function createSimulation({ seed, moduleId }) {
         ensureMoveTarget(lobster, nearest.food.x, nearest.food.z, 0.9);
         const done = updateMoveLocomotion(lobster, dt);
         if (nearest.d < 2.2 || done) {
-          lobster.stats.hunger = Math.max(0, lobster.stats.hunger - nearest.food.energy * 0.7);
-          lobster.stats.energy = Math.min(100, lobster.stats.energy + nearest.food.energy * 0.6);
+          lobster.stats.energy = Math.min(100, lobster.stats.energy + nearest.food.energy * 0.95);
           state.world.foods = state.world.foods.filter((food) => food.id !== nearest.food.id);
           pointsFor(lobster.id, 8, 'foraged food');
           pushEvent('food', `${lobster.name} consumed algae pellet (+energy).`);
@@ -474,13 +561,13 @@ export function createSimulation({ seed, moduleId }) {
           updateMoveLocomotion(lobster, dt);
           if (distance2D(lobster.position, target.position) < 3.2) {
             const damage = 4 + Math.floor(rng() * 6);
-            target.stats.hp = Math.max(0, target.stats.hp - damage);
-            lobster.stats.stamina = Math.max(0, lobster.stats.stamina - 3);
+            drainEnergy(target, damage);
+            drainEnergy(lobster, 3);
             pointsFor(lobster.id, 6, `hit ${target.name}`);
-            if (target.stats.hp <= 0) {
+            if (target.stats.energy <= 0) {
               lobster.stats.wins += 1;
               target.stats.defeats += 1;
-              target.stats.hp = 70;
+              target.stats.energy = 55;
               pointsFor(lobster.id, 25, 'combat win');
               pushEvent('combat', `${lobster.name} won a duel vs ${target.name}.`);
               finishAction(lobster);
@@ -489,7 +576,6 @@ export function createSimulation({ seed, moduleId }) {
         }
 
         if (action.type === 'defend') {
-          lobster.stats.stamina = Math.min(100, lobster.stats.stamina + 2);
           lobster.stats.energy = Math.min(100, lobster.stats.energy + 1);
           pointsFor(lobster.id, 2, 'defensive stance');
         }
@@ -555,6 +641,7 @@ export function createSimulation({ seed, moduleId }) {
   }
 
   function backgroundBehaviors(lobster) {
+    if (lobster.sleeping) return;
     if (lobster.actionQueue.length > 0) return;
 
     if (enabled(7) && state.world.rescues.some((entry) => !entry.rescuedBy)) {
@@ -562,7 +649,7 @@ export function createSimulation({ seed, moduleId }) {
       return;
     }
 
-    if (enabled(2) && lobster.stats.hunger > 62 && state.world.foods.length > 0) {
+    if (enabled(2) && lobster.stats.energy < 58 && state.world.foods.length > 0) {
       queueAction(lobster, 'forage', { ttl: 20 });
       return;
     }
@@ -590,25 +677,34 @@ export function createSimulation({ seed, moduleId }) {
   function tickStats(lobster, dt) {
     lobster.stats.survivalSeconds += dt;
 
-    if (enabled(2)) {
-      lobster.stats.hunger = clamp(lobster.stats.hunger + dt * 1.5, 0, 100);
-      lobster.stats.energy = clamp(lobster.stats.energy - dt * 0.7 - lobster.stats.hunger * 0.002, 0, 100);
-      if (lobster.stats.hunger > 88) {
-        lobster.stats.hp = clamp(lobster.stats.hp - dt * 2.2, 0, 100);
+    if (lobster.sleeping) {
+      lobster.state = 'sleeping';
+      lobster.position.y = 0;
+      lobster.stats.energy = clamp(lobster.stats.energy + (dt * 8.6), 0, 100);
+      if (lobster.stats.energy >= 72) {
+        lobster.sleeping = false;
+        lobster.state = 'idle';
+        pushEvent('energy', `${lobster.name} woke up after recharging energy.`);
       }
-      if (lobster.stats.hp <= 0) {
-        lobster.stats.hp = 65;
-        lobster.stats.hunger = 58;
-        pointsFor(lobster.id, -10, 'starvation penalty');
-        pushEvent('hunger', `${lobster.name} starved and recovered at low vitality.`);
+    } else if (enabled(2)) {
+      lobster.stats.energy = clamp(lobster.stats.energy - (dt * 0.72), 0, 100);
+      if (lobster.stats.energy <= 0.01) {
+        lobster.stats.energy = 0;
+        lobster.sleeping = true;
+        lobster.state = 'sleeping';
+        lobster.actionQueue = [];
+        lobster.locomotion.phase = 'idle';
+        lobster.position.y = 0;
+        pointsFor(lobster.id, -10, 'energy collapse');
+        pushEvent('energy', `${lobster.name} ran out of energy and fell asleep.`);
       }
     }
 
     if (enabled(4)) {
       lobster.stats.visibility = state.world.dayPhase === 'night' ? 0.55 : state.world.dayPhase === 'dusk' ? 0.75 : 1;
-      if (state.world.dayPhase === 'night') {
+      if (!lobster.sleeping && state.world.dayPhase === 'night') {
         lobster.stats.energy = clamp(lobster.stats.energy - dt * 0.2, 0, 100);
-      } else {
+      } else if (!lobster.sleeping) {
         lobster.stats.energy = clamp(lobster.stats.energy + dt * 0.08, 0, 100);
       }
     }
@@ -622,10 +718,12 @@ export function createSimulation({ seed, moduleId }) {
 
   function tickHazards(lobster, dt) {
     if (!enabled(6)) return;
+    let touchedHazard = false;
     let exposure = 0;
     state.world.hazards.forEach((hazard) => {
       const d = distance2D(lobster.position, hazard);
       if (d <= hazard.radius) {
+        touchedHazard = true;
         const zoneRatio = 1 - (d / Math.max(0.001, hazard.radius)); // 0 at edge, 1 at center
         const zonePower = 0.75 + (zoneRatio * 0.65); // keeps high baseline impact across hazard circle
         exposure += 1;
@@ -640,17 +738,21 @@ export function createSimulation({ seed, moduleId }) {
             MAP_EDGE_BUFFER,
             height - MAP_EDGE_BUFFER
           );
-          lobster.stats.energy = clamp(lobster.stats.energy - dt * 2.6 * zonePower, 0, 100);
-          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 1.4 * zonePower, 0, 100);
+          const blizzardDrain = (dt * 2.6 * zonePower) + (dt * 1.4 * zonePower);
+          drainEnergy(lobster, blizzardDrain, 'blizzard', 0.35);
+          applyHazardEffect(lobster, 'frozen', 2.6 + zonePower);
         }
         if (hazard.type === 'fire') {
-          lobster.stats.hp = clamp(lobster.stats.hp - dt * 3.8 * zonePower, 0, 100);
+          const fireDamage = dt * 3.8 * zonePower;
+          drainEnergy(lobster, fireDamage, 'fire', 0.2);
+          applyHazardEffect(lobster, 'burning', 3.6 + zonePower);
         }
         if (hazard.type === 'thunder') {
           const pulse = ((state.world.tick + Math.floor(hazard.x + hazard.z)) % 12) === 0;
           if (pulse) {
-            lobster.stats.hp = clamp(lobster.stats.hp - (7 + (5 * zonePower)), 0, 100);
-            lobster.stats.stamina = clamp(lobster.stats.stamina - (8 + (6 * zonePower)), 0, 100);
+            const shockDamage = 7 + (5 * zonePower);
+            const thunderDrain = shockDamage + (8 + (6 * zonePower));
+            drainEnergy(lobster, thunderDrain, 'thunder', 0.2);
             lobster.position.x = clamp(
               lobster.position.x + ((rng() - 0.5) * (5.8 * zonePower)),
               MAP_EDGE_BUFFER,
@@ -661,6 +763,8 @@ export function createSimulation({ seed, moduleId }) {
               MAP_EDGE_BUFFER,
               height - MAP_EDGE_BUFFER
             );
+            applyHazardEffect(lobster, 'electrocuted', 2.4 + (zonePower * 0.6));
+            applyHazardEffect(lobster, 'paralyzed', 0.85 + (zonePower * 0.45));
           }
         }
         if (hazard.type === 'tornado') {
@@ -677,14 +781,75 @@ export function createSimulation({ seed, moduleId }) {
             MAP_EDGE_BUFFER,
             height - MAP_EDGE_BUFFER
           );
-          lobster.stats.energy = clamp(lobster.stats.energy - dt * 2.2 * zonePower, 0, 100);
-          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 2.7 * zonePower, 0, 100);
+          lobster.position.y = Math.max(lobster.position.y, 0.35 + (zonePower * 0.9));
+          drainEnergy(lobster, (dt * 2.2 * zonePower) + (dt * 2.7 * zonePower), 'tornado', 0.55);
+          lobster.statusEffects.tornadoCenterX = hazard.x;
+          lobster.statusEffects.tornadoCenterZ = hazard.z;
+          lobster.statusEffects.tornadoThrowReady = true;
+          applyHazardEffect(lobster, 'tornadoSpin', 1.8 + zonePower);
         }
       }
     });
 
     lobster.stats.hazardExposure = clamp(lobster.stats.hazardExposure + exposure * dt, 0, 9999);
     if (exposure > 0) pointsFor(lobster.id, -1, 'hazard exposure');
+    if (touchedHazard && lobster.sleeping) {
+      lobster.sleeping = false;
+      lobster.state = 'idle';
+      lobster.locomotion.phase = 'idle';
+      pushEvent('energy', `${lobster.name} was jolted awake by hazard contact.`);
+    }
+  }
+
+  function tickStatusEffects(lobster, dt) {
+    const fx = lobster.statusEffects;
+    fx.burning = Math.max(0, fx.burning - dt);
+    fx.frozen = Math.max(0, fx.frozen - dt);
+    fx.electrocuted = Math.max(0, fx.electrocuted - dt);
+    fx.paralyzed = Math.max(0, fx.paralyzed - dt);
+    fx.tornadoSpin = Math.max(0, fx.tornadoSpin - dt);
+
+    fx.burnTick -= dt;
+    fx.shockTick -= dt;
+    fx.freezeTick -= dt;
+
+    if (fx.burning > 0 && fx.burnTick <= 0) {
+      const burnDamage = 1.8 + (rng() * 1.8);
+      drainEnergy(lobster, burnDamage + 0.9, 'burn', 0.2);
+      fx.burnTick = 0.42;
+    }
+
+    if (fx.electrocuted > 0 && fx.shockTick <= 0) {
+      const shockDamage = 1.6 + (rng() * 2.4);
+      drainEnergy(lobster, shockDamage + (1.4 + rng() * 1.6), 'shock', 0.2);
+      lobster.position.x = clamp(lobster.position.x + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
+      lobster.position.z = clamp(lobster.position.z + ((rng() - 0.5) * 1.2), MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+      fx.shockTick = 0.32;
+    }
+
+    if (fx.frozen > 0 && fx.freezeTick <= 0) {
+      drainEnergy(lobster, (0.8 + rng() * 0.8) + (0.7 + rng() * 0.7), 'blizzard', 0.2);
+      fx.freezeTick = 0.55;
+    }
+
+    if (fx.tornadoSpin > 0) {
+      lobster.position.y = Math.max(lobster.position.y, 0.5 + (Math.abs(Math.sin(state.world.elapsedSeconds * 8.2)) * 1.2));
+    } else if (fx.tornadoThrowReady) {
+      let vx = lobster.position.x - fx.tornadoCenterX;
+      let vz = lobster.position.z - fx.tornadoCenterZ;
+      const mag = Math.hypot(vx, vz) || 1;
+      vx /= mag;
+      vz /= mag;
+      const throwDistance = 7 + (rng() * 7);
+      lobster.position.x = clamp(lobster.position.x + (vx * throwDistance), MAP_EDGE_BUFFER, width - MAP_EDGE_BUFFER);
+      lobster.position.z = clamp(lobster.position.z + (vz * throwDistance), MAP_EDGE_BUFFER, height - MAP_EDGE_BUFFER);
+      lobster.position.y = Math.max(lobster.position.y, 0.9);
+      const throwDamage = 5 + (rng() * 4);
+      drainEnergy(lobster, throwDamage, 'tornado', 0.2);
+      fx.tornadoThrowReady = false;
+    }
+
+    lobster.damageMarkers = lobster.damageMarkers.filter((entry) => (state.world.elapsedSeconds - entry.at) <= 2.2);
   }
 
   function tickRescueCases() {
@@ -744,18 +909,25 @@ export function createSimulation({ seed, moduleId }) {
 
     ensureHazards();
     ensureRescueCases();
+    tickHazardMovement();
 
     state.lobsters.forEach((lobster) => {
-      backgroundBehaviors(lobster);
-      const current = lobster.actionQueue[0];
-      if (current) {
-        processAction(lobster, current, dt);
+      if (!lobster.sleeping) {
+        backgroundBehaviors(lobster);
+        const current = lobster.actionQueue[0];
+        if (current) {
+          processAction(lobster, current, dt);
+        } else {
+          lobster.state = 'idle';
+          lobster.position.y = 0;
+        }
       } else {
-        lobster.state = 'idle';
+        lobster.state = 'sleeping';
         lobster.position.y = 0;
       }
       tickStats(lobster, dt);
       tickHazards(lobster, dt);
+      tickStatusEffects(lobster, dt);
     });
 
     resolveLobsterCollisions();

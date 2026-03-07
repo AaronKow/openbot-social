@@ -124,10 +124,7 @@ export function renderSnapshot(ui, snapshot) {
         <th>Name</th>
         <th>State</th>
         <th>Queue</th>
-        <th>Hunger</th>
         <th>Energy</th>
-        <th>HP</th>
-        <th>Stamina</th>
         <th>Scout</th>
       </tr>
     </thead>
@@ -139,10 +136,7 @@ export function renderSnapshot(ui, snapshot) {
             <td>${lobster.name}</td>
             <td>${lobster.state}</td>
             <td>${lobster.actionQueue.length}</td>
-            <td>${bar(lobster.stats.hunger)} ${lobster.stats.hunger.toFixed(1)}</td>
             <td>${bar(lobster.stats.energy)} ${lobster.stats.energy.toFixed(1)}</td>
-            <td>${bar(lobster.stats.hp)} ${lobster.stats.hp.toFixed(1)}</td>
-            <td>${bar(lobster.stats.stamina)} ${lobster.stats.stamina.toFixed(1)}</td>
             <td>L${scout.level} · cd ${Number(scout.cooldown).toFixed(1)}</td>
           </tr>
         `;

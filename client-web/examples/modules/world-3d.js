@@ -81,6 +81,40 @@ function createTextSprite(text) {
   return { sprite, texture, canvas };
 }
 
+function createFloatingTextSprite(text, { color = '#ffd86b', stroke = '#281300', fontSize = 34 } = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 96;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = `bold ${fontSize}px Trebuchet MS`;
+  ctx.textAlign = 'center';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 9;
+  ctx.strokeText(String(text || ''), canvas.width / 2, 64);
+  ctx.fillStyle = color;
+  ctx.fillText(String(text || ''), canvas.width / 2, 64);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.generateMipmaps = false;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(3.2, 0.95, 1);
+  return { sprite, texture, canvas };
+}
+
+function damageMarkerColor(type) {
+  void type;
+  return { color: '#ff3b30', stroke: '#3b0503' };
+}
+
 function createMoonlightTexture({
   size = 768,
   coreAlpha = 0.42,
@@ -847,9 +881,221 @@ export class Example3DWorld {
     tag.sprite.position.set(lobster.position.x, physics.baseY + 2.4, lobster.position.z);
     this.scene.add(tag.sprite);
 
-    const record = { mesh, tag, baseY: physics.baseY };
+    const statusTag = createTextSprite('');
+    statusTag.sprite.position.set(lobster.position.x, physics.baseY + 3.35, lobster.position.z);
+    statusTag.sprite.visible = false;
+    statusTag.sprite.scale.set(5.8, 1.4, 1);
+    this.scene.add(statusTag.sprite);
+
+    const sleepGroup = new THREE.Group();
+    sleepGroup.visible = false;
+    const sleepGlyphs = [
+      createFloatingTextSprite('Z', { color: '#e8f7ff', stroke: '#27424f', fontSize: 42 }),
+      createFloatingTextSprite('z', { color: '#d5efff', stroke: '#27424f', fontSize: 34 }),
+      createFloatingTextSprite('z', { color: '#c3e7ff', stroke: '#27424f', fontSize: 28 })
+    ];
+    sleepGlyphs.forEach((glyph, idx) => {
+      glyph.sprite.position.set(0.18 + (idx * 0.42), 0.2 + (idx * 0.42), 0);
+      glyph.sprite.scale.set(1.3 - (idx * 0.15), 0.52 - (idx * 0.06), 1);
+      sleepGroup.add(glyph.sprite);
+    });
+    this.scene.add(sleepGroup);
+
+    const burnFlames = new THREE.Group();
+    burnFlames.visible = false;
+    for (let i = 0; i < 6; i += 1) {
+      const flame = new THREE.Mesh(
+        new THREE.ConeGeometry(0.08 + (i % 2 ? 0.03 : 0), 0.38 + ((i % 3) * 0.08), 8),
+        new THREE.MeshBasicMaterial({ color: i % 2 ? 0xff6f2e : 0xffca55, transparent: true, opacity: 0.88, depthWrite: false })
+      );
+      const theta = (Math.PI * 2 * i) / 6;
+      flame.position.set(Math.cos(theta) * 0.52, 0.2 + ((i % 2) * 0.12), Math.sin(theta) * 0.52);
+      flame.userData.theta = theta;
+      flame.userData.baseY = flame.position.y;
+      burnFlames.add(flame);
+    }
+    mesh.add(burnFlames);
+
+    const surfaceMaterials = [];
+    const surfaceMaterialSet = new Set();
+    mesh.traverse((obj) => {
+      if (!obj.material) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach((mat) => {
+        if (!mat || !mat.color || surfaceMaterialSet.has(mat)) return;
+        surfaceMaterialSet.add(mat);
+        mat.userData.baseColor = mat.color.clone();
+        if (mat.emissive) mat.userData.baseEmissive = mat.emissive.clone();
+        surfaceMaterials.push(mat);
+      });
+    });
+
+    const shockGroup = new THREE.Group();
+    shockGroup.visible = false;
+    for (let i = 0; i < 3; i += 1) {
+      const seg = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.06, 0.85, 6),
+        new THREE.MeshBasicMaterial({ color: 0xd6f8ff, transparent: true, opacity: 0.9 })
+      );
+      seg.position.y = 0.65;
+      seg.userData.phase = i * ((Math.PI * 2) / 3);
+      shockGroup.add(seg);
+    }
+    mesh.add(shockGroup);
+
+    const tornadoRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.98, 0.07, 8, 24),
+      new THREE.MeshBasicMaterial({ color: 0xd4e0ec, transparent: true, opacity: 0, depthWrite: false })
+    );
+    tornadoRing.rotation.set(Math.PI / 2, 0, 0);
+    tornadoRing.position.y = 0.4;
+    tornadoRing.visible = false;
+    mesh.add(tornadoRing);
+
+    const record = {
+      mesh,
+      tag,
+      statusTag,
+      sleepGroup,
+      sleepGlyphs,
+      baseY: physics.baseY,
+      burnFlames,
+      surfaceMaterials,
+      shockGroup,
+      tornadoRing,
+      seenDamageIds: new Set(),
+      damageMarkers: new Map()
+    };
     this.lobsters.set(lobster.id, record);
     return record;
+  }
+
+  updateLobsterEffects(record, lobster, timeSec) {
+    const effects = lobster.statusEffects || {};
+    const burn = clamp((effects.burning || 0) / 4.2, 0, 1);
+    const frozen = clamp((effects.frozen || 0) / 3.2, 0, 1);
+    const shock = clamp((effects.electrocuted || 0) / 2.8, 0, 1);
+    const tornado = clamp((effects.tornadoSpin || 0) / 2.6, 0, 1);
+
+    record.burnFlames.visible = burn > 0.02;
+    if (record.burnFlames.visible) {
+      record.burnFlames.rotation.y += 0.06;
+      record.burnFlames.children.forEach((flame, idx) => {
+        flame.position.y = flame.userData.baseY + (Math.sin((timeSec * 12) + idx) * 0.1);
+        flame.scale.y = 0.9 + ((Math.sin((timeSec * 16) + idx) + 1) * 0.26 * burn);
+        flame.material.opacity = 0.45 + (burn * 0.5);
+      });
+    }
+
+    record.shockGroup.visible = shock > 0.02;
+    if (record.shockGroup.visible) {
+      record.shockGroup.rotation.y += 0.22;
+      record.shockGroup.children.forEach((seg) => {
+        const phase = seg.userData.phase || 0;
+        seg.position.x = Math.cos((timeSec * 10) + phase) * 0.65;
+        seg.position.z = Math.sin((timeSec * 10) + phase) * 0.65;
+        seg.rotation.z = Math.sin((timeSec * 22) + phase) * 0.8;
+        seg.material.opacity = 0.58 + ((Math.sin((timeSec * 36) + phase) + 1) * 0.2);
+      });
+    }
+
+    record.tornadoRing.visible = tornado > 0.02;
+    if (record.tornadoRing.visible) {
+      record.tornadoRing.rotation.z += 0.19;
+      record.tornadoRing.position.y = 0.4 + ((Math.sin(timeSec * 13) + 1) * 0.65);
+      record.tornadoRing.material.opacity = tornado * 0.66;
+    }
+
+    const burnTint = new THREE.Color(0x6a2f18);
+    const freezeTint = new THREE.Color(0x5fbbff);
+    record.surfaceMaterials.forEach((mat) => {
+      const baseColor = mat.userData.baseColor || mat.color;
+      const nextColor = baseColor.clone();
+      if (burn > 0.02) nextColor.lerp(burnTint, burn * 0.4);
+      if (frozen > 0.02) nextColor.lerp(freezeTint, frozen * 0.82);
+      mat.color.copy(nextColor);
+      if (mat.emissive) {
+        const baseEmissive = mat.userData.baseEmissive || new THREE.Color(0x000000);
+        mat.emissive.copy(baseEmissive);
+        mat.emissive.lerp(new THREE.Color(0xff6f2e), burn * 0.32);
+        mat.emissive.lerp(new THREE.Color(0x7ad7ff), frozen * 0.22);
+        mat.emissive.lerp(new THREE.Color(0xc5f3ff), shock * 0.4);
+      }
+    });
+
+    const statuses = [];
+    if (burn > 0.1) statuses.push('BURNING');
+    if (frozen > 0.1) statuses.push('FROZEN');
+    if (shock > 0.1) statuses.push('ELECTROCUTED');
+    if ((effects.paralyzed || 0) > 0.1) statuses.push('PARALYZED');
+    if (tornado > 0.1) statuses.push('TWISTED');
+
+    if (statuses.length) {
+      const text = statuses.join(' | ');
+      const ctx = record.statusTag.canvas.getContext('2d');
+      ctx.clearRect(0, 0, record.statusTag.canvas.width, record.statusTag.canvas.height);
+      ctx.fillStyle = 'rgba(4, 18, 32, 0.78)';
+      ctx.fillRect(0, 0, record.statusTag.canvas.width, record.statusTag.canvas.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px Trebuchet MS';
+      ctx.fillText(text, 10, 42);
+      record.statusTag.texture.needsUpdate = true;
+      record.statusTag.sprite.visible = true;
+    } else {
+      record.statusTag.sprite.visible = false;
+    }
+
+    const sleeping = Boolean(lobster.sleeping);
+    record.sleepGroup.visible = sleeping;
+    if (sleeping) {
+      record.sleepGroup.position.set(
+        record.mesh.position.x + 0.35,
+        record.baseY + 2.9 + (Math.sin(timeSec * 2.3) * 0.12),
+        record.mesh.position.z
+      );
+      record.sleepGlyphs.forEach((glyph, idx) => {
+        const drift = ((timeSec * 0.65) + (idx * 0.28)) % 1;
+        glyph.sprite.position.y = 0.18 + (idx * 0.38) + (drift * 0.48);
+        glyph.sprite.material.opacity = 0.5 + ((1 - drift) * 0.45);
+      });
+    }
+  }
+
+  syncDamageMarkers(record, lobster, timeSec) {
+    const incoming = Array.isArray(lobster.damageMarkers) ? lobster.damageMarkers : [];
+    incoming.forEach((entry) => {
+      if (!entry || !entry.id || record.seenDamageIds.has(entry.id)) return;
+      record.seenDamageIds.add(entry.id);
+      const style = damageMarkerColor(entry.type);
+      const value = Math.max(1, Math.round(Number(entry.amount) || 1));
+      const marker = createFloatingTextSprite(`-${value}`, style);
+      marker.sprite.position.set(record.mesh.position.x, record.baseY + 2.3, record.mesh.position.z);
+      this.scene.add(marker.sprite);
+      record.damageMarkers.set(entry.id, {
+        ...marker,
+        startAt: Number.isFinite(entry.at) ? entry.at : timeSec,
+        driftX: randomRange(-0.5, 0.5),
+        driftZ: randomRange(-0.32, 0.32)
+      });
+    });
+
+    for (const [id, marker] of record.damageMarkers) {
+      const age = timeSec - marker.startAt;
+      if (age > 1.4) {
+        this.scene.remove(marker.sprite);
+        marker.sprite.material.dispose();
+        marker.texture.dispose();
+        record.damageMarkers.delete(id);
+        continue;
+      }
+
+      marker.sprite.position.set(
+        record.mesh.position.x + (marker.driftX * age),
+        record.baseY + 2.3 + (age * 2.2),
+        record.mesh.position.z + (marker.driftZ * age)
+      );
+      marker.sprite.material.opacity = clamp(1 - (age / 1.4), 0, 1);
+    }
   }
 
   syncFoods(foods = []) {
@@ -1059,12 +1305,27 @@ export class Example3DWorld {
       }
 
       record.tag.sprite.position.set(px, record.baseY + 2.4, pz);
+      record.statusTag.sprite.position.set(px, record.baseY + 3.35, pz);
+      this.updateLobsterEffects(record, lobster, hzTime);
+      this.syncDamageMarkers(record, lobster, hzTime);
     });
 
     for (const [id, record] of this.lobsters) {
       if (!seen.has(id)) {
+        for (const marker of record.damageMarkers.values()) {
+          this.scene.remove(marker.sprite);
+          marker.sprite.material.dispose();
+          marker.texture.dispose();
+        }
+        record.damageMarkers.clear();
         this.scene.remove(record.mesh);
         this.scene.remove(record.tag.sprite);
+        this.scene.remove(record.statusTag.sprite);
+        this.scene.remove(record.sleepGroup);
+        record.sleepGlyphs.forEach((glyph) => {
+          glyph.sprite.material.dispose();
+          glyph.texture.dispose();
+        });
         this.lobsters.delete(id);
       }
     }
@@ -1112,6 +1373,27 @@ export class Example3DWorld {
       texture.dispose();
     });
     this.clouds = [];
+    for (const record of this.lobsters.values()) {
+      for (const marker of record.damageMarkers.values()) {
+        this.scene.remove(marker.sprite);
+        marker.sprite.material.dispose();
+        marker.texture.dispose();
+      }
+      this.scene.remove(record.mesh);
+      this.scene.remove(record.tag.sprite);
+      this.scene.remove(record.statusTag.sprite);
+      this.scene.remove(record.sleepGroup);
+      record.sleepGlyphs.forEach((glyph) => {
+        glyph.sprite.material.dispose();
+        glyph.texture.dispose();
+      });
+      disposeObject3D(record.mesh);
+      record.tag.sprite.material?.map?.dispose?.();
+      record.tag.sprite.material?.dispose?.();
+      record.statusTag.sprite.material?.map?.dispose?.();
+      record.statusTag.sprite.material?.dispose?.();
+    }
+    this.lobsters.clear();
     for (const record of this.hazardVisuals.values()) {
       disposeObject3D(record.group);
     }
