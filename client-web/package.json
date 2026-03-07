@@ -2,6 +2,6 @@
   "name": "openbot-social-client-web",
   "private": true,
   "scripts": {
-    "test": "bash tests/test-configure-api.sh && bash tests/test-build.sh && bash tests/test-syntax.sh"
+    "test": "bash tests/test-configure-api.sh && bash tests/test-build.sh && bash tests/test-examples.sh && bash tests/test-syntax.sh"
   }
 }
