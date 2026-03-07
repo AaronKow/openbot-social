@@ -161,6 +161,44 @@ function createGlowTexture({
   return texture;
 }
 
+function randomRange(min, max) {
+  return min + (Math.random() * (max - min));
+}
+
+function createCloudTexture({ size = 384 } = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cx = size / 2;
+  const cy = size / 2;
+
+  ctx.clearRect(0, 0, size, size);
+  const puffCount = 5 + Math.floor(Math.random() * 5);
+
+  for (let i = 0; i < puffCount; i += 1) {
+    const r = randomRange(size * 0.11, size * 0.2);
+    const px = cx + randomRange(-size * 0.2, size * 0.2);
+    const py = cy + randomRange(-size * 0.12, size * 0.12);
+    const alpha = randomRange(0.16, 0.36);
+
+    const gradient = ctx.createRadialGradient(px, py, r * 0.12, px, py, r);
+    gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
 function celestialPosition(timeHours, phaseOffsetHours = 0) {
   const t = ((((timeHours + phaseOffsetHours) % 24) + 24) % 24) / 24;
   const orbitAngle = (t * Math.PI * 2) - (Math.PI / 2);
@@ -223,12 +261,15 @@ export class Example3DWorld {
     this.foodMeshes = new Map();
     this.hazardMeshes = new Map();
     this.rescueMeshes = new Map();
+    this.clouds = [];
+    this.lastCloudUpdateAt = null;
 
     this.clockLabel = createTextSprite('');
     this.clockLabel.sprite.position.set(10, 7, 10);
     this.scene.add(this.clockLabel.sprite);
 
     this.createWorld();
+    this.createCloudField();
     this.resize();
     this.onWindowResize = () => this.resize();
     window.addEventListener('resize', this.onWindowResize);
@@ -386,6 +427,101 @@ export class Example3DWorld {
     this.moonLight.target.position.set(50, 0, 50);
     this.scene.add(this.moonLight);
     this.scene.add(this.moonLight.target);
+  }
+
+  createCloudField() {
+    const cloudCount = 100 + Math.floor(Math.random() * 901);
+    for (let i = 0; i < cloudCount; i += 1) {
+      const cloud = this.spawnCloud({ initial: true });
+      this.clouds.push(cloud);
+      this.scene.add(cloud.sprite);
+    }
+  }
+
+  spawnCloud({ initial = false } = {}) {
+    const texture = createCloudTexture();
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      opacity: initial ? randomRange(0.2, 0.45) : 0,
+      depthWrite: false
+    });
+    const sprite = new THREE.Sprite(material);
+    const scale = randomRange(18, 36);
+    sprite.scale.set(scale, scale * randomRange(0.42, 0.68), 1);
+
+    const cloud = {
+      sprite,
+      texture,
+      speed: randomRange(1.4, 3.1),
+      drift: randomRange(-0.28, 0.28),
+      ttl: randomRange(30, 56),
+      fadeIn: randomRange(2.8, 6.2),
+      fadeOut: randomRange(4.8, 9.0),
+      age: initial ? randomRange(0, 10) : 0,
+      seed: Math.random() * Math.PI * 2
+    };
+
+    this.resetCloud(cloud, { initial });
+    return cloud;
+  }
+
+  resetCloud(cloud, { initial = false } = {}) {
+    cloud.age = initial ? randomRange(0, 10) : 0;
+    cloud.ttl = randomRange(30, 56);
+    cloud.fadeIn = randomRange(2.8, 6.2);
+    cloud.fadeOut = randomRange(4.8, 9.0);
+    cloud.speed = randomRange(1.4, 3.1);
+    cloud.drift = randomRange(-0.28, 0.28);
+    cloud.seed = Math.random() * Math.PI * 2;
+
+    const spawnSide = Math.random() > 0.5 ? -1 : 1;
+    cloud.sprite.position.set(
+      spawnSide < 0 ? randomRange(-28, 4) : randomRange(96, 128),
+      randomRange(42, 68),
+      randomRange(8, 92)
+    );
+
+    const scale = randomRange(18, 36);
+    cloud.sprite.scale.set(scale, scale * randomRange(0.42, 0.68), 1);
+
+    if (!initial) {
+      if (cloud.texture) cloud.texture.dispose();
+      cloud.texture = createCloudTexture();
+      cloud.sprite.material.map = cloud.texture;
+      cloud.sprite.material.needsUpdate = true;
+      cloud.sprite.material.opacity = 0;
+    }
+  }
+
+  updateClouds(dt, dayStrength) {
+    if (!this.clouds.length) return;
+    const baseVisibility = 0.08 + (dayStrength * 0.38);
+
+    this.clouds.forEach((cloud) => {
+      cloud.age += dt;
+      const t = cloud.age;
+      const life = cloud.ttl;
+      const fadeIn = cloud.fadeIn;
+      const fadeOut = cloud.fadeOut;
+
+      let alpha = 1;
+      if (t < fadeIn) alpha = t / Math.max(0.001, fadeIn);
+      if (t > life - fadeOut) alpha = Math.min(alpha, (life - t) / Math.max(0.001, fadeOut));
+      alpha = Math.max(0, Math.min(1, alpha));
+
+      cloud.sprite.material.opacity = alpha * baseVisibility;
+
+      cloud.sprite.position.x += cloud.speed * dt;
+      cloud.sprite.position.z += Math.sin((t * 0.3) + cloud.seed) * cloud.drift * dt;
+
+      const yWave = Math.sin((t * 0.24) + cloud.seed) * 0.35;
+      cloud.sprite.position.y = clamp(cloud.sprite.position.y + (yWave * dt), 39, 72);
+
+      if (t >= life || cloud.sprite.position.x > 132 || cloud.sprite.position.x < -32) {
+        this.resetCloud(cloud, { initial: false });
+      }
+    });
   }
 
   resize() {
@@ -594,6 +730,15 @@ export class Example3DWorld {
     const celestial = this.updateCelestialBodies(world.timeHours);
     this.setPhaseLighting(world.dayPhase, celestial);
 
+    if (typeof world.elapsedSeconds === 'number') {
+      if (this.lastCloudUpdateAt === null) {
+        this.lastCloudUpdateAt = world.elapsedSeconds;
+      }
+      const dt = clamp(world.elapsedSeconds - this.lastCloudUpdateAt, 0, 0.2);
+      this.lastCloudUpdateAt = world.elapsedSeconds;
+      this.updateClouds(dt, clamp(celestial.sunElevation, 0, 1));
+    }
+
     this.syncFoods(world.foods);
     this.syncHazards(world.hazards);
     this.syncRescues(world.rescues);
@@ -659,6 +804,10 @@ export class Example3DWorld {
       this.sunGlowTexture.dispose();
       this.sunGlowTexture = null;
     }
+    this.clouds.forEach((cloud) => {
+      if (cloud.texture) cloud.texture.dispose();
+    });
+    this.clouds = [];
     this.renderer.dispose();
   }
 }
