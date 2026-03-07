@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const WORLD_SIZE = 100;
 const GROUND_Y = 0;
 const BUILD_ACTIONS = new Set(['buildRoad', 'buildShelter', 'expandMap']);
+const HARVEST_DURATION_SECONDS = 2.8;
 
 function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
@@ -1102,6 +1103,23 @@ export class Example3DWorld {
       mesh.add(buildHammerPivot);
     }
 
+    const harvestBarGroup = new THREE.Group();
+    harvestBarGroup.visible = false;
+    const harvestBarBg = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.4, 0.24),
+      new THREE.MeshBasicMaterial({ color: 0x102030, transparent: true, opacity: 0.85, depthWrite: false })
+    );
+    harvestBarBg.position.set(0, 0, 0);
+    harvestBarGroup.add(harvestBarBg);
+
+    const harvestBarFill = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.3, 0.16),
+      new THREE.MeshBasicMaterial({ color: 0x52f59a, transparent: true, opacity: 0.95, depthWrite: false })
+    );
+    harvestBarFill.position.set(-0.02, 0, 0.01);
+    harvestBarGroup.add(harvestBarFill);
+    this.scene.add(harvestBarGroup);
+
     const record = {
       mesh,
       tag,
@@ -1117,6 +1135,8 @@ export class Example3DWorld {
       hammerMesh,
       buildHammerPivot,
       buildHammerMesh,
+      harvestBarGroup,
+      harvestBarFill,
       seenDamageIds: new Set(),
       damageMarkers: new Map()
     };
@@ -1136,6 +1156,10 @@ export class Example3DWorld {
     const buildIntent = BUILD_ACTIONS.has(lobster.state) || BUILD_ACTIONS.has(queuedAction);
     const dodge = clamp((combat.dodgeUntil || 0) / 1.0, 0, 1);
     const hitReact = clamp((combat.tookHitUntil || 0) / 0.6, 0, 1);
+    const activeAction = lobster.actionQueue?.[0] || null;
+    const isHarvesting = lobster.state === 'harvesting' && activeAction?.type === 'harvest';
+    const harvestElapsed = Number(activeAction?.payload?.harvestElapsed) || 0;
+    const harvestProgress = clamp(harvestElapsed / HARVEST_DURATION_SECONDS, 0, 1);
 
     record.burnFlames.visible = burn > 0.02;
     if (record.burnFlames.visible) {
@@ -1200,6 +1224,18 @@ export class Example3DWorld {
       record.buildHammerPivot.rotation.x = 0.2;
       record.buildHammerPivot.rotation.y = -0.08 + (Math.sin(timeSec * 5) * 0.04);
       record.buildHammerPivot.rotation.z = 0.45;
+    }
+
+    record.harvestBarGroup.visible = isHarvesting;
+    if (isHarvesting) {
+      record.harvestBarGroup.position.set(
+        record.mesh.position.x,
+        record.baseY + 4.25,
+        record.mesh.position.z
+      );
+      record.harvestBarGroup.lookAt(this.camera.position);
+      record.harvestBarFill.scale.x = Math.max(0.02, harvestProgress);
+      record.harvestBarFill.position.x = -1.12 + (1.12 * record.harvestBarFill.scale.x);
     }
 
     record.mesh.rotation.x = Math.sin(timeSec * 18) * 0.12 * dodge;
@@ -1688,10 +1724,12 @@ export class Example3DWorld {
         this.scene.remove(record.tag.sprite);
         this.scene.remove(record.statusTag.sprite);
         this.scene.remove(record.sleepGroup);
+        this.scene.remove(record.harvestBarGroup);
         record.sleepGlyphs.forEach((glyph) => {
           glyph.sprite.material.dispose();
           glyph.texture.dispose();
         });
+        disposeObject3D(record.harvestBarGroup);
         this.lobsters.delete(id);
       }
     }
@@ -1749,6 +1787,7 @@ export class Example3DWorld {
       this.scene.remove(record.tag.sprite);
       this.scene.remove(record.statusTag.sprite);
       this.scene.remove(record.sleepGroup);
+      this.scene.remove(record.harvestBarGroup);
       record.sleepGlyphs.forEach((glyph) => {
         glyph.sprite.material.dispose();
         glyph.texture.dispose();
@@ -1758,6 +1797,7 @@ export class Example3DWorld {
       record.tag.sprite.material?.dispose?.();
       record.statusTag.sprite.material?.map?.dispose?.();
       record.statusTag.sprite.material?.dispose?.();
+      disposeObject3D(record.harvestBarGroup);
     }
     this.lobsters.clear();
     for (const mesh of this.foodMeshes.values()) {

@@ -6,6 +6,7 @@ const MAX_TURN_RATE = 5.0;
 const LOBSTER_COLLISION_RADIUS = 1.2;
 const COLLISION_PUSH_BUFFER = 0.35;
 const MAP_EDGE_BUFFER = LOBSTER_COLLISION_RADIUS + 0.35;
+const HARVEST_DURATION_SECONDS = 2.8;
 const RESOURCE_REFILL_SECONDS = 15 * 60;
 const MAP_EXPAND_STEP = 1;
 const MAP_MAX_SIZE = 160;
@@ -712,6 +713,10 @@ export function createSimulation({ seed, moduleId }) {
         startJumpIfNeeded(lobster);
       }
 
+      if (action.type === 'harvest') {
+        action.ttl = Math.max(action.ttl || 0, 90);
+      }
+
       if (action.type === 'buildRoad' || action.type === 'buildShelter') {
         const target = action.payload.to || randomPlayablePoint();
         action.payload.to = target;
@@ -794,19 +799,37 @@ export function createSimulation({ seed, moduleId }) {
     }
 
     if (action.type === 'harvest') {
-      const nearest = findNearestResource(lobster);
-      if (nearest) {
-        ensureMoveTarget(lobster, nearest.resource.x, nearest.resource.z, 0.9);
-        const done = updateMoveLocomotion(lobster, dt);
-        if (nearest.d < 2.1 || done) {
-          const gatherType = nearest.resource.type;
-          const gathered = 1 + Math.floor(rng() * 2);
-          lobster.inventory[gatherType] = (lobster.inventory[gatherType] || 0) + gathered;
-          state.world.resources = state.world.resources.filter((entry) => entry.id !== nearest.resource.id);
-          lobster.skills.forage.xp += 4 + gathered;
-          pointsFor(lobster.id, 9, `harvested ${gatherType}`);
-          pushEvent('resource', `${lobster.name} harvested ${gathered} ${gatherType}.`);
-          finishAction(lobster);
+      let targetResource = action.payload?.resourceId
+        ? state.world.resources.find((entry) => entry.id === action.payload.resourceId)
+        : null;
+      if (!targetResource) {
+        const nearest = findNearestResource(lobster);
+        targetResource = nearest?.resource || null;
+        if (targetResource) {
+          action.payload.resourceId = targetResource.id;
+          action.payload.harvestElapsed = 0;
+        }
+      }
+
+      if (targetResource) {
+        ensureMoveTarget(lobster, targetResource.x, targetResource.z, 0.9);
+        updateMoveLocomotion(lobster, dt);
+        const distance = distance2D(lobster.position, targetResource);
+        if (distance <= 2.1) {
+          action.payload.harvestElapsed = (action.payload.harvestElapsed || 0) + dt;
+          lobster.state = 'harvesting';
+          if (action.payload.harvestElapsed >= HARVEST_DURATION_SECONDS) {
+            const gatherType = targetResource.type;
+            const gathered = 1 + Math.floor(rng() * 2);
+            lobster.inventory[gatherType] = (lobster.inventory[gatherType] || 0) + gathered;
+            state.world.resources = state.world.resources.filter((entry) => entry.id !== targetResource.id);
+            lobster.skills.forage.xp += 4 + gathered;
+            pointsFor(lobster.id, 9, `harvested ${gatherType}`);
+            pushEvent('resource', `${lobster.name} harvested ${gathered} ${gatherType}.`);
+            finishAction(lobster);
+          }
+        } else {
+          action.payload.harvestElapsed = 0;
         }
       } else if (action.ttl <= 0) {
         finishAction(lobster);
