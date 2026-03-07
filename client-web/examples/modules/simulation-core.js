@@ -626,36 +626,38 @@ export function createSimulation({ seed, moduleId }) {
     state.world.hazards.forEach((hazard) => {
       const d = distance2D(lobster.position, hazard);
       if (d <= hazard.radius) {
+        const zoneRatio = 1 - (d / Math.max(0.001, hazard.radius)); // 0 at edge, 1 at center
+        const zonePower = 0.75 + (zoneRatio * 0.65); // keeps high baseline impact across hazard circle
         exposure += 1;
         if (hazard.type === 'blizzard') {
           lobster.position.x = clamp(
-            lobster.position.x + ((rng() - 0.5) * 1.6),
+            lobster.position.x + ((rng() - 0.5) * 2.4 * zonePower),
             MAP_EDGE_BUFFER,
             width - MAP_EDGE_BUFFER
           );
           lobster.position.z = clamp(
-            lobster.position.z + ((rng() - 0.5) * 1.6),
+            lobster.position.z + ((rng() - 0.5) * 2.4 * zonePower),
             MAP_EDGE_BUFFER,
             height - MAP_EDGE_BUFFER
           );
-          lobster.stats.energy = clamp(lobster.stats.energy - dt * 1.8, 0, 100);
-          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 0.8, 0, 100);
+          lobster.stats.energy = clamp(lobster.stats.energy - dt * 2.6 * zonePower, 0, 100);
+          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 1.4 * zonePower, 0, 100);
         }
         if (hazard.type === 'fire') {
-          lobster.stats.hp = clamp(lobster.stats.hp - dt * 2.4, 0, 100);
+          lobster.stats.hp = clamp(lobster.stats.hp - dt * 3.8 * zonePower, 0, 100);
         }
         if (hazard.type === 'thunder') {
-          const pulse = ((state.world.tick + Math.floor(hazard.x + hazard.z)) % 18) === 0;
+          const pulse = ((state.world.tick + Math.floor(hazard.x + hazard.z)) % 12) === 0;
           if (pulse) {
-            lobster.stats.hp = clamp(lobster.stats.hp - 6, 0, 100);
-            lobster.stats.stamina = clamp(lobster.stats.stamina - 8, 0, 100);
+            lobster.stats.hp = clamp(lobster.stats.hp - (7 + (5 * zonePower)), 0, 100);
+            lobster.stats.stamina = clamp(lobster.stats.stamina - (8 + (6 * zonePower)), 0, 100);
             lobster.position.x = clamp(
-              lobster.position.x + ((rng() - 0.5) * 4),
+              lobster.position.x + ((rng() - 0.5) * (5.8 * zonePower)),
               MAP_EDGE_BUFFER,
               width - MAP_EDGE_BUFFER
             );
             lobster.position.z = clamp(
-              lobster.position.z + ((rng() - 0.5) * 4),
+              lobster.position.z + ((rng() - 0.5) * (5.8 * zonePower)),
               MAP_EDGE_BUFFER,
               height - MAP_EDGE_BUFFER
             );
@@ -666,17 +668,17 @@ export function createSimulation({ seed, moduleId }) {
           const dz = lobster.position.z - hazard.z;
           const swirl = Math.max(0.2, Math.hypot(dx, dz));
           lobster.position.x = clamp(
-            lobster.position.x + ((-dz / swirl) * dt * 8),
+            lobster.position.x + ((-dz / swirl) * dt * 10.5 * zonePower),
             MAP_EDGE_BUFFER,
             width - MAP_EDGE_BUFFER
           );
           lobster.position.z = clamp(
-            lobster.position.z + ((dx / swirl) * dt * 8),
+            lobster.position.z + ((dx / swirl) * dt * 10.5 * zonePower),
             MAP_EDGE_BUFFER,
             height - MAP_EDGE_BUFFER
           );
-          lobster.stats.energy = clamp(lobster.stats.energy - dt * 1.2, 0, 100);
-          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 1.6, 0, 100);
+          lobster.stats.energy = clamp(lobster.stats.energy - dt * 2.2 * zonePower, 0, 100);
+          lobster.stats.stamina = clamp(lobster.stats.stamina - dt * 2.7 * zonePower, 0, 100);
         }
       }
     });

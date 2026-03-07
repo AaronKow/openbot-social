@@ -255,83 +255,191 @@ function createHazardVisual(hazard) {
   const group = new THREE.Group();
   const radius = Number(hazard.radius) || 8;
   const type = String(hazard.type || '').toLowerCase();
+  const thunderState = {
+    nextStrikeAt: randomRange(0.05, 0.45),
+    activeUntil: 0,
+    cloudCenter: new THREE.Vector3(0, 8.1, 0),
+    target: new THREE.Vector3(0, 0.08, 0),
+    points: []
+  };
+
+  const setThunderStrikeTarget = (timeSec = 0) => {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * radius * 0.95;
+    thunderState.target.set(Math.cos(angle) * r, 0.08, Math.sin(angle) * r);
+
+    const start = thunderState.cloudCenter.clone().add(
+      new THREE.Vector3(randomRange(-0.9, 0.9), randomRange(-0.45, 0.2), randomRange(-0.9, 0.9))
+    );
+    const end = thunderState.target.clone();
+    const points = [start];
+    const segments = 6;
+    for (let i = 1; i < segments; i += 1) {
+      const t = i / segments;
+      const y = THREE.MathUtils.lerp(start.y, end.y, t);
+      const jitter = (1 - t) * 1.35;
+      points.push(new THREE.Vector3(
+        THREE.MathUtils.lerp(start.x, end.x, t) + randomRange(-jitter, jitter),
+        y,
+        THREE.MathUtils.lerp(start.z, end.z, t) + randomRange(-jitter, jitter)
+      ));
+    }
+    points.push(end);
+    thunderState.points = points;
+    thunderState.activeUntil = timeSec + randomRange(0.22, 0.4);
+    thunderState.nextStrikeAt = timeSec + randomRange(0.35, 0.95);
+  };
 
   if (type === 'blizzard') {
     const base = new THREE.Mesh(
-      new THREE.CylinderGeometry(radius * 0.9, radius * 1.1, 0.3, 20),
-      new THREE.MeshStandardMaterial({ color: 0x67b8ff, transparent: true, opacity: 0.2 })
+      new THREE.CylinderGeometry(radius * 0.95, radius * 1.12, 0.34, 24),
+      new THREE.MeshStandardMaterial({ color: 0x67b8ff, emissive: 0x366ea8, emissiveIntensity: 0.42, transparent: true, opacity: 0.32 })
     );
     base.position.y = 0.14;
     group.add(base);
-    for (let i = 0; i < 14; i += 1) {
+    for (let i = 0; i < 26; i += 1) {
       const flake = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14, 8, 8),
-        new THREE.MeshStandardMaterial({ color: 0xeaf6ff, emissive: 0x2a5a8a, emissiveIntensity: 0.35 })
+        new THREE.SphereGeometry(0.13, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xeaf6ff, emissive: 0x2a5a8a, emissiveIntensity: 0.5 })
       );
-      flake.userData.theta = (Math.PI * 2 * i) / 14;
-      flake.userData.ring = randomRange(radius * 0.35, radius * 0.95);
-      flake.userData.y = randomRange(0.8, 3.6);
+      flake.userData.theta = (Math.PI * 2 * i) / 26;
+      flake.userData.ring = randomRange(radius * 0.22, radius * 1.03);
+      flake.userData.y = randomRange(0.7, 6.8);
       group.add(flake);
     }
   } else if (type === 'fire') {
     const base = new THREE.Mesh(
-      new THREE.CylinderGeometry(radius * 0.72, radius * 0.9, 0.28, 18),
-      new THREE.MeshStandardMaterial({ color: 0xff5a2a, emissive: 0xaa2600, emissiveIntensity: 0.6, transparent: true, opacity: 0.35 })
+      new THREE.CylinderGeometry(radius * 0.86, radius * 1.0, 0.34, 24),
+      new THREE.MeshStandardMaterial({ color: 0xff5a2a, emissive: 0xb23600, emissiveIntensity: 0.95, transparent: true, opacity: 0.46 })
     );
     base.position.y = 0.14;
     group.add(base);
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 7; i += 1) {
       const flame = new THREE.Mesh(
-        new THREE.ConeGeometry(randomRange(0.55, 1.1), randomRange(1.8, 3.6), 10),
-        new THREE.MeshStandardMaterial({ color: i % 2 ? 0xff8a2b : 0xffc64d, emissive: 0xff3b00, emissiveIntensity: 0.7 })
+        new THREE.ConeGeometry(randomRange(0.7, 1.25), randomRange(2.8, 5.7), 10),
+        new THREE.MeshStandardMaterial({ color: i % 2 ? 0xff8a2b : 0xffc64d, emissive: 0xff3b00, emissiveIntensity: 1.1 })
       );
-      flame.position.set(randomRange(-radius * 0.35, radius * 0.35), randomRange(0.9, 1.5), randomRange(-radius * 0.35, radius * 0.35));
+      flame.position.set(randomRange(-radius * 0.55, radius * 0.55), randomRange(1.1, 2.2), randomRange(-radius * 0.55, radius * 0.55));
       flame.userData.baseY = flame.position.y;
       group.add(flame);
     }
   } else if (type === 'thunder') {
     const base = new THREE.Mesh(
-      new THREE.CylinderGeometry(radius * 0.78, radius, 0.24, 18),
-      new THREE.MeshStandardMaterial({ color: 0xffd84f, transparent: true, opacity: 0.26 })
+      new THREE.CylinderGeometry(radius * 0.88, radius * 1.02, 0.28, 22),
+      new THREE.MeshStandardMaterial({ color: 0xffd84f, emissive: 0x9e7f1f, emissiveIntensity: 0.45, transparent: true, opacity: 0.42 })
     );
     base.position.y = 0.12;
     group.add(base);
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(radius * 0.52, 0.22, 10, 24),
-      new THREE.MeshStandardMaterial({ color: 0xffef86, emissive: 0xffea70, emissiveIntensity: 0.55 })
+
+    const targetRing = new THREE.Mesh(
+      new THREE.RingGeometry(radius * 0.12, radius * 0.98, 64),
+      new THREE.MeshBasicMaterial({ color: 0xffe574, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
     );
-    ring.rotation.x = Math.PI / 2;
-    ring.position.y = 1.4;
-    group.add(ring);
-    for (let i = 0; i < 3; i += 1) {
-      const bolt = new THREE.Mesh(
-        new THREE.BoxGeometry(0.2, randomRange(2.2, 3.8), 0.2),
-        new THREE.MeshStandardMaterial({ color: 0xfff3b0, emissive: 0xffef7a, emissiveIntensity: 0.7, transparent: true, opacity: 0.65 })
-      );
-      bolt.position.set(randomRange(-radius * 0.35, radius * 0.35), randomRange(1.5, 2.8), randomRange(-radius * 0.35, radius * 0.35));
-      bolt.rotation.z = randomRange(-0.38, 0.38);
-      group.add(bolt);
+    targetRing.rotation.x = -Math.PI / 2;
+    targetRing.position.y = 0.06;
+    targetRing.userData.hazardPart = 'thunder-target-ring';
+    group.add(targetRing);
+
+    const cloudMaterial = new THREE.MeshStandardMaterial({
+      color: 0x11161d,
+      roughness: 0.95,
+      metalness: 0.04,
+      emissive: 0x0a0d12,
+      emissiveIntensity: 0.35
+    });
+    const cloudGroup = new THREE.Group();
+    cloudGroup.position.copy(thunderState.cloudCenter);
+    cloudGroup.userData.hazardPart = 'thunder-cloud';
+    const cloudOffsets = [
+      [-2.0, 0.0, -0.35, 1.35],
+      [-1.1, 0.3, 1.0, 1.25],
+      [0.2, 0.2, -1.15, 1.3],
+      [1.15, 0.3, 0.82, 1.15],
+      [2.05, 0.0, -0.12, 1.35],
+      [0.0, 0.52, 0.14, 1.5]
+    ];
+    cloudOffsets.forEach(([x, y, z, s]) => {
+      const puff = new THREE.Mesh(new THREE.SphereGeometry(s, 18, 14), cloudMaterial);
+      puff.position.set(x, y, z);
+      puff.userData.hazardPart = 'thunder-cloud-puff';
+      puff.castShadow = true;
+      cloudGroup.add(puff);
+    });
+    group.add(cloudGroup);
+
+    const boltMaterial = new THREE.MeshStandardMaterial({
+      color: 0xe8f0ff,
+      emissive: 0xbdd8ff,
+      emissiveIntensity: 1.4,
+      transparent: true,
+      opacity: 0
+    });
+    for (let i = 0; i < 7; i += 1) {
+      const segment = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.17, 1, 8), boltMaterial.clone());
+      segment.userData.hazardPart = 'thunder-bolt-segment';
+      segment.visible = false;
+      group.add(segment);
     }
+
+    const impact = new THREE.Mesh(
+      new THREE.SphereGeometry(0.4, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0xfff2b2, transparent: true, opacity: 0 })
+    );
+    impact.userData.hazardPart = 'thunder-impact';
+    impact.position.y = 0.1;
+    group.add(impact);
   } else if (type === 'tornado') {
-    for (let i = 0; i < 5; i += 1) {
-      const ringRadius = radius * (0.25 + i * 0.12);
-      const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(ringRadius, 0.12, 8, 18),
-        new THREE.MeshStandardMaterial({ color: 0x9aa4af, transparent: true, opacity: 0.28 })
-      );
-      ring.rotation.x = Math.PI / 2;
-      ring.position.y = 0.8 + i * 0.95;
-      ring.userData.spin = randomRange(0.4, 1.2) * (i % 2 ? -1 : 1);
-      group.add(ring);
+    const baseDisc = new THREE.Mesh(
+      new THREE.CircleGeometry(radius * 0.98, 64),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.58, side: THREE.DoubleSide })
+    );
+    baseDisc.rotation.x = -Math.PI / 2;
+    baseDisc.position.y = 0.03;
+    baseDisc.userData.hazardPart = 'tornado-base-disc';
+    group.add(baseDisc);
+
+    const baseRing = new THREE.Mesh(
+      new THREE.TorusGeometry(radius * 0.9, 0.15, 8, 48),
+      new THREE.MeshStandardMaterial({ color: 0xf8fdff, emissive: 0xdceeff, emissiveIntensity: 0.9, transparent: true, opacity: 0.88 })
+    );
+    baseRing.rotation.x = Math.PI / 2;
+    baseRing.position.y = 0.12;
+    baseRing.userData.hazardPart = 'tornado-base-ring';
+    group.add(baseRing);
+
+    const funnelMaterial = new THREE.MeshStandardMaterial({
+      color: 0xadb8c4,
+      roughness: 0.32,
+      metalness: 0.08,
+      transparent: true,
+      opacity: 0.44,
+      emissive: 0x597184,
+      emissiveIntensity: 0.32
+    });
+    const funnelSegments = 14;
+    for (let i = 0; i < funnelSegments; i += 1) {
+      const t0 = i / funnelSegments;
+      const t1 = (i + 1) / funnelSegments;
+      const bottomR = THREE.MathUtils.lerp(radius * 0.12, radius * 0.52, t0);
+      const topR = THREE.MathUtils.lerp(radius * 0.12, radius * 0.52, t1);
+      const seg = new THREE.Mesh(new THREE.CylinderGeometry(topR, bottomR, 0.92, 24, 1, true), funnelMaterial.clone());
+      seg.position.y = 0.46 + (i * 0.82);
+      seg.userData.hazardPart = 'tornado-funnel-segment';
+      seg.userData.spin = randomRange(1.2, 2.2) * (i % 2 ? -1 : 1);
+      seg.userData.phase = randomRange(0, Math.PI * 2);
+      group.add(seg);
     }
-    for (let i = 0; i < 8; i += 1) {
+
+    for (let i = 0; i < 20; i += 1) {
       const debris = new THREE.Mesh(
-        new THREE.SphereGeometry(0.1, 6, 6),
-        new THREE.MeshStandardMaterial({ color: 0xcfd7df, emissive: 0x5f768d, emissiveIntensity: 0.3 })
+        new THREE.DodecahedronGeometry(randomRange(0.08, 0.19), 0),
+        new THREE.MeshStandardMaterial({ color: 0x9ca5ae, emissive: 0x4f5f70, emissiveIntensity: 0.48, roughness: 0.82, metalness: 0.02 })
       );
-      debris.userData.theta = (Math.PI * 2 * i) / 8;
-      debris.userData.r = randomRange(radius * 0.3, radius * 0.65);
-      debris.userData.y = randomRange(0.8, 4.6);
+      debris.userData.hazardPart = 'tornado-debris';
+      debris.userData.theta = (Math.PI * 2 * i) / 20;
+      debris.userData.r = randomRange(radius * 0.12, radius * 0.9);
+      debris.userData.y = randomRange(0.35, 9.2);
+      debris.userData.spin = randomRange(2.3, 5.5);
       group.add(debris);
     }
   }
@@ -340,25 +448,63 @@ function createHazardVisual(hazard) {
     group.rotation.y += 0.006;
     group.children.forEach((child, idx) => {
       if (type === 'blizzard' && child.geometry?.type === 'SphereGeometry') {
-        const theta = child.userData.theta + (timeSec * 1.2);
+        const theta = child.userData.theta + (timeSec * 1.85);
         const r = child.userData.ring;
-        child.position.set(Math.cos(theta) * r, child.userData.y + Math.sin(timeSec + idx) * 0.2, Math.sin(theta) * r);
+        child.position.set(Math.cos(theta) * r, child.userData.y + Math.sin((timeSec * 2.1) + idx) * 0.35, Math.sin(theta) * r);
       } else if (type === 'fire' && child.geometry?.type === 'ConeGeometry') {
-        child.position.y = child.userData.baseY + Math.sin((timeSec * 6) + idx) * 0.35;
-        child.scale.y = 0.86 + ((Math.sin((timeSec * 7) + idx) + 1) * 0.14);
-      } else if (type === 'thunder' && child.geometry?.type === 'TorusGeometry') {
-        child.rotation.z += 0.02;
-      } else if (type === 'thunder' && child.geometry?.type === 'BoxGeometry') {
-        const pulse = ((Math.floor(timeSec * 8) + idx) % 7) === 0 ? 1 : 0.35;
-        child.material.opacity = pulse;
-      } else if (type === 'tornado' && child.geometry?.type === 'TorusGeometry') {
-        child.rotation.z += child.userData.spin * 0.03;
-      } else if (type === 'tornado' && child.geometry?.type === 'SphereGeometry') {
-        const theta = child.userData.theta + (timeSec * 2.8);
-        const r = child.userData.r + Math.sin(timeSec + idx) * 0.12;
-        child.position.set(Math.cos(theta) * r, child.userData.y, Math.sin(theta) * r);
+        child.position.y = child.userData.baseY + Math.sin((timeSec * 7.4) + idx) * 0.55;
+        child.scale.y = 0.95 + ((Math.sin((timeSec * 8.3) + idx) + 1) * 0.26);
+      } else if (type === 'thunder' && child.userData.hazardPart === 'thunder-cloud') {
+        child.position.x = Math.sin(timeSec * 0.9) * 0.75;
+        child.position.z = Math.cos(timeSec * 0.74) * 0.6;
+      } else if (type === 'thunder' && child.userData.hazardPart === 'thunder-target-ring') {
+        child.material.opacity = 0.22 + ((Math.sin(timeSec * 4.6) + 1) * 0.2);
+      } else if (type === 'tornado' && child.userData.hazardPart === 'tornado-funnel-segment') {
+        child.rotation.y += child.userData.spin * 0.055;
+        child.rotation.z = Math.sin((timeSec * 3.1) + child.userData.phase) * 0.11;
+        child.material.opacity = 0.34 + (Math.sin((timeSec * 4.1) + child.userData.phase) * 0.1);
+      } else if (type === 'tornado' && child.userData.hazardPart === 'tornado-debris') {
+        const theta = child.userData.theta + (timeSec * 4.2);
+        const r = child.userData.r + Math.sin((timeSec * 1.8) + idx) * 0.22;
+        child.position.set(Math.cos(theta) * r, child.userData.y + (Math.sin((timeSec * 2.8) + idx) * 0.32), Math.sin(theta) * r);
+        child.rotation.x += 0.06;
+        child.rotation.y += child.userData.spin * 0.035;
+      } else if (type === 'tornado' && child.userData.hazardPart === 'tornado-base-ring') {
+        child.rotation.z += 0.03;
+        child.material.opacity = 0.68 + ((Math.sin(timeSec * 4.2) + 1) * 0.18);
       }
     });
+
+    if (type === 'thunder') {
+      if (!thunderState.points.length) setThunderStrikeTarget(timeSec);
+      if (timeSec >= thunderState.nextStrikeAt) setThunderStrikeTarget(timeSec);
+
+      const strikeActive = timeSec <= thunderState.activeUntil;
+      const strikeFade = strikeActive ? (0.72 + ((Math.sin(timeSec * 96) + 1) * 0.24)) : 0;
+      let segmentIndex = 0;
+
+      group.children.forEach((child) => {
+        if (child.userData.hazardPart === 'thunder-bolt-segment') {
+          const from = thunderState.points[segmentIndex];
+          const to = thunderState.points[segmentIndex + 1];
+          if (strikeActive && from && to) {
+            child.visible = true;
+            positionBeamBetween(child, from, to, 1);
+            child.material.opacity = strikeFade;
+            child.material.emissiveIntensity = 1.2 + (strikeFade * 1.15);
+            segmentIndex += 1;
+          } else {
+            child.visible = false;
+          }
+        } else if (child.userData.hazardPart === 'thunder-impact') {
+          child.position.copy(thunderState.target);
+          child.position.y = 0.14;
+          child.material.opacity = strikeActive ? (0.55 + ((Math.sin(timeSec * 66) + 1) * 0.18)) : 0;
+          const impactScale = strikeActive ? (1.3 + ((Math.sin(timeSec * 42) + 1) * 0.24)) : 0.5;
+          child.scale.setScalar(impactScale);
+        }
+      });
+    }
   };
 
   return { group, update };
