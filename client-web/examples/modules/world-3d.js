@@ -199,6 +199,14 @@ function createCloudTexture({ size = 384 } = {}) {
   return texture;
 }
 
+function createCloudTexturePool(count = 18) {
+  const pool = [];
+  for (let i = 0; i < count; i += 1) {
+    pool.push(createCloudTexture({ size: 256 }));
+  }
+  return pool;
+}
+
 function celestialPosition(timeHours, phaseOffsetHours = 0) {
   const t = ((((timeHours + phaseOffsetHours) % 24) + 24) % 24) / 24;
   const orbitAngle = (t * Math.PI * 2) - (Math.PI / 2);
@@ -240,8 +248,8 @@ export class Example3DWorld {
     this.camera.position.set(50, 50, -20);
     this.camera.lookAt(50, 0, 50);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio || 1);
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.localClippingEnabled = true;
@@ -263,6 +271,8 @@ export class Example3DWorld {
     this.rescueMeshes = new Map();
     this.clouds = [];
     this.lastCloudUpdateAt = null;
+    this.cloudUpdateAccumulator = 0;
+    this.cloudTexturePool = createCloudTexturePool(20);
 
     this.clockLabel = createTextSprite('');
     this.clockLabel.sprite.position.set(10, 7, 10);
@@ -430,7 +440,8 @@ export class Example3DWorld {
   }
 
   createCloudField() {
-    const cloudCount = 100 + Math.floor(Math.random() * 901);
+    const requestedCount = 100 + Math.floor(Math.random() * 901);
+    const cloudCount = Math.min(requestedCount, this.getAdaptiveCloudBudget());
     for (let i = 0; i < cloudCount; i += 1) {
       const cloud = this.spawnCloud({ initial: true });
       this.clouds.push(cloud);
@@ -438,8 +449,18 @@ export class Example3DWorld {
     }
   }
 
+  getAdaptiveCloudBudget() {
+    const cores = navigator.hardwareConcurrency || 4;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const bounds = this.container.getBoundingClientRect();
+    const pixels = Math.max(1, bounds.width * bounds.height * dpr * dpr);
+    const pixelFactor = clamp(1_600_000 / pixels, 0.35, 1.1);
+    const base = 420 * pixelFactor * (cores >= 8 ? 1 : 0.72);
+    return Math.max(100, Math.floor(base));
+  }
+
   spawnCloud({ initial = false } = {}) {
-    const texture = createCloudTexture();
+    const texture = this.cloudTexturePool[Math.floor(Math.random() * this.cloudTexturePool.length)];
     const material = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
@@ -486,8 +507,7 @@ export class Example3DWorld {
     cloud.sprite.scale.set(scale, scale * randomRange(0.42, 0.68), 1);
 
     if (!initial) {
-      if (cloud.texture) cloud.texture.dispose();
-      cloud.texture = createCloudTexture();
+      cloud.texture = this.cloudTexturePool[Math.floor(Math.random() * this.cloudTexturePool.length)];
       cloud.sprite.material.map = cloud.texture;
       cloud.sprite.material.needsUpdate = true;
       cloud.sprite.material.opacity = 0;
@@ -496,6 +516,12 @@ export class Example3DWorld {
 
   updateClouds(dt, dayStrength) {
     if (!this.clouds.length) return;
+    // Throttle cloud simulation to avoid over-updating large cloud counts.
+    this.cloudUpdateAccumulator += dt;
+    if (this.cloudUpdateAccumulator < (1 / 24)) return;
+    dt = this.cloudUpdateAccumulator;
+    this.cloudUpdateAccumulator = 0;
+
     const baseVisibility = 0.08 + (dayStrength * 0.38);
 
     this.clouds.forEach((cloud) => {
@@ -805,7 +831,12 @@ export class Example3DWorld {
       this.sunGlowTexture = null;
     }
     this.clouds.forEach((cloud) => {
-      if (cloud.texture) cloud.texture.dispose();
+      if (cloud.sprite && cloud.sprite.material) {
+        cloud.sprite.material.dispose();
+      }
+    });
+    this.cloudTexturePool.forEach((texture) => {
+      texture.dispose();
     });
     this.clouds = [];
     this.renderer.dispose();
