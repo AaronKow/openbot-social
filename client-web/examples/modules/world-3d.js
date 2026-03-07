@@ -987,7 +987,7 @@ export class Example3DWorld {
     hammerPivot.position.set(0, 2.45, 0);
     hammerPivot.rotation.set(0, 0, 0);
     const hammerMesh = createHammerModel();
-    hammerMesh.scale.set(3.35, 3.35, 3.35);
+    hammerMesh.scale.set(3.5, 3.5, 3.5);
     hammerPivot.visible = false;
     hammerPivot.add(hammerMesh);
     mesh.add(hammerPivot);
