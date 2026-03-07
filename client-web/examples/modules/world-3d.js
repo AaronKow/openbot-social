@@ -674,7 +674,7 @@ export class Example3DWorld {
 
     const moonTarget = new THREE.Vector3(
       clamp(50 + ((50 - moon.x) * 0.42), 8, 92),
-      GROUND_Y + 0.02,
+      GROUND_Y + 0.14,
       clamp(50 + ((50 - moon.z) * 0.42), 8, 92)
     );
     const sunTarget = new THREE.Vector3(
@@ -755,6 +755,8 @@ export class Example3DWorld {
     const { world, lobsters } = snapshot;
     const celestial = this.updateCelestialBodies(world.timeHours);
     this.setPhaseLighting(world.dayPhase, celestial);
+    // Prevent underside artifacts: never render moon beam when camera is below the floor plane.
+    this.moonBeam.visible = this.camera.position.y >= (GROUND_Y - 0.05) && this.moonLight.intensity > 0.01;
 
     if (typeof world.elapsedSeconds === 'number') {
       if (this.lastCloudUpdateAt === null) {
