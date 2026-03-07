@@ -133,6 +133,57 @@ function createMoonlightTexture({
   return texture;
 }
 
+function createGlowTexture({
+  size = 512,
+  inner = 'rgba(255,245,210,0.95)',
+  mid = 'rgba(255,220,140,0.45)',
+  outer = 'rgba(255,180,80,0.0)'
+} = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = size / 2;
+
+  const gradient = ctx.createRadialGradient(c, c, size * 0.03, c, c, size * 0.5);
+  gradient.addColorStop(0, inner);
+  gradient.addColorStop(0.38, mid);
+  gradient.addColorStop(1, outer);
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  return texture;
+}
+
+function celestialPosition(timeHours, phaseOffsetHours = 0) {
+  const t = ((((timeHours + phaseOffsetHours) % 24) + 24) % 24) / 24;
+  const orbitAngle = (t * Math.PI * 2) - (Math.PI / 2);
+  const elevation = Math.sin(orbitAngle); // -1..1 (below -> above horizon)
+  const azimuth = orbitAngle;
+  const horizontalRadius = 74;
+
+  return {
+    x: 50 + (Math.cos(azimuth) * horizontalRadius),
+    y: 16 + (elevation * 52),
+    z: 50 + (Math.sin(azimuth) * horizontalRadius * 0.82),
+    elevation
+  };
+}
+
+function positionBeamBetween(mesh, from, to, baseHeight = 44) {
+  const dir = new THREE.Vector3().subVectors(to, from);
+  const len = Math.max(0.001, dir.length());
+  mesh.position.copy(from).addScaledVector(dir, 0.5);
+  mesh.scale.set(1, len / baseHeight, 1);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+}
+
 function measureLobsterPhysics(mesh) {
   mesh.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(mesh);
@@ -155,6 +206,7 @@ export class Example3DWorld {
     this.renderer.setPixelRatio(window.devicePixelRatio || 1);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.localClippingEnabled = true;
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.renderer.domElement.style.display = 'block';
@@ -265,11 +317,65 @@ export class Example3DWorld {
         opacity: 0,
         side: THREE.DoubleSide,
         depthWrite: false,
-        blending: THREE.AdditiveBlending
+        blending: THREE.AdditiveBlending,
+        clippingPlanes: [new THREE.Plane(new THREE.Vector3(0, -1, 0), GROUND_Y)]
       })
     );
     this.moonBeam.position.set(50, 22, 50);
     this.scene.add(this.moonBeam);
+
+    this.sunMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(3.8, 28, 28),
+      new THREE.MeshBasicMaterial({ color: 0xffd777 })
+    );
+    this.scene.add(this.sunMesh);
+
+    this.moonMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(2.7, 24, 24),
+      new THREE.MeshBasicMaterial({ color: 0xd8e9ff })
+    );
+    this.scene.add(this.moonMesh);
+
+    this.sunGlowTexture = createGlowTexture();
+    this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.sunGlowTexture,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    }));
+    this.sunGlow.scale.set(18, 18, 1);
+    this.scene.add(this.sunGlow);
+
+    this.sunDisc = new THREE.Mesh(
+      new THREE.CircleGeometry(36, 68),
+      new THREE.MeshBasicMaterial({
+        map: this.moonDiscTexture,
+        color: 0xffd986,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.NormalBlending
+      })
+    );
+    this.sunDisc.rotation.x = -Math.PI / 2;
+    this.sunDisc.position.set(50, 0.05, 50);
+    this.scene.add(this.sunDisc);
+
+    this.sunDiscCore = new THREE.Mesh(
+      new THREE.CircleGeometry(24, 60),
+      new THREE.MeshBasicMaterial({
+        map: this.moonCoreTexture,
+        color: 0xfff2bd,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.NormalBlending
+      })
+    );
+    this.sunDiscCore.rotation.x = -Math.PI / 2;
+    this.sunDiscCore.position.set(50, 0.065, 50);
+    this.scene.add(this.sunDiscCore);
 
     this.moonLight = new THREE.SpotLight(0xaad4ff, 0);
     this.moonLight.position.set(50, 38, 50);
@@ -391,49 +497,102 @@ export class Example3DWorld {
     });
   }
 
-  setPhaseLighting(phase) {
+  updateCelestialBodies(timeHours = 12) {
+    const sun = celestialPosition(timeHours, 0);
+    const moon = celestialPosition(timeHours, 12);
+
+    this.sunMesh.position.set(sun.x, sun.y, sun.z);
+    this.moonMesh.position.set(moon.x, moon.y, moon.z);
+    this.sunGlow.position.set(sun.x, sun.y, sun.z);
+    this.sunMesh.visible = sun.elevation > -0.24;
+    this.moonMesh.visible = moon.elevation > -0.35;
+    this.sunGlow.visible = this.sunMesh.visible;
+
+    this.directional.position.set(sun.x, Math.max(8, sun.y), sun.z);
+
+    const moonTarget = new THREE.Vector3(
+      clamp(50 + ((50 - moon.x) * 0.42), 8, 92),
+      GROUND_Y + 0.02,
+      clamp(50 + ((50 - moon.z) * 0.42), 8, 92)
+    );
+    const sunTarget = new THREE.Vector3(
+      clamp(50 + ((50 - sun.x) * 0.35), 6, 94),
+      GROUND_Y,
+      clamp(50 + ((50 - sun.z) * 0.35), 6, 94)
+    );
+    const moonPos = new THREE.Vector3(moon.x, moon.y, moon.z);
+    const sunPos = new THREE.Vector3(sun.x, sun.y, sun.z);
+    // Always update targets so projection stays continuous and never appears cut off.
+    this.moonLight.position.copy(moonPos);
+    this.moonLight.target.position.copy(moonTarget);
+    this.moonDisc.position.set(moonTarget.x, 0.04, moonTarget.z);
+    this.moonDiscCore.position.set(moonTarget.x, 0.055, moonTarget.z);
+    positionBeamBetween(this.moonBeam, moonPos, moonTarget, 44);
+
+    this.sunDisc.position.set(sunTarget.x, 0.05, sunTarget.z);
+    this.sunDiscCore.position.set(sunTarget.x, 0.065, sunTarget.z);
+    return { sunElevation: sun.elevation, moonElevation: moon.elevation };
+  }
+
+  setPhaseLighting(phase, { sunElevation = 0, moonElevation = 0 } = {}) {
+    const dayStrength = clamp(sunElevation, 0, 1);
+    const moonStrength = clamp(moonElevation, 0, 1);
+
     if (phase === 'night') {
       this.scene.background.setHex(0x0b1a2e);
       this.scene.fog.color.setHex(0x0b1a2e);
-      this.ambient.intensity = 0.55;
-      this.directional.intensity = 0.15;
-      this.moonDisc.material.opacity = 0.34;
-      this.moonDiscCore.material.opacity = 0.28;
-      this.moonBeam.material.opacity = 0.12;
-      this.moonLight.intensity = 2.85;
+      this.ambient.intensity = 0.38 + (moonStrength * 0.35);
+      this.directional.intensity = 0.08 + (dayStrength * 0.25);
+      this.moonDisc.material.opacity = 0.18 + (moonStrength * 0.26);
+      this.moonDiscCore.material.opacity = 0.08 + (moonStrength * 0.22);
+      this.moonBeam.material.opacity = 0.04 + (moonStrength * 0.13);
+      this.moonLight.intensity = 1.2 + (moonStrength * 2.2);
+      this.sunDisc.material.opacity = 0;
+      this.sunDiscCore.material.opacity = 0;
+      this.sunGlow.material.opacity = 0.18;
     } else if (phase === 'dusk') {
       this.scene.background.setHex(0x5c5470);
       this.scene.fog.color.setHex(0x5c5470);
-      this.ambient.intensity = 1.2;
-      this.directional.intensity = 0.8;
-      this.moonDisc.material.opacity = 0.16;
-      this.moonDiscCore.material.opacity = 0.1;
-      this.moonBeam.material.opacity = 0.05;
-      this.moonLight.intensity = 1.0;
+      this.ambient.intensity = 0.85 + (dayStrength * 0.75);
+      this.directional.intensity = 0.35 + (dayStrength * 0.75);
+      this.moonDisc.material.opacity = 0.05 + (moonStrength * 0.16);
+      this.moonDiscCore.material.opacity = 0.03 + (moonStrength * 0.09);
+      this.moonBeam.material.opacity = 0.02 + (moonStrength * 0.06);
+      this.moonLight.intensity = moonStrength * 1.3;
+      this.sunDisc.material.opacity = 0.08 + (dayStrength * 0.16);
+      this.sunDiscCore.material.opacity = 0.05 + (dayStrength * 0.1);
+      this.sunGlow.material.opacity = 0.42 + (dayStrength * 0.2);
     } else if (phase === 'morning') {
       this.scene.background.setHex(0x6ba3d4);
       this.scene.fog.color.setHex(0x6ba3d4);
-      this.ambient.intensity = 2.8;
-      this.directional.intensity = 1.1;
+      this.ambient.intensity = 1.8 + (dayStrength * 1.2);
+      this.directional.intensity = 0.65 + (dayStrength * 0.75);
       this.moonDisc.material.opacity = 0;
       this.moonDiscCore.material.opacity = 0;
       this.moonBeam.material.opacity = 0;
       this.moonLight.intensity = 0;
+      this.sunDisc.material.opacity = 0.15 + (dayStrength * 0.19);
+      this.sunDiscCore.material.opacity = 0.09 + (dayStrength * 0.12);
+      this.sunGlow.material.opacity = 0.7 + (dayStrength * 0.2);
     } else {
       this.scene.background.setHex(0x77b5de);
       this.scene.fog.color.setHex(0x77b5de);
-      this.ambient.intensity = 3.5;
-      this.directional.intensity = 1.25;
+      this.ambient.intensity = 2.4 + (dayStrength * 1.2);
+      this.directional.intensity = 0.8 + (dayStrength * 1.1);
       this.moonDisc.material.opacity = 0;
       this.moonDiscCore.material.opacity = 0;
       this.moonBeam.material.opacity = 0;
       this.moonLight.intensity = 0;
+      this.sunDisc.material.opacity = 0.24 + (dayStrength * 0.22);
+      this.sunDiscCore.material.opacity = 0.14 + (dayStrength * 0.14);
+      this.sunGlow.material.opacity = 0.82 + (dayStrength * 0.24);
     }
   }
 
   update(snapshot) {
     const { world, lobsters } = snapshot;
-    this.setPhaseLighting(world.dayPhase);
+    const celestial = this.updateCelestialBodies(world.timeHours);
+    this.setPhaseLighting(world.dayPhase, celestial);
 
     this.syncFoods(world.foods);
     this.syncHazards(world.hazards);
@@ -495,6 +654,10 @@ export class Example3DWorld {
     if (this.moonCoreTexture) {
       this.moonCoreTexture.dispose();
       this.moonCoreTexture = null;
+    }
+    if (this.sunGlowTexture) {
+      this.sunGlowTexture.dispose();
+      this.sunGlowTexture = null;
     }
     this.renderer.dispose();
   }
