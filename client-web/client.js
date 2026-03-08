@@ -125,7 +125,7 @@ class OpenBotWorld {
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
-        this.worldCycleSeconds = 15 * 60;
+        this.worldCycleSeconds = 24 * 60 * 60;
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
@@ -2758,7 +2758,6 @@ class OpenBotWorld {
     }
 
     updateWorldClockLabel() {
-        if (!this.serverStartTime && !this.worldTimeState) return;
         const now = Date.now();
         const minuteKey = Math.floor(now / 60_000);
         if (minuteKey === this.worldClockMinuteKey) return;
@@ -2802,14 +2801,18 @@ class OpenBotWorld {
             };
         }
 
-        if (!this.serverStartTime) return null;
         const now = Date.now();
-        const cycleSeconds = this.worldCycleSeconds;
-        const elapsedSeconds = Math.max(0, (now - this.serverStartTime) / 1000);
-        const wrappedCycleSeconds = elapsedSeconds % cycleSeconds;
-        const timeHours = (wrappedCycleSeconds / cycleSeconds) * 24;
+        const localNow = new Date(now);
+        const cycleSeconds = 24 * 60 * 60;
+        const timeHours = (
+            localNow.getHours() +
+            (localNow.getMinutes() / 60) +
+            (localNow.getSeconds() / 3600) +
+            (localNow.getMilliseconds() / 3600000)
+        );
+        const elapsedSeconds = timeHours * 60 * 60;
         return {
-            day: Math.floor(elapsedSeconds / cycleSeconds) + 1,
+            day: Math.floor(now / (cycleSeconds * 1000)) + 1,
             timeHours,
             dayProgress: timeHours / 24,
             dayPhase: this.phaseFromHour(timeHours),

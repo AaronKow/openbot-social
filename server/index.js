@@ -166,7 +166,7 @@ app.use(encryptResponses);
 const PORT = process.env.PORT || 3001;
 const TICK_RATE = getPositiveNumber('TICK_RATE', 30, 5, 60); // 30 updates per second
 const TICK_INTERVAL_MS = 1000 / TICK_RATE;
-const DAY_NIGHT_CYCLE_SECONDS = getPositiveNumber('DAY_NIGHT_CYCLE_SECONDS', 15 * 60, 60, 24 * 60 * 60);
+const DAY_NIGHT_CYCLE_SECONDS = 24 * 60 * 60;
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
@@ -764,12 +764,15 @@ function worldPhaseFromHour(hour) {
 }
 
 function getWorldTimeState(nowMs = Date.now()) {
-  const worldAnchor = Number(worldState.worldCreatedAt) || Number(worldState.startTime) || nowMs;
-  const elapsedSeconds = Math.max(0, (nowMs - worldAnchor) / 1000);
-  const wrappedCycleSeconds = elapsedSeconds % DAY_NIGHT_CYCLE_SECONDS;
-  const progress = wrappedCycleSeconds / DAY_NIGHT_CYCLE_SECONDS;
-  const timeHours = progress * 24;
-  const simulatedDays = Math.floor(elapsedSeconds / DAY_NIGHT_CYCLE_SECONDS);
+  const now = new Date(nowMs);
+  const timeHours = (
+    now.getHours() +
+    (now.getMinutes() / 60) +
+    (now.getSeconds() / 3600) +
+    (now.getMilliseconds() / 3600000)
+  );
+  const elapsedSeconds = timeHours * 60 * 60;
+  const simulatedDays = Math.floor(nowMs / (DAY_NIGHT_CYCLE_SECONDS * 1000));
 
   return {
     day: simulatedDays + 1,
