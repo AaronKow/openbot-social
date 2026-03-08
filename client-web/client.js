@@ -2858,13 +2858,25 @@ class OpenBotWorld {
             const normalizedHours = Number.isFinite(serverHours) ? ((((serverHours % 24) + 24) % 24)) : 0;
             const serverDay = Number(fromServer.day);
             const hasValidServerDay = Number.isFinite(serverDay) && serverDay >= 1;
+            const serverClockEpochMs = Number(fromServer.clockEpochMs);
+            const referenceNowMs = Number.isFinite(serverClockEpochMs) && serverClockEpochMs > 0 ? serverClockEpochMs : now;
+            const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
+            const anchorDay = hasWorldAnchor
+                ? (Math.floor(Math.max(0, referenceNowMs - this.worldCreatedAt) / (cycleSeconds * 1000)) + 1)
+                : null;
+            const canonicalDay = Number.isFinite(anchorDay) && anchorDay >= 1
+                ? anchorDay
+                : (hasValidServerDay ? Math.floor(serverDay) : (Number.isFinite(this.cachedWorldDay) ? this.cachedWorldDay : null));
+
             if (hasValidServerDay) {
                 this.hasSyncedWorldDay = true;
-                this.persistCachedWorldDay(serverDay);
+            }
+            if (Number.isFinite(canonicalDay) && canonicalDay >= 1) {
+                this.persistCachedWorldDay(canonicalDay);
             }
             this.worldTimeSync = {
                 baseTimeHours: normalizedHours,
-                baseDay: hasValidServerDay ? Math.floor(serverDay) : (Number.isFinite(this.cachedWorldDay) ? this.cachedWorldDay : null),
+                baseDay: canonicalDay,
                 cycleSeconds,
                 syncedAtMs: now
             };
