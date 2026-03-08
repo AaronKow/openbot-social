@@ -2823,6 +2823,7 @@ class OpenBotWorld {
 
         const hour = Number(timeState.timeHours);
         if (!Number.isFinite(hour)) return;
+        const phase = String(timeState.dayPhase || this.phaseFromHour(hour) || 'day').toLowerCase();
 
         const sun = celestialPosition(hour, 0);
         const moon = celestialPosition(hour, 12);
@@ -2844,14 +2845,31 @@ class OpenBotWorld {
         }
 
         this.directionalLight.position.set(sun.x, Math.max(8, sun.y), sun.z);
-        this.directionalLight.intensity = 0.1 + (sunStrength * 1.15);
-        this.ambientLight.intensity = 0.35 + (sunStrength * 2.2) + (moonStrength * 0.5);
+        let skyHex = 0x77b5de;
+        if (phase === 'night') {
+            skyHex = 0x0b1a2e;
+            this.ambientLight.intensity = 0.38 + (moonStrength * 0.35);
+            this.directionalLight.intensity = 0.08 + (sunStrength * 0.25);
+            if (this.sunGlow) this.sunGlow.material.opacity = 0.18;
+        } else if (phase === 'dusk') {
+            skyHex = 0x5c5470;
+            this.ambientLight.intensity = 0.85 + (sunStrength * 0.75);
+            this.directionalLight.intensity = 0.35 + (sunStrength * 0.75);
+            if (this.sunGlow) this.sunGlow.material.opacity = 0.42 + (sunStrength * 0.2);
+        } else if (phase === 'morning') {
+            skyHex = 0x6ba3d4;
+            this.ambientLight.intensity = 1.8 + (sunStrength * 1.2);
+            this.directionalLight.intensity = 0.65 + (sunStrength * 0.75);
+            if (this.sunGlow) this.sunGlow.material.opacity = 0.7 + (sunStrength * 0.2);
+        } else {
+            skyHex = 0x77b5de;
+            this.ambientLight.intensity = 2.4 + (sunStrength * 1.2);
+            this.directionalLight.intensity = 0.8 + (sunStrength * 1.1);
+            if (this.sunGlow) this.sunGlow.material.opacity = 0.82 + (sunStrength * 0.24);
+        }
 
-        const saturation = THREE.MathUtils.lerp(0.22, 0.52, sunStrength);
-        const lightness = THREE.MathUtils.lerp(0.09, 0.7, sunStrength);
-        const skyColor = new THREE.Color().setHSL(0.57, saturation, lightness);
-        this.scene.background.copy(skyColor);
-        if (this.scene.fog) this.scene.fog.color.copy(skyColor);
+        this.scene.background.setHex(skyHex);
+        if (this.scene.fog) this.scene.fog.color.setHex(skyHex);
 
         this.cloudUpdateAccumulator += dtSeconds;
         if (this.cloudUpdateAccumulator >= (1 / CLOUD_UPDATE_MAX_FPS)) {
