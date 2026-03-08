@@ -2810,8 +2810,8 @@ class OpenBotWorld {
             (localNow.getMilliseconds() / 3600000)
         );
         const elapsedSeconds = timeHours * 60 * 60;
-        const worldAnchor = Number(this.serverStartTime);
-        const elapsedSinceWorldStartMs = Number.isFinite(worldAnchor) ? Math.max(0, now - worldAnchor) : 0;
+        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
+        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
         return {
             day: Math.floor(elapsedSinceWorldStartMs / (cycleSeconds * 1000)) + 1,
             timeHours,
