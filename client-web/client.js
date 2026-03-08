@@ -2784,24 +2784,8 @@ class OpenBotWorld {
         return 'dusk';
     }
 
-    deriveWorldTimeState(data = {}) {
-        if (data.worldTime && typeof data.worldTime === 'object') {
-            const fromServer = data.worldTime;
-            const serverCycle = Number(fromServer.cycleSeconds);
-            if (Number.isFinite(serverCycle) && serverCycle >= 60) {
-                this.worldCycleSeconds = serverCycle;
-            }
-            const serverHours = Number(fromServer.timeHours);
-            const normalizedHours = Number.isFinite(serverHours) ? ((((serverHours % 24) + 24) % 24)) : 0;
-            return {
-                ...fromServer,
-                timeHours: normalizedHours,
-                dayProgress: normalizedHours / 24
-            };
-        }
-
-        const now = Date.now();
-        const localNow = new Date(now);
+    deriveLocalClockState(nowMs = Date.now()) {
+        const localNow = new Date(nowMs);
         const cycleSeconds = 24 * 60 * 60;
         const timeHours = (
             localNow.getHours() +
@@ -2809,16 +2793,38 @@ class OpenBotWorld {
             (localNow.getSeconds() / 3600) +
             (localNow.getMilliseconds() / 3600000)
         );
-        const elapsedSeconds = timeHours * 60 * 60;
-        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
-        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
         return {
-            day: Math.floor(elapsedSinceWorldStartMs / (cycleSeconds * 1000)) + 1,
+            cycleSeconds,
             timeHours,
             dayProgress: timeHours / 24,
             dayPhase: this.phaseFromHour(timeHours),
-            cycleSeconds,
-            elapsedSeconds
+            elapsedSeconds: timeHours * 60 * 60
+        };
+    }
+
+    deriveWorldTimeState(data = {}) {
+        const now = Date.now();
+        const localClock = this.deriveLocalClockState(now);
+        if (data.worldTime && typeof data.worldTime === 'object') {
+            const fromServer = data.worldTime;
+            const serverCycle = Number(fromServer.cycleSeconds);
+            if (Number.isFinite(serverCycle) && serverCycle >= 60) {
+                this.worldCycleSeconds = serverCycle;
+            }
+            const serverDay = Number(fromServer.day);
+            const hasValidServerDay = Number.isFinite(serverDay) && serverDay >= 1;
+            return {
+                ...fromServer,
+                day: hasValidServerDay ? Math.floor(serverDay) : 1,
+                ...localClock
+            };
+        }
+
+        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
+        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
+        return {
+            day: Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1,
+            ...localClock
         };
     }
 
