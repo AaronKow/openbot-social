@@ -193,7 +193,7 @@ class OpenBotWorld {
         this.worldClockMinuteKey = '';
         this.worldTimeState = null;
         this.hasSyncedWorldDay = false;
-        this.cachedWorldDay = 1;
+        this.cachedWorldDay = null;
         this.worldDayCacheKey = 'openbot.worldDay';
         this.worldDayCacheTimestampKey = 'openbot.worldDayUpdatedAt';
         this.skyUpdateAccumulator = 0;
@@ -2793,7 +2793,8 @@ class OpenBotWorld {
         }
         this.applyWorldLighting(this.worldTimeState);
         const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
-        const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor || Number.isFinite(this.cachedWorldDay);
+        const hasCachedDay = Number.isFinite(this.cachedWorldDay) && this.cachedWorldDay >= 1;
+        const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor || hasCachedDay;
         const dayValue = Number(this.worldTimeState?.day);
         const dayLabel = (hasReliableDay && Number.isFinite(dayValue) && dayValue >= 1)
             ? String(Math.floor(dayValue)).padStart(2, '0')
@@ -2839,7 +2840,7 @@ class OpenBotWorld {
         const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
         const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.worldCreatedAt) : 0;
         const anchorDay = Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1;
-        const fallbackDay = hasWorldAnchor ? anchorDay : this.cachedWorldDay;
+        const fallbackDay = hasWorldAnchor ? anchorDay : (Number.isFinite(this.cachedWorldDay) ? this.cachedWorldDay : null);
         if (data.worldTime && typeof data.worldTime === 'object') {
             const fromServer = data.worldTime;
             const serverCycle = Number(fromServer.cycleSeconds);
