@@ -181,3 +181,28 @@ test('GET /world-state delta without limit keeps existing behavior', async () =>
   worldState.agents.clear();
   worldState.agentChangeHistory.clear();
 });
+
+
+test('GET /world-state and /status expose worldTime day/night metadata', async () => {
+  worldState.agents.clear();
+  worldState.agentChangeHistory.clear();
+  worldState.tick = 0;
+  worldState.worldCreatedAt = Date.now() - (2 * 60 * 1000);
+
+  await withServer(async (baseUrl) => {
+    const worldRes = await fetch(`${baseUrl}/world-state`);
+    assert.equal(worldRes.status, 200);
+    const worldPayload = await worldRes.json();
+    assert.equal(typeof worldPayload.worldTime, 'object');
+    assert.ok(worldPayload.worldTime.day >= 1);
+    assert.equal(typeof worldPayload.worldTime.timeHours, 'number');
+    assert.ok(['night', 'morning', 'day', 'dusk'].includes(worldPayload.worldTime.dayPhase));
+    assert.ok(worldPayload.worldTime.cycleSeconds >= 60);
+
+    const statusRes = await fetch(`${baseUrl}/status`);
+    assert.equal(statusRes.status, 200);
+    const statusPayload = await statusRes.json();
+    assert.equal(typeof statusPayload.worldTime, 'object');
+    assert.ok(['night', 'morning', 'day', 'dusk'].includes(statusPayload.worldTime.dayPhase));
+  });
+});
