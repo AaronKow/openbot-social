@@ -264,6 +264,22 @@ class OpenBotWorld {
                     new THREE.MeshStandardMaterial({ color, roughness: 0.7 })
                 );
                 radius = Number(data.radius) || (type === 'kelp' ? 0.9 : 0.7);
+            } else if (type === 'algae_pallet') {
+                radius = Number(data.radius) || 0.95;
+                const servesRemaining = Math.max(0, Math.floor(Number(data.servesRemaining) || 0));
+                const fillRatio = Math.max(0.15, Math.min(1, servesRemaining / 3));
+                const base = new THREE.Mesh(
+                    new THREE.CylinderGeometry(radius, radius * 1.05, 0.35, 14),
+                    new THREE.MeshStandardMaterial({ color: 0x7b5b33, roughness: 0.9 })
+                );
+                const fill = new THREE.Mesh(
+                    new THREE.CylinderGeometry(radius * 0.8, radius * 0.88, 0.18 * fillRatio, 12),
+                    new THREE.MeshStandardMaterial({ color: 0x6cc04a, roughness: 0.55, emissive: 0x214d14, emissiveIntensity: 0.25 })
+                );
+                fill.position.y = 0.12;
+                mesh = new THREE.Group();
+                mesh.add(base);
+                mesh.add(fill);
             } else {
                 continue;
             }
@@ -2764,7 +2780,10 @@ class OpenBotWorld {
             itemDiv.className = 'agent-item';
             const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
             const skillSummary = this.formatAgentSkillSummary(agent.data.skills);
-            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}${skillSummary ? ` · ${skillSummary}` : ''}`;
+            const energy = Number.isFinite(Number(agent.data.energy)) ? Math.round(Number(agent.data.energy)) : null;
+            const energySummary = energy === null ? '' : ` · ⚡${energy}`;
+            const sleepSummary = agent.data.sleeping ? ' · 😴sleeping' : '';
+            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}${energySummary}${sleepSummary}${skillSummary ? ` · ${skillSummary}` : ''}`;
             const isSelected = this.followedAgentId === id;
             if (this.showAnimationDiagnosticsInAgentList && isSelected) {
                 const anim = agent.animation || {};

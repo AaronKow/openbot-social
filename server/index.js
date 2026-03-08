@@ -171,11 +171,31 @@ const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes 
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
 const MAX_WORLD_STATE_LIMIT = Number(process.env.MAX_WORLD_STATE_LIMIT || 500);
 const MAP_REFILL_INTERVAL_MS = Number(process.env.MAP_REFILL_INTERVAL_MS || 15 * 60 * 1000);
+const ALGAE_PALLET_REFILL_INTERVAL_MS = Number(process.env.ALGAE_PALLET_REFILL_INTERVAL_MS || 5 * 60 * 1000);
 const MAP_OBJECT_TARGETS = Object.freeze({
   rock: Number(process.env.MAP_ROCK_TARGET || 20),
   kelp: Number(process.env.MAP_KELP_TARGET || 8),
-  seaweed: Number(process.env.MAP_SEAWEED_TARGET || 7)
+  seaweed: Number(process.env.MAP_SEAWEED_TARGET || 7),
+  algae_pallet: Number(process.env.MAP_ALGAE_PALLET_TARGET || 6)
 });
+const AGENT_ENERGY_MAX = 100;
+const AGENT_ENERGY_MIN = 0;
+const AGENT_ENERGY_COLLAPSE_THRESHOLD = Number(process.env.AGENT_ENERGY_COLLAPSE_THRESHOLD || 12);
+const AGENT_ENERGY_WAKE_THRESHOLD = Number(process.env.AGENT_ENERGY_WAKE_THRESHOLD || 72);
+const AGENT_ENERGY_IDLE_DRAIN_PER_SEC = Number(process.env.AGENT_ENERGY_IDLE_DRAIN_PER_SEC || 0.06);
+const AGENT_ENERGY_STATE_DRAIN_PER_SEC = Object.freeze({
+  moving: Number(process.env.AGENT_ENERGY_DRAIN_MOVING_PER_SEC || 0.32),
+  chatting: Number(process.env.AGENT_ENERGY_DRAIN_CHATTING_PER_SEC || 0.1),
+  acting: Number(process.env.AGENT_ENERGY_DRAIN_ACTING_PER_SEC || 0.2),
+  jumping: Number(process.env.AGENT_ENERGY_DRAIN_JUMPING_PER_SEC || 0.26),
+  dancing: Number(process.env.AGENT_ENERGY_DRAIN_DANCING_PER_SEC || 0.22),
+  emoting: Number(process.env.AGENT_ENERGY_DRAIN_EMOTING_PER_SEC || 0.15)
+});
+const AGENT_SLEEP_RECHARGE_PER_SEC = Number(process.env.AGENT_SLEEP_RECHARGE_PER_SEC || 2.8);
+const AGENT_ALGAE_CONSUME_THRESHOLD = Number(process.env.AGENT_ALGAE_CONSUME_THRESHOLD || 55);
+const ALGAE_PALLET_RADIUS = Number(process.env.ALGAE_PALLET_RADIUS || 0.95);
+const ALGAE_PALLET_ENERGY_PER_SERVE = Number(process.env.ALGAE_PALLET_ENERGY_PER_SERVE || 24);
+const ALGAE_PALLET_MAX_SERVES = Math.max(1, Math.floor(Number(process.env.ALGAE_PALLET_MAX_SERVES || 3)));
 const SKILL_DEFS = Object.freeze({
   scout: { label: 'Scout', xpPerLevel: 40, maxLevel: 10, cooldownSec: 10 },
   forage: { label: 'Forage', xpPerLevel: 35, maxLevel: 10, cooldownSec: 8 },
@@ -344,6 +364,8 @@ const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RET
 const QUEUE_EXPIRY_GRACE_TICKS = Math.max(1, Math.floor(Number(process.env.ACTION_QUEUE_EXPIRY_GRACE_TICKS || 30)));
 let mapRefillTimer = null;
 let mapRefillInProgress = false;
+let algaePalletRefillTimer = null;
+let algaePalletRefillInProgress = false;
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -353,7 +375,21 @@ function getObjectRadius(type, data = {}) {
   if (type === 'rock') return Number(data.radius) || 1.8;
   if (type === 'kelp') return Number(data.radius) || 0.9;
   if (type === 'seaweed') return Number(data.radius) || 0.7;
+  if (type === 'algae_pallet') return Number(data.radius) || ALGAE_PALLET_RADIUS;
   return 0.9;
+}
+
+function clampEnergy(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return AGENT_ENERGY_MAX;
+  return Math.max(AGENT_ENERGY_MIN, Math.min(AGENT_ENERGY_MAX, numeric));
+}
+
+function distance2D(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const dx = Number(a.x || 0) - Number(b.x || 0);
+  const dz = Number(a.z || 0) - Number(b.z || 0);
+  return Math.sqrt((dx * dx) + (dz * dz));
 }
 
 function isObjectPlacementValid(x, z, radius) {
@@ -371,7 +407,13 @@ function isObjectPlacementValid(x, z, radius) {
 
 function buildMapObject(type) {
   const radius = getObjectRadius(type, {
-    radius: type === 'rock' ? randomInRange(0.95, 2.35) : type === 'kelp' ? randomInRange(0.75, 1.0) : randomInRange(0.55, 0.85)
+    radius: type === 'rock'
+      ? randomInRange(0.95, 2.35)
+      : type === 'kelp'
+        ? randomInRange(0.75, 1.0)
+        : type === 'seaweed'
+          ? randomInRange(0.55, 0.85)
+          : ALGAE_PALLET_RADIUS
   });
   const maxAttempts = 40;
   let x = randomInRange(2, WORLD_SIZE.x - 2);
@@ -383,7 +425,13 @@ function buildMapObject(type) {
     z = randomInRange(2, WORLD_SIZE.y - 2);
   }
 
-  const y = type === 'rock' ? randomInRange(0, 0.5) : type === 'kelp' ? randomInRange(1.5, 3.75) : randomInRange(0.8, 2.25);
+  const y = type === 'rock'
+    ? randomInRange(0, 0.5)
+    : type === 'kelp'
+      ? randomInRange(1.5, 3.75)
+      : type === 'seaweed'
+        ? randomInRange(0.8, 2.25)
+        : 0.45;
   const objectId = `map-${type}-${uuidv4()}`;
 
   return {
@@ -397,13 +445,32 @@ function buildMapObject(type) {
         y: randomInRange(0, Math.PI),
         z: randomInRange(0, Math.PI)
       },
-      height: type === 'rock' ? null : type === 'kelp' ? randomInRange(2.5, 7.0) : randomInRange(1.8, 4.5)
+      height: type === 'rock' ? null : type === 'kelp' ? randomInRange(2.5, 7.0) : type === 'seaweed' ? randomInRange(1.8, 4.5) : 0.6,
+      servesRemaining: type === 'algae_pallet' ? ALGAE_PALLET_MAX_SERVES : undefined,
+      energyPerServe: type === 'algae_pallet' ? ALGAE_PALLET_ENERGY_PER_SERVE : undefined,
+      lastRefilledAt: type === 'algae_pallet' ? Date.now() : undefined
     }
   };
 }
 
+function refillAlgaePalletServes() {
+  let changed = 0;
+  for (const object of worldState.objects.values()) {
+    if (object.type !== 'algae_pallet') continue;
+    const currentServes = Math.max(0, Math.floor(Number(object.data?.servesRemaining) || 0));
+    if (currentServes >= ALGAE_PALLET_MAX_SERVES) continue;
+    object.data = {
+      ...object.data,
+      servesRemaining: ALGAE_PALLET_MAX_SERVES,
+      lastRefilledAt: Date.now()
+    };
+    changed += 1;
+  }
+  return changed;
+}
+
 async function refillMapObjects({ persist = true } = {}) {
-  const typeCounts = { rock: 0, kelp: 0, seaweed: 0 };
+  const typeCounts = { rock: 0, kelp: 0, seaweed: 0, algae_pallet: 0 };
   for (const object of worldState.objects.values()) {
     if (typeCounts[object.type] !== undefined) {
       typeCounts[object.type] += 1;
@@ -426,7 +493,19 @@ async function refillMapObjects({ persist = true } = {}) {
     )));
   }
 
-  return newObjects.length;
+  const refilledPalletCount = refillAlgaePalletServes();
+
+  if (persist && process.env.DATABASE_URL && refilledPalletCount > 0) {
+    const updates = Array.from(worldState.objects.values())
+      .filter((object) => object.type === 'algae_pallet')
+      .map((object) => db.saveWorldObject(object.id, object.type, object.position, object.data));
+    await Promise.all(updates);
+  }
+
+  return {
+    newObjects: newObjects.length,
+    refilledPallets: refilledPalletCount
+  };
 }
 
 function scheduleMapRefill() {
@@ -438,9 +517,9 @@ function scheduleMapRefill() {
 
     mapRefillInProgress = true;
     try {
-      const addedCount = await refillMapObjects({ persist: true });
-      if (addedCount > 0) {
-        console.log(`[map-refill] Added ${addedCount} missing map object(s)`);
+      const refillResult = await refillMapObjects({ persist: true });
+      if (refillResult.newObjects > 0 || refillResult.refilledPallets > 0) {
+        console.log(`[map-refill] Added ${refillResult.newObjects} missing map object(s), refilled ${refillResult.refilledPallets} algae pallet(s)`);
       }
     } catch (error) {
       console.error('Error refilling map objects:', error);
@@ -452,6 +531,38 @@ function scheduleMapRefill() {
 
   if (typeof mapRefillTimer.unref === 'function') {
     mapRefillTimer.unref();
+  }
+}
+
+function scheduleAlgaePalletRefill() {
+  algaePalletRefillTimer = setTimeout(async () => {
+    if (algaePalletRefillInProgress) {
+      scheduleAlgaePalletRefill();
+      return;
+    }
+
+    algaePalletRefillInProgress = true;
+    try {
+      const changed = refillAlgaePalletServes();
+      if (changed > 0 && process.env.DATABASE_URL) {
+        const updates = Array.from(worldState.objects.values())
+          .filter((object) => object.type === 'algae_pallet')
+          .map((object) => db.saveWorldObject(object.id, object.type, object.position, object.data));
+        await Promise.all(updates);
+      }
+      if (changed > 0) {
+        console.log(`[algae-refill] Refilled ${changed} algae pallet(s)`);
+      }
+    } catch (error) {
+      console.error('Error refilling algae pallets:', error);
+    } finally {
+      algaePalletRefillInProgress = false;
+      scheduleAlgaePalletRefill();
+    }
+  }, ALGAE_PALLET_REFILL_INTERVAL_MS);
+
+  if (typeof algaePalletRefillTimer.unref === 'function') {
+    algaePalletRefillTimer.unref();
   }
 }
 
@@ -481,6 +592,9 @@ class Agent {
     this.updatedAtTick = 0;
     this.skills = createDefaultSkills();
     this.skillsNormalized = true;
+    this.energy = AGENT_ENERGY_MAX;
+    this.sleeping = false;
+    this.lastEnergyEventAt = 0;
   }
 
   toJSON() {
@@ -497,7 +611,9 @@ class Agent {
       entityName: this.entityName,
       numericId: this.numericId,
       updatedAtTick: this.updatedAtTick,
-      skills: this.skills
+      skills: this.skills,
+      energy: this.energy,
+      sleeping: this.sleeping
     };
   }
 }
@@ -751,6 +867,13 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     
     const agent = getOwnedAgentOrReject(req, res, agentId);
     if (!agent) return;
+
+    if (agent.sleeping) {
+      return res.status(409).json({
+        success: false,
+        error: 'Agent is sleeping to recover energy'
+      });
+    }
     
     // Update agent position with realistic distance clamping
     if (position) {
@@ -797,6 +920,13 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     
     const agent = getOwnedAgentOrReject(req, res, agentId);
     if (!agent) return;
+
+    if (agent.sleeping) {
+      return res.status(409).json({
+        success: false,
+        error: 'Agent is sleeping to recover energy'
+      });
+    }
     
     // Add chat message to history (with entity link for conversation tracking)
     addChatMessage(agentId, agent.name, normalizedMessage, agent.entityId);
@@ -911,6 +1041,74 @@ function findAgentByName(name) {
   return null;
 }
 
+function findNearestAvailableAlgaePallet(agent) {
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const object of worldState.objects.values()) {
+    if (object.type !== 'algae_pallet') continue;
+    const servesRemaining = Math.max(0, Math.floor(Number(object.data?.servesRemaining) || 0));
+    if (servesRemaining <= 0) continue;
+    const distance = distance2D(agent.position, object.position);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = object;
+    }
+  }
+
+  return { pallet: nearest, distance: nearestDistance };
+}
+
+function applyAgentEnergyTick(agent, dtSeconds) {
+  if (!agent) return;
+
+  const now = Date.now();
+  const currentEnergy = clampEnergy(agent.energy);
+  let nextEnergy = currentEnergy;
+  const stateKey = String(agent.state || '').toLowerCase();
+
+  if (agent.sleeping) {
+    nextEnergy = clampEnergy(currentEnergy + (AGENT_SLEEP_RECHARGE_PER_SEC * dtSeconds));
+    if (nextEnergy >= AGENT_ENERGY_WAKE_THRESHOLD) {
+      agent.sleeping = false;
+      if (stateKey === 'sleeping') {
+        agent.state = 'idle';
+      }
+      if (now - agent.lastEnergyEventAt > 5000) {
+        agent.lastEnergyEventAt = now;
+        addChatMessage(agent.id, 'system', `${agent.name} woke up after recharging energy.`, null);
+      }
+    }
+  } else {
+    const baseDrain = AGENT_ENERGY_IDLE_DRAIN_PER_SEC;
+    const stateDrain = AGENT_ENERGY_STATE_DRAIN_PER_SEC[stateKey] || 0;
+    nextEnergy = clampEnergy(currentEnergy - ((baseDrain + stateDrain) * dtSeconds));
+    if (nextEnergy <= AGENT_ENERGY_COLLAPSE_THRESHOLD) {
+      agent.sleeping = true;
+      agent.state = 'sleeping';
+      if (now - agent.lastEnergyEventAt > 5000) {
+        agent.lastEnergyEventAt = now;
+        addChatMessage(agent.id, 'system', `${agent.name} is low on energy and fell asleep.`, null);
+      }
+    }
+  }
+
+  if (!agent.sleeping && nextEnergy < AGENT_ALGAE_CONSUME_THRESHOLD) {
+    const nearest = findNearestAvailableAlgaePallet(agent);
+    if (nearest.pallet && nearest.distance <= (getObjectRadius('algae_pallet', nearest.pallet.data) + 1.2)) {
+      const energyGain = Number(nearest.pallet.data?.energyPerServe) || ALGAE_PALLET_ENERGY_PER_SERVE;
+      nextEnergy = clampEnergy(nextEnergy + energyGain);
+      nearest.pallet.data = {
+        ...nearest.pallet.data,
+        servesRemaining: Math.max(0, (Math.floor(Number(nearest.pallet.data?.servesRemaining) || 0) - 1)),
+        lastConsumedAt: now
+      };
+    }
+  }
+
+  agent.energy = nextEnergy;
+}
+
 function buildDeterministicNearbyTarget(agent, targetAgent) {
   const seed = `${agent?.id || ''}:${targetAgent?.id || ''}:${targetAgent?.name || ''}`;
   let hash = 0;
@@ -930,6 +1128,16 @@ function buildDeterministicNearbyTarget(agent, targetAgent) {
 
 function applyQueueAction(agent, action) {
   if (!agent || !action) return;
+
+  if (agent.sleeping) {
+    agent.lastAction = {
+      type: action.type,
+      skipped: true,
+      reason: 'sleeping_recovering_energy'
+    };
+    markAgentUpdated(agent);
+    return;
+  }
 
   const finishAction = (actionType) => {
     trainAgentSkill(agent, actionType);
@@ -1579,9 +1787,12 @@ app.delete('/disconnect/:agentId', requireAuth, (req, res) => {
 async function gameLoop() {
   worldState.tick++;
   pruneWorldStateDeltaHistory();
+  const dtSeconds = TICK_INTERVAL_MS / 1000;
 
   for (const agent of worldState.agents.values()) {
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
+    applyAgentEnergyTick(agent, dtSeconds);
+    markAgentUpdated(agent);
   }
 
   await processActionQueues();
@@ -1867,6 +2078,7 @@ if (process.env.NODE_ENV !== 'test') {
     schedulePersistRun();
   }
   scheduleMapRefill();
+  scheduleAlgaePalletRefill();
   scheduleEntityReflectionChecks();
 }
 
