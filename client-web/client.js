@@ -191,6 +191,7 @@ class OpenBotWorld {
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
         this.worldTimeState = null;
+        this.hasSyncedWorldDay = false;
         this.skyUpdateAccumulator = 0;
         this.cloudUpdateAccumulator = 0;
         this.lastAnimationFrameMs = performance.now();
@@ -2766,10 +2767,15 @@ class OpenBotWorld {
             this.worldTimeState = this.deriveWorldTimeState();
         }
         this.applyWorldLighting(this.worldTimeState);
-        const day = Number(this.worldTimeState?.day) || 1;
+        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
+        const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor;
+        const dayValue = Number(this.worldTimeState?.day);
+        const dayLabel = (hasReliableDay && Number.isFinite(dayValue) && dayValue >= 1)
+            ? String(Math.floor(dayValue)).padStart(2, '0')
+            : '--';
         const phase = String(this.worldTimeState?.dayPhase || 'day');
         const clockTime = this.worldClockFormatter.format(new Date(now));
-        const label = `Day ${String(day).padStart(2, '0')} (${phase}) - ${clockTime}`;
+        const label = `Day ${dayLabel} (${phase}) - ${clockTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
         const el = document.getElementById('world-day-clock');
@@ -2805,6 +2811,9 @@ class OpenBotWorld {
     deriveWorldTimeState(data = {}) {
         const now = Date.now();
         const localClock = this.deriveLocalClockState(now);
+        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
+        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
+        const fallbackDay = Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1;
         if (data.worldTime && typeof data.worldTime === 'object') {
             const fromServer = data.worldTime;
             const serverCycle = Number(fromServer.cycleSeconds);
@@ -2813,17 +2822,18 @@ class OpenBotWorld {
             }
             const serverDay = Number(fromServer.day);
             const hasValidServerDay = Number.isFinite(serverDay) && serverDay >= 1;
+            if (hasValidServerDay) {
+                this.hasSyncedWorldDay = true;
+            }
             return {
                 ...fromServer,
-                day: hasValidServerDay ? Math.floor(serverDay) : 1,
+                day: hasValidServerDay ? Math.floor(serverDay) : fallbackDay,
                 ...localClock
             };
         }
 
-        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
-        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
         return {
-            day: Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1,
+            day: fallbackDay,
             ...localClock
         };
     }
