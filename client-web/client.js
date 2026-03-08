@@ -124,7 +124,8 @@ class OpenBotWorld {
         this.worldObjectsSignature = '';
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
-        this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
+        this.serverStartTime = null; // Server process start time (uptime metadata)
+        this.worldCreatedAt = null; // Persistent world day anchor
         this.worldCycleSeconds = 24 * 60 * 60;
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
@@ -192,6 +193,9 @@ class OpenBotWorld {
         this.worldClockMinuteKey = '';
         this.worldTimeState = null;
         this.hasSyncedWorldDay = false;
+        this.cachedWorldDay = 1;
+        this.worldDayCacheKey = 'openbot.worldDay';
+        this.worldDayCacheTimestampKey = 'openbot.worldDayUpdatedAt';
         this.skyUpdateAccumulator = 0;
         this.cloudUpdateAccumulator = 0;
         this.lastAnimationFrameMs = performance.now();
@@ -204,6 +208,7 @@ class OpenBotWorld {
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
+        this.loadCachedWorldDay();
         this.worldClockFormatter = new Intl.DateTimeFormat('en-US', {
             hour: '2-digit',
             minute: '2-digit',
@@ -2743,17 +2748,37 @@ class OpenBotWorld {
         const worldCreatedAt = this.normalizeServerTimestamp(data.worldCreatedAt);
         const serverStartTime = this.normalizeServerTimestamp(data.serverStartTime);
 
-        if (worldCreatedAt !== null) {
-            if (this.serverStartTime !== worldCreatedAt) {
-                this.serverStartTime = worldCreatedAt;
-                this.worldClockMinuteKey = '';
-            }
-            return;
-        }
-
-        if (this.serverStartTime === null && serverStartTime !== null) {
+        if (serverStartTime !== null && this.serverStartTime !== serverStartTime) {
             this.serverStartTime = serverStartTime;
             this.worldClockMinuteKey = '';
+        }
+
+        if (worldCreatedAt !== null && this.worldCreatedAt !== worldCreatedAt) {
+            this.worldCreatedAt = worldCreatedAt;
+            this.worldClockMinuteKey = '';
+        }
+    }
+
+    loadCachedWorldDay() {
+        try {
+            const cached = Number(window.localStorage.getItem(this.worldDayCacheKey));
+            if (Number.isFinite(cached) && cached >= 1) {
+                this.cachedWorldDay = Math.floor(cached);
+            }
+        } catch (error) {
+            // Ignore localStorage read failures (private mode, denied access, etc.).
+        }
+    }
+
+    persistCachedWorldDay(day) {
+        if (!Number.isFinite(day) || day < 1) return;
+        const safeDay = Math.floor(day);
+        this.cachedWorldDay = safeDay;
+        try {
+            window.localStorage.setItem(this.worldDayCacheKey, String(safeDay));
+            window.localStorage.setItem(this.worldDayCacheTimestampKey, String(Date.now()));
+        } catch (error) {
+            // Ignore localStorage write failures.
         }
     }
 
@@ -2767,8 +2792,8 @@ class OpenBotWorld {
             this.worldTimeState = this.deriveWorldTimeState();
         }
         this.applyWorldLighting(this.worldTimeState);
-        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
-        const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor;
+        const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
+        const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor || Number.isFinite(this.cachedWorldDay);
         const dayValue = Number(this.worldTimeState?.day);
         const dayLabel = (hasReliableDay && Number.isFinite(dayValue) && dayValue >= 1)
             ? String(Math.floor(dayValue)).padStart(2, '0')
@@ -2811,9 +2836,10 @@ class OpenBotWorld {
     deriveWorldTimeState(data = {}) {
         const now = Date.now();
         const localClock = this.deriveLocalClockState(now);
-        const hasWorldAnchor = Number.isFinite(this.serverStartTime) && this.serverStartTime > 0;
-        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.serverStartTime) : 0;
-        const fallbackDay = Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1;
+        const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
+        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.worldCreatedAt) : 0;
+        const anchorDay = Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1;
+        const fallbackDay = hasWorldAnchor ? anchorDay : this.cachedWorldDay;
         if (data.worldTime && typeof data.worldTime === 'object') {
             const fromServer = data.worldTime;
             const serverCycle = Number(fromServer.cycleSeconds);
@@ -2824,6 +2850,7 @@ class OpenBotWorld {
             const hasValidServerDay = Number.isFinite(serverDay) && serverDay >= 1;
             if (hasValidServerDay) {
                 this.hasSyncedWorldDay = true;
+                this.persistCachedWorldDay(serverDay);
             }
             return {
                 ...fromServer,
