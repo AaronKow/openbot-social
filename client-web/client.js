@@ -2763,7 +2763,8 @@ class OpenBotWorld {
             const itemDiv = document.createElement('div');
             itemDiv.className = 'agent-item';
             const idLabel = agent.data.numericId ? `#${agent.data.numericId} ` : '';
-            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}`;
+            const skillSummary = this.formatAgentSkillSummary(agent.data.skills);
+            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}${skillSummary ? ` · ${skillSummary}` : ''}`;
             const isSelected = this.followedAgentId === id;
             if (this.showAnimationDiagnosticsInAgentList && isSelected) {
                 const anim = agent.animation || {};
@@ -2778,6 +2779,21 @@ class OpenBotWorld {
             itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);
         });
+    }
+
+    formatAgentSkillSummary(skills) {
+        if (!skills || typeof skills !== 'object') return '';
+        const safeLevel = (value) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
+        };
+
+        const scout = safeLevel(skills.scout?.level);
+        const forage = safeLevel(skills.forage?.level);
+        const guard = safeLevel(skills.shellGuard?.level);
+        const builder = safeLevel(skills.builder?.level);
+
+        return `S${scout}/F${forage}/G${guard}/B${builder}`;
     }
     
     onWindowResize() {

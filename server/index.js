@@ -176,6 +176,41 @@ const MAP_OBJECT_TARGETS = Object.freeze({
   kelp: Number(process.env.MAP_KELP_TARGET || 8),
   seaweed: Number(process.env.MAP_SEAWEED_TARGET || 7)
 });
+const SKILL_DEFS = Object.freeze({
+  scout: { label: 'Scout', xpPerLevel: 40, maxLevel: 10, cooldownSec: 10 },
+  forage: { label: 'Forage', xpPerLevel: 35, maxLevel: 10, cooldownSec: 8 },
+  shellGuard: { label: 'Shell Guard', xpPerLevel: 50, maxLevel: 10, cooldownSec: 14 },
+  builder: { label: 'Builder', xpPerLevel: 45, maxLevel: 10, cooldownSec: 12 }
+});
+const SKILL_IDS = Object.keys(SKILL_DEFS);
+const SKILL_ACTION_MAP = Object.freeze({
+  move: 'scout',
+  move_to_agent: 'scout',
+  talk: 'scout',
+  chat: 'scout',
+  jump: 'forage',
+  dance: 'forage',
+  emoji: 'forage',
+  emote: 'shellGuard',
+  defend: 'shellGuard',
+  guard: 'shellGuard',
+  wait: 'builder',
+  build: 'builder'
+});
+const SKILL_ACTION_XP = Object.freeze({
+  move: 2,
+  move_to_agent: 4,
+  talk: 2,
+  chat: 2,
+  jump: 3,
+  dance: 3,
+  emoji: 2,
+  emote: 3,
+  defend: 4,
+  guard: 4,
+  wait: 1,
+  build: 5
+});
 
 function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
   const raw = process.env[envKey];
@@ -444,6 +479,8 @@ class Agent {
     this.entityName = null; // Unique entity name
     this.numericId = null; // Incremented numeric ID
     this.updatedAtTick = 0;
+    this.skills = createDefaultSkills();
+    this.skillsNormalized = true;
   }
 
   toJSON() {
@@ -459,8 +496,70 @@ class Agent {
       entityType: this.entityType,
       entityName: this.entityName,
       numericId: this.numericId,
-      updatedAtTick: this.updatedAtTick
+      updatedAtTick: this.updatedAtTick,
+      skills: this.skills
     };
+  }
+}
+
+function createDefaultSkills() {
+  const skills = {};
+  for (const skillId of SKILL_IDS) {
+    skills[skillId] = { level: 1, xp: 0, cooldown: 0 };
+  }
+  return skills;
+}
+
+function ensureAgentSkills(agent) {
+  if (!agent.skills || typeof agent.skills !== 'object') {
+    agent.skills = createDefaultSkills();
+  }
+
+  for (const skillId of SKILL_IDS) {
+    const existing = agent.skills[skillId] || {};
+    agent.skills[skillId] = {
+      level: Math.max(1, Math.floor(Number(existing.level) || 1)),
+      xp: Math.max(0, Math.floor(Number(existing.xp) || 0)),
+      cooldown: Math.max(0, Number(existing.cooldown) || 0)
+    };
+  }
+
+  agent.skillsNormalized = true;
+}
+
+function trainAgentSkill(agent, actionType) {
+  const normalizedAction = String(actionType || '').trim().toLowerCase();
+  if (!normalizedAction) return;
+
+  ensureAgentSkills(agent);
+  const skillId = SKILL_ACTION_MAP[normalizedAction] || 'scout';
+  const skill = agent.skills[skillId];
+  const skillDef = SKILL_DEFS[skillId];
+  if (!skill || !skillDef) return;
+  if (skill.cooldown > 0) return;
+
+  const xpGain = SKILL_ACTION_XP[normalizedAction] || 2;
+  skill.xp += xpGain;
+
+  const levelXpTarget = skill.level * skillDef.xpPerLevel;
+  if (skill.xp >= levelXpTarget) {
+    if (skill.level < skillDef.maxLevel) {
+      skill.level += 1;
+    }
+    skill.xp = 0;
+  }
+
+  skill.cooldown = skillDef.cooldownSec;
+}
+
+function decayAgentSkillCooldowns(agent, dtSec) {
+  if (!agent.skillsNormalized) {
+    ensureAgentSkills(agent);
+  }
+
+  for (const skillId of SKILL_IDS) {
+    const skill = agent.skills[skillId];
+    skill.cooldown = Math.max(0, skill.cooldown - dtSec);
   }
 }
 
@@ -730,8 +829,9 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
     
     const agent = getOwnedAgentOrReject(req, res, agentId);
     if (!agent) return;
-    
+
     agent.lastAction = action;
+    trainAgentSkill(agent, action?.type || action);
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
     
@@ -831,6 +931,11 @@ function buildDeterministicNearbyTarget(agent, targetAgent) {
 function applyQueueAction(agent, action) {
   if (!agent || !action) return;
 
+  const finishAction = (actionType) => {
+    trainAgentSkill(agent, actionType);
+    markAgentUpdated(agent);
+  };
+
   if (action.type === 'move') {
     agent.position = clampMovement(agent.position, {
       x: action.x,
@@ -842,7 +947,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'moving';
     agent.lastAction = { type: 'move', x: action.x, z: action.z };
-    markAgentUpdated(agent);
+    finishAction('move');
     return;
   }
 
@@ -856,14 +961,14 @@ function applyQueueAction(agent, action) {
 
     if (!normalizedMessage) {
       agent.lastAction = { type: 'talk', skipped: true, reason: 'invalid_message' };
-      markAgentUpdated(agent);
+      finishAction('talk');
       return;
     }
 
     addChatMessage(agent.id, agent.name, normalizedMessage, agent.entityId);
     agent.state = 'chatting';
     agent.lastAction = { type: 'talk', message: normalizedMessage };
-    markAgentUpdated(agent);
+    finishAction('talk');
     return;
   }
 
@@ -876,7 +981,7 @@ function applyQueueAction(agent, action) {
         skipped: true,
         reason: 'target_agent_not_found'
       };
-      markAgentUpdated(agent);
+      finishAction('move_to_agent');
       return;
     }
 
@@ -888,7 +993,7 @@ function applyQueueAction(agent, action) {
       agent_name: action.agent_name,
       targetAgentId: targetAgent.id
     };
-    markAgentUpdated(agent);
+    finishAction('move_to_agent');
     return;
   }
 
@@ -903,7 +1008,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'jumping';
     agent.lastAction = jumpPayload;
-    markAgentUpdated(agent);
+    finishAction('jump');
     return;
   }
 
@@ -921,7 +1026,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'dancing';
     agent.lastAction = dancePayload;
-    markAgentUpdated(agent);
+    finishAction('dance');
     return;
   }
 
@@ -939,7 +1044,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'emoting';
     agent.lastAction = emotePayload;
-    markAgentUpdated(agent);
+    finishAction('emote');
     return;
   }
 
@@ -947,7 +1052,7 @@ function applyQueueAction(agent, action) {
   delete payload.requiredTicks;
   agent.lastAction = payload;
   agent.state = 'acting';
-  markAgentUpdated(agent);
+  finishAction(action.type);
 }
 
 async function processActionQueues() {
@@ -1474,6 +1579,10 @@ app.delete('/disconnect/:agentId', requireAuth, (req, res) => {
 async function gameLoop() {
   worldState.tick++;
   pruneWorldStateDeltaHistory();
+
+  for (const agent of worldState.agents.values()) {
+    decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
+  }
 
   await processActionQueues();
 }

@@ -18,7 +18,13 @@ function createAgent(id, name, position) {
     connected: true,
     lastUpdate: Date.now(),
     entityId: `entity-${id}`,
-    updatedAtTick: 0
+    updatedAtTick: 0,
+    skills: {
+      scout: { level: 1, xp: 0, cooldown: 0 },
+      forage: { level: 1, xp: 0, cooldown: 0 },
+      shellGuard: { level: 1, xp: 0, cooldown: 0 },
+      builder: { level: 1, xp: 0, cooldown: 0 }
+    }
   };
 }
 
@@ -44,6 +50,20 @@ test('applyQueueAction move_to_agent moves toward target agent with bounded move
   );
   assert.ok(movedDistance > 0, 'expected mover to change position');
   assert.ok(movedDistance <= 5.00001, `expected movement to be clamped to max distance, got ${movedDistance}`);
+  assert.ok(mover.skills.scout.xp > 0, 'expected move_to_agent to train scout skill');
+  assert.ok(mover.skills.scout.cooldown > 0, 'expected move_to_agent to trigger scout cooldown');
+});
+
+test('gameLoop decays skill cooldowns', async () => {
+  worldState.agents.clear();
+  const mover = createAgent('agent-cooldown', 'cooldown', { x: 2, y: 0, z: 2 });
+  mover.skills.scout.cooldown = 1;
+  worldState.agents.set(mover.id, mover);
+
+  await __testHooks.gameLoop();
+
+  assert.ok(mover.skills.scout.cooldown < 1, 'expected cooldown to decay every game loop tick');
+  worldState.agents.clear();
 });
 
 test('applyQueueAction move_to_agent marks skipped action when target agent is missing', () => {
