@@ -27,6 +27,7 @@ class OpenBotWorld {
         this.pollInterval = config.pollInterval;
         this.worldTick = null; // Last successfully applied world tick
         this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
+        this.worldObjectsSignature = '';
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
@@ -94,6 +95,8 @@ class OpenBotWorld {
         this.wikiAvatarRenderers = [];
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
+        this.worldTimeState = null;
+        this.lastAppliedLightMinute = null;
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
@@ -161,17 +164,17 @@ class OpenBotWorld {
         this.controls.maxDistance = Infinity;  // No maximum distance
         
         // Lights
-        const ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
-        this.scene.add(ambientLight);
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
+        this.scene.add(this.ambientLight);
         
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-        directionalLight.position.set(50, 100, 50);
-        directionalLight.castShadow = true;
-        directionalLight.shadow.camera.left = -100;
-        directionalLight.shadow.camera.right = 100;
-        directionalLight.shadow.camera.top = 100;
-        directionalLight.shadow.camera.bottom = -100;
-        this.scene.add(directionalLight);
+        this.directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        this.directionalLight.position.set(50, 100, 50);
+        this.directionalLight.castShadow = true;
+        this.directionalLight.shadow.camera.left = -100;
+        this.directionalLight.shadow.camera.right = 100;
+        this.directionalLight.shadow.camera.top = 100;
+        this.directionalLight.shadow.camera.bottom = -100;
+        this.scene.add(this.directionalLight);
         
         // Ocean floor
         this.createOceanFloor();
@@ -219,6 +222,23 @@ class OpenBotWorld {
         this.obstacles = [];
     }
 
+
+    buildWorldObjectsSignature(objects) {
+        if (!Array.isArray(objects) || objects.length === 0) return 'empty';
+        return objects.map((object) => {
+            const id = object?.id ?? '';
+            const type = object?.type ?? '';
+            const p = object?.position || {};
+            const d = object?.data || {};
+            const servesRemaining = Number(d.servesRemaining);
+            const x = Number(p.x);
+            const y = Number(p.y);
+            const z = Number(p.z);
+            const serves = Number.isFinite(servesRemaining) ? servesRemaining : '';
+            return `${id}:${type}:${x.toFixed ? x.toFixed(2) : x}|${y.toFixed ? y.toFixed(2) : y}|${z.toFixed ? z.toFixed(2) : z}:${serves}`;
+        }).join(';');
+    }
+
     clearDecorations() {
         for (const mesh of this.decorationMeshes.values()) {
             this.scene.remove(mesh);
@@ -230,6 +250,12 @@ class OpenBotWorld {
         if (!Array.isArray(objects)) {
             return;
         }
+
+        const signature = this.buildWorldObjectsSignature(objects);
+        if (signature === this.worldObjectsSignature) {
+            return;
+        }
+        this.worldObjectsSignature = signature;
 
         this.clearDecorations();
         this.obstacles = [];
@@ -1644,6 +1670,8 @@ class OpenBotWorld {
     
     handleWorldState(data) {
         this.updateWorldClockAnchorFromPayload(data);
+        this.worldTimeState = this.deriveWorldTimeState(data);
+        this.applyWorldLighting(this.worldTimeState);
         this.updateWorldClockLabel();
         if (data.totalEntitiesCreated !== undefined) {
             this.totalEntitiesCreated = data.totalEntitiesCreated;
@@ -2500,20 +2528,76 @@ class OpenBotWorld {
     }
 
     updateWorldClockLabel() {
-        if (!this.serverStartTime) return;
+        if (!this.serverStartTime && !this.worldTimeState) return;
         const now = Date.now();
         const minuteKey = Math.floor(now / 60_000);
         if (minuteKey === this.worldClockMinuteKey) return;
 
         this.worldClockMinuteKey = minuteKey;
-        const elapsedMs = Math.max(0, now - this.serverStartTime);
-        const day = Math.floor(elapsedMs / 86_400_000) + 1;
+        if (!this.worldTimeState) {
+            this.worldTimeState = this.deriveWorldTimeState();
+        }
+        this.applyWorldLighting(this.worldTimeState);
+        const day = Number(this.worldTimeState?.day) || 1;
+        const phase = String(this.worldTimeState?.dayPhase || 'day');
         const utcTime = this.utcClockFormatter.format(new Date(now));
-        const label = `Day ${String(day).padStart(2, '0')} - ${utcTime}`;
+        const label = `Day ${String(day).padStart(2, '0')} (${phase}) - ${utcTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
         const el = document.getElementById('world-day-clock');
         if (el) el.textContent = label;
+    }
+
+
+    phaseFromHour(hour) {
+        if (hour < 6) return 'night';
+        if (hour < 12) return 'morning';
+        if (hour < 18) return 'day';
+        return 'dusk';
+    }
+
+    deriveWorldTimeState(data = {}) {
+        if (data.worldTime && typeof data.worldTime === 'object') {
+            return data.worldTime;
+        }
+
+        if (!this.serverStartTime) return null;
+        const now = Date.now();
+        const cycleSeconds = 15 * 60;
+        const elapsedSeconds = Math.max(0, (now - this.serverStartTime) / 1000);
+        const wrappedCycleSeconds = elapsedSeconds % cycleSeconds;
+        const timeHours = (wrappedCycleSeconds / cycleSeconds) * 24;
+        return {
+            day: Math.floor(elapsedSeconds / cycleSeconds) + 1,
+            timeHours,
+            dayPhase: this.phaseFromHour(timeHours),
+            cycleSeconds,
+            elapsedSeconds
+        };
+    }
+
+    applyWorldLighting(timeState) {
+        if (!this.scene || !this.ambientLight || !this.directionalLight || !timeState) return;
+
+        const hour = Number(timeState.timeHours);
+        if (!Number.isFinite(hour)) return;
+        const minuteKey = Math.floor(hour * 60);
+        if (minuteKey === this.lastAppliedLightMinute) return;
+        this.lastAppliedLightMinute = minuteKey;
+
+        const t = ((hour / 24) % 1 + 1) % 1;
+        const sunCurve = Math.max(0, Math.sin(t * Math.PI));
+        const ambientIntensity = THREE.MathUtils.lerp(1.2, 3.2, sunCurve);
+        const directionalIntensity = THREE.MathUtils.lerp(0.22, 1.18, sunCurve);
+
+        this.ambientLight.intensity = ambientIntensity;
+        this.directionalLight.intensity = directionalIntensity;
+
+        const fogColor = new THREE.Color().setHSL(0.57, THREE.MathUtils.lerp(0.28, 0.5, sunCurve), THREE.MathUtils.lerp(0.12, 0.66, sunCurve));
+        this.scene.background.copy(fogColor);
+        if (this.scene.fog) {
+            this.scene.fog.color.copy(fogColor);
+        }
     }
 
     updateTickLabel() {

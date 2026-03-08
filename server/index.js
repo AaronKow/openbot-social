@@ -166,6 +166,7 @@ app.use(encryptResponses);
 const PORT = process.env.PORT || 3001;
 const TICK_RATE = getPositiveNumber('TICK_RATE', 30, 5, 60); // 30 updates per second
 const TICK_INTERVAL_MS = 1000 / TICK_RATE;
+const DAY_NIGHT_CYCLE_SECONDS = getPositiveNumber('DAY_NIGHT_CYCLE_SECONDS', 15 * 60, 60, 24 * 60 * 60);
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
@@ -305,6 +306,7 @@ function pruneWorldStateDeltaHistory() {
 
 function getWorldStateMeta() {
   const uptimeMs = Date.now() - worldState.startTime;
+  const worldTime = getWorldTimeState();
   return {
     tick: worldState.tick,
     uptimeMs,
@@ -312,6 +314,7 @@ function getWorldStateMeta() {
     serverStartTime: worldState.startTime,
     worldCreatedAt: worldState.worldCreatedAt,
     totalEntitiesCreated: worldState.totalEntitiesCreated,
+    worldTime,
     objects: Array.from(worldState.objects.values())
   };
 }
@@ -746,6 +749,30 @@ function formatUptime(ms) {
   return parts.join(' ');
 }
 
+function worldPhaseFromHour(hour) {
+  if (hour < 6) return 'night';
+  if (hour < 12) return 'morning';
+  if (hour < 18) return 'day';
+  return 'dusk';
+}
+
+function getWorldTimeState(nowMs = Date.now()) {
+  const worldAnchor = Number(worldState.worldCreatedAt) || Number(worldState.startTime) || nowMs;
+  const elapsedSeconds = Math.max(0, (nowMs - worldAnchor) / 1000);
+  const wrappedCycleSeconds = elapsedSeconds % DAY_NIGHT_CYCLE_SECONDS;
+  const progress = wrappedCycleSeconds / DAY_NIGHT_CYCLE_SECONDS;
+  const timeHours = progress * 24;
+  const simulatedDays = Math.floor(elapsedSeconds / DAY_NIGHT_CYCLE_SECONDS);
+
+  return {
+    day: simulatedDays + 1,
+    timeHours,
+    dayPhase: worldPhaseFromHour(timeHours),
+    cycleSeconds: DAY_NIGHT_CYCLE_SECONDS,
+    elapsedSeconds
+  };
+}
+
 // Add chat message to history (keep last 100 messages)
 // Also saves conversation per-entity for full chat history
 async function addChatMessage(agentId, agentName, message, entityId) {
@@ -1059,7 +1086,7 @@ function findNearestAvailableAlgaePallet(agent) {
   return { pallet: nearest, distance: nearestDistance };
 }
 
-function applyAgentEnergyTick(agent, dtSeconds) {
+function applyAgentEnergyTick(agent, dtSeconds, worldPhase = 'day') {
   if (!agent) return;
 
   const now = Date.now();
@@ -1068,7 +1095,8 @@ function applyAgentEnergyTick(agent, dtSeconds) {
   const stateKey = String(agent.state || '').toLowerCase();
 
   if (agent.sleeping) {
-    nextEnergy = clampEnergy(currentEnergy + (AGENT_SLEEP_RECHARGE_PER_SEC * dtSeconds));
+    const sleepRecoveryMultiplier = worldPhase === 'night' ? 1.1 : 1;
+    nextEnergy = clampEnergy(currentEnergy + (AGENT_SLEEP_RECHARGE_PER_SEC * sleepRecoveryMultiplier * dtSeconds));
     if (nextEnergy >= AGENT_ENERGY_WAKE_THRESHOLD) {
       agent.sleeping = false;
       if (stateKey === 'sleeping') {
@@ -1082,7 +1110,8 @@ function applyAgentEnergyTick(agent, dtSeconds) {
   } else {
     const baseDrain = AGENT_ENERGY_IDLE_DRAIN_PER_SEC;
     const stateDrain = AGENT_ENERGY_STATE_DRAIN_PER_SEC[stateKey] || 0;
-    nextEnergy = clampEnergy(currentEnergy - ((baseDrain + stateDrain) * dtSeconds));
+    const phaseEnergyDrainMultiplier = worldPhase === 'night' ? 1.25 : worldPhase === 'dusk' ? 1.1 : 1;
+    nextEnergy = clampEnergy(currentEnergy - ((baseDrain + stateDrain) * phaseEnergyDrainMultiplier * dtSeconds));
     if (nextEnergy <= AGENT_ENERGY_COLLAPSE_THRESHOLD) {
       agent.sleeping = true;
       agent.state = 'sleeping';
@@ -1788,10 +1817,11 @@ async function gameLoop() {
   worldState.tick++;
   pruneWorldStateDeltaHistory();
   const dtSeconds = TICK_INTERVAL_MS / 1000;
+  const worldTime = getWorldTimeState();
 
   for (const agent of worldState.agents.values()) {
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
-    applyAgentEnergyTick(agent, dtSeconds);
+    applyAgentEnergyTick(agent, dtSeconds, worldTime.dayPhase);
     markAgentUpdated(agent);
   }
 
@@ -2087,6 +2117,7 @@ app.get('/status', async (req, res) => {
   try {
     const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
     const uptimeMs = Date.now() - worldState.startTime;
+    const worldTime = getWorldTimeState();
 
     // Count total entities created
     let totalEntities = worldState.totalEntitiesCreated;
@@ -2108,6 +2139,7 @@ app.get('/status', async (req, res) => {
       uptimeMs: uptimeMs,
       serverStartTime: worldState.startTime,
       worldCreatedAt: worldState.worldCreatedAt,
+      worldTime,
       database: dbHealthy !== null ? (dbHealthy ? 'connected' : 'disconnected') : 'disabled',
       tickScheduler: {
         intervalMs: TICK_INTERVAL_MS,
@@ -2131,6 +2163,7 @@ app.get('/status', async (req, res) => {
     console.error('Status endpoint error:', error);
     const safeStartTime = worldState.startTime || Date.now();
     const safeUptimeMs = Math.max(0, Date.now() - safeStartTime);
+    const worldTime = getWorldTimeState();
     return res.status(503).json({
       status: 'degraded',
       activeAgents: worldState.agents?.size ?? 0,
@@ -2141,6 +2174,7 @@ app.get('/status', async (req, res) => {
       uptimeMs: safeUptimeMs,
       serverStartTime: safeStartTime,
       worldCreatedAt: worldState.worldCreatedAt || safeStartTime,
+      worldTime,
       database: process.env.DATABASE_URL ? 'disconnected' : 'disabled',
       tickScheduler: {
         intervalMs: TICK_INTERVAL_MS,
