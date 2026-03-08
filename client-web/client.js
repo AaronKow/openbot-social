@@ -27,6 +27,7 @@ class OpenBotWorld {
         this.pollInterval = config.pollInterval;
         this.worldTick = null; // Last successfully applied world tick
         this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
+        this.worldObjectsSignature = '';
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
@@ -94,6 +95,13 @@ class OpenBotWorld {
         this.wikiAvatarRenderers = [];
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
+        this.worldTimeState = null;
+        this.worldTimeSyncAtMs = 0;
+        this.lastAppliedLightMinute = null;
+        this.sunMesh = null;
+        this.moonMesh = null;
+        this.sunGlow = null;
+        this.sunGlowTexture = null;
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
@@ -161,17 +169,19 @@ class OpenBotWorld {
         this.controls.maxDistance = Infinity;  // No maximum distance
         
         // Lights
-        const ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
-        this.scene.add(ambientLight);
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 3.5);
+        this.scene.add(this.ambientLight);
         
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-        directionalLight.position.set(50, 100, 50);
-        directionalLight.castShadow = true;
-        directionalLight.shadow.camera.left = -100;
-        directionalLight.shadow.camera.right = 100;
-        directionalLight.shadow.camera.top = 100;
-        directionalLight.shadow.camera.bottom = -100;
-        this.scene.add(directionalLight);
+        this.directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        this.directionalLight.position.set(50, 100, 50);
+        this.directionalLight.castShadow = true;
+        this.directionalLight.shadow.camera.left = -100;
+        this.directionalLight.shadow.camera.right = 100;
+        this.directionalLight.shadow.camera.top = 100;
+        this.directionalLight.shadow.camera.bottom = -100;
+        this.scene.add(this.directionalLight);
+
+        this.createCelestialBodies();
         
         // Ocean floor
         this.createOceanFloor();
@@ -198,6 +208,51 @@ class OpenBotWorld {
         return normalized || fallback;
     }
     
+
+    createGlowTexture({
+        innerColor = 'rgba(255, 250, 190, 1)',
+        outerColor = 'rgba(255, 240, 160, 0)'
+    } = {}) {
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.08, size / 2, size / 2, size * 0.48);
+        gradient.addColorStop(0, innerColor);
+        gradient.addColorStop(1, outerColor);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, size, size);
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    createCelestialBodies() {
+        const sunGeometry = new THREE.SphereGeometry(3.6, 24, 24);
+        const moonGeometry = new THREE.SphereGeometry(3.1, 18, 18);
+
+        this.sunMesh = new THREE.Mesh(
+            sunGeometry,
+            new THREE.MeshBasicMaterial({ color: 0xffcf5e })
+        );
+        this.moonMesh = new THREE.Mesh(
+            moonGeometry,
+            new THREE.MeshBasicMaterial({ color: 0xbfd8ff })
+        );
+
+        this.sunGlowTexture = this.createGlowTexture();
+        this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: this.sunGlowTexture,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        }));
+        this.sunGlow.scale.set(18, 18, 1);
+
+        this.scene.add(this.sunMesh);
+        this.scene.add(this.moonMesh);
+        this.scene.add(this.sunGlow);
+    }
+
     createOceanFloor() {
         // Sand floor - smooth and even (now with thickness)
         const floorGeometry = new THREE.BoxGeometry(100, 3, 100);
@@ -219,6 +274,23 @@ class OpenBotWorld {
         this.obstacles = [];
     }
 
+
+    buildWorldObjectsSignature(objects) {
+        if (!Array.isArray(objects) || objects.length === 0) return 'empty';
+        return objects.map((object) => {
+            const id = object?.id ?? '';
+            const type = object?.type ?? '';
+            const p = object?.position || {};
+            const d = object?.data || {};
+            const servesRemaining = Number(d.servesRemaining);
+            const x = Number(p.x);
+            const y = Number(p.y);
+            const z = Number(p.z);
+            const serves = Number.isFinite(servesRemaining) ? servesRemaining : '';
+            return `${id}:${type}:${x.toFixed ? x.toFixed(2) : x}|${y.toFixed ? y.toFixed(2) : y}|${z.toFixed ? z.toFixed(2) : z}:${serves}`;
+        }).join(';');
+    }
+
     clearDecorations() {
         for (const mesh of this.decorationMeshes.values()) {
             this.scene.remove(mesh);
@@ -230,6 +302,12 @@ class OpenBotWorld {
         if (!Array.isArray(objects)) {
             return;
         }
+
+        const signature = this.buildWorldObjectsSignature(objects);
+        if (signature === this.worldObjectsSignature) {
+            return;
+        }
+        this.worldObjectsSignature = signature;
 
         this.clearDecorations();
         this.obstacles = [];
@@ -1644,6 +1722,8 @@ class OpenBotWorld {
     
     handleWorldState(data) {
         this.updateWorldClockAnchorFromPayload(data);
+        this.syncWorldTimeState(data);
+        this.applyWorldLighting(this.getCurrentWorldTimeState());
         this.updateWorldClockLabel();
         if (data.totalEntitiesCreated !== undefined) {
             this.totalEntitiesCreated = data.totalEntitiesCreated;
@@ -2500,20 +2580,152 @@ class OpenBotWorld {
     }
 
     updateWorldClockLabel() {
-        if (!this.serverStartTime) return;
+        if (!this.serverStartTime && !this.worldTimeState) return;
         const now = Date.now();
         const minuteKey = Math.floor(now / 60_000);
         if (minuteKey === this.worldClockMinuteKey) return;
 
         this.worldClockMinuteKey = minuteKey;
-        const elapsedMs = Math.max(0, now - this.serverStartTime);
-        const day = Math.floor(elapsedMs / 86_400_000) + 1;
+        const worldTime = this.getCurrentWorldTimeState();
+        this.applyWorldLighting(worldTime);
+        const day = Number(worldTime?.day) || 1;
+        const phase = String(worldTime?.dayPhase || 'day');
         const utcTime = this.utcClockFormatter.format(new Date(now));
-        const label = `Day ${String(day).padStart(2, '0')} - ${utcTime}`;
+        const label = `Day ${String(day).padStart(2, '0')} (${phase}) - ${utcTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
         const el = document.getElementById('world-day-clock');
         if (el) el.textContent = label;
+    }
+
+
+    phaseFromHour(hour) {
+        if (hour < 6) return 'night';
+        if (hour < 12) return 'morning';
+        if (hour < 18) return 'day';
+        return 'dusk';
+    }
+
+    deriveWorldTimeState(data = {}) {
+        if (data.worldTime && typeof data.worldTime === 'object') {
+            return {
+                day: Number(data.worldTime.day) || 1,
+                timeHours: Number(data.worldTime.timeHours) || 0,
+                dayPhase: String(data.worldTime.dayPhase || 'day'),
+                cycleSeconds: Math.max(60, Number(data.worldTime.cycleSeconds) || (15 * 60)),
+                elapsedSeconds: Math.max(0, Number(data.worldTime.elapsedSeconds) || 0)
+            };
+        }
+
+        if (!this.serverStartTime) return null;
+        const now = Date.now();
+        const cycleSeconds = 15 * 60;
+        const elapsedSeconds = Math.max(0, (now - this.serverStartTime) / 1000);
+        const wrappedCycleSeconds = elapsedSeconds % cycleSeconds;
+        const timeHours = (wrappedCycleSeconds / cycleSeconds) * 24;
+        return {
+            day: Math.floor(elapsedSeconds / cycleSeconds) + 1,
+            timeHours,
+            dayPhase: this.phaseFromHour(timeHours),
+            cycleSeconds,
+            elapsedSeconds
+        };
+    }
+
+    syncWorldTimeState(data = {}) {
+        const nextState = this.deriveWorldTimeState(data);
+        if (!nextState) return;
+        this.worldTimeState = nextState;
+        this.worldTimeSyncAtMs = Date.now();
+    }
+
+    getCurrentWorldTimeState() {
+        if (!this.worldTimeState) return this.deriveWorldTimeState();
+
+        const cycleSeconds = Math.max(60, Number(this.worldTimeState.cycleSeconds) || (15 * 60));
+        const syncedElapsed = Math.max(0, Number(this.worldTimeState.elapsedSeconds) || 0);
+        const elapsedSinceSync = Math.max(0, (Date.now() - (this.worldTimeSyncAtMs || Date.now())) / 1000);
+        const totalElapsed = syncedElapsed + elapsedSinceSync;
+        const wrappedCycleSeconds = totalElapsed % cycleSeconds;
+        const timeHours = (wrappedCycleSeconds / cycleSeconds) * 24;
+
+        return {
+            day: Math.floor(totalElapsed / cycleSeconds) + 1,
+            timeHours,
+            dayPhase: this.phaseFromHour(timeHours),
+            cycleSeconds,
+            elapsedSeconds: totalElapsed
+        };
+    }
+
+    updateCelestialBodies(timeState) {
+        if (!this.sunMesh || !this.moonMesh || !timeState) return;
+
+        const hour = Number(timeState.timeHours);
+        if (!Number.isFinite(hour)) return;
+
+        const centerX = 50;
+        const centerY = 22;
+        const centerZ = 50;
+        const orbitRadius = 68;
+
+        const toPosition = (phaseOffset = 0) => {
+            const t = ((((hour / 24) + phaseOffset) % 1) + 1) % 1;
+            const angle = (t * Math.PI * 2) - (Math.PI / 2);
+            return {
+                x: centerX + Math.cos(angle) * orbitRadius,
+                y: centerY + Math.sin(angle) * orbitRadius,
+                z: centerZ
+            };
+        };
+
+        const sunPos = toPosition(0);
+        const moonPos = toPosition(0.5);
+
+        this.sunMesh.position.set(sunPos.x, sunPos.y, sunPos.z);
+        this.moonMesh.position.set(moonPos.x, moonPos.y, moonPos.z);
+
+        const sunElevation = THREE.MathUtils.clamp((sunPos.y + 8) / (centerY + orbitRadius), 0, 1);
+        const moonElevation = THREE.MathUtils.clamp((moonPos.y + 8) / (centerY + orbitRadius), 0, 1);
+
+        this.sunMesh.visible = sunPos.y > -8;
+        this.moonMesh.visible = moonPos.y > -8;
+
+        if (this.sunGlow) {
+            this.sunGlow.position.set(sunPos.x, sunPos.y, sunPos.z);
+            this.sunGlow.material.opacity = 0.18 + (sunElevation * 0.82);
+            this.sunGlow.visible = this.sunMesh.visible;
+        }
+
+        this.moonMesh.material.opacity = 0.25 + (moonElevation * 0.75);
+        this.moonMesh.material.transparent = true;
+    }
+
+    applyWorldLighting(timeState) {
+        if (!this.scene || !this.ambientLight || !this.directionalLight || !timeState) return;
+
+        const hour = Number(timeState.timeHours);
+        if (!Number.isFinite(hour)) return;
+
+        this.updateCelestialBodies(timeState);
+
+        const minuteKey = Math.floor(hour * 60);
+        if (minuteKey === this.lastAppliedLightMinute) return;
+        this.lastAppliedLightMinute = minuteKey;
+
+        const t = ((hour / 24) % 1 + 1) % 1;
+        const sunCurve = Math.max(0, Math.sin(t * Math.PI));
+        const ambientIntensity = THREE.MathUtils.lerp(0.4, 3.2, sunCurve);
+        const directionalIntensity = THREE.MathUtils.lerp(0.06, 1.18, sunCurve);
+
+        this.ambientLight.intensity = ambientIntensity;
+        this.directionalLight.intensity = directionalIntensity;
+
+        const fogColor = new THREE.Color().setHSL(0.57, THREE.MathUtils.lerp(0.24, 0.5, sunCurve), THREE.MathUtils.lerp(0.1, 0.66, sunCurve));
+        this.scene.background.copy(fogColor);
+        if (this.scene.fog) {
+            this.scene.fog.color.copy(fogColor);
+        }
     }
 
     updateTickLabel() {
