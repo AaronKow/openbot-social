@@ -192,6 +192,7 @@ class OpenBotWorld {
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
         this.worldTimeState = null;
+        this.worldTimeSync = null; // Canonical world clock state from server
         this.hasSyncedWorldDay = false;
         this.cachedWorldDay = null;
         this.worldDayCacheKey = 'openbot.worldDay';
@@ -209,12 +210,6 @@ class OpenBotWorld {
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
         this.loadCachedWorldDay();
-        this.worldClockFormatter = new Intl.DateTimeFormat('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true
-        });
-        
         // API URL configuration (priority order):
         // 1. Query parameter: ?server=https://your-api.com
         // 2. config.js defaultApiUrl (set via environment or manual edit)
@@ -2791,7 +2786,9 @@ class OpenBotWorld {
         if (!this.worldTimeState) {
             this.worldTimeState = this.deriveWorldTimeState();
         }
-        this.applyWorldLighting(this.worldTimeState);
+        if (this.worldTimeState) {
+            this.applyWorldLighting(this.worldTimeState);
+        }
         const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
         const hasCachedDay = Number.isFinite(this.cachedWorldDay) && this.cachedWorldDay >= 1;
         const hasReliableDay = this.hasSyncedWorldDay || hasWorldAnchor || hasCachedDay;
@@ -2800,7 +2797,7 @@ class OpenBotWorld {
             ? String(Math.floor(dayValue)).padStart(2, '0')
             : '--';
         const phase = String(this.worldTimeState?.dayPhase || 'day');
-        const clockTime = this.worldClockFormatter.format(new Date(now));
+        const clockTime = this.formatVirtualTime(Number(this.worldTimeState?.timeHours));
         const label = `Day ${dayLabel} (${phase}) - ${clockTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
@@ -2816,54 +2813,64 @@ class OpenBotWorld {
         return 'dusk';
     }
 
-    deriveLocalClockState(nowMs = Date.now()) {
-        const localNow = new Date(nowMs);
-        const cycleSeconds = 24 * 60 * 60;
-        const timeHours = (
-            localNow.getHours() +
-            (localNow.getMinutes() / 60) +
-            (localNow.getSeconds() / 3600) +
-            (localNow.getMilliseconds() / 3600000)
-        );
+    formatVirtualTime(timeHours) {
+        if (!Number.isFinite(timeHours)) return '--:--';
+        const normalizedHours = ((((timeHours % 24) + 24) % 24));
+        const totalMinutes = Math.floor((normalizedHours * 60) + 1e-6) % (24 * 60);
+        const hour24 = Math.floor(totalMinutes / 60);
+        const minute = totalMinutes % 60;
+        const ampm = hour24 >= 12 ? 'PM' : 'AM';
+        const hour12 = (hour24 % 12) || 12;
+        return `${String(hour12).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${ampm}`;
+    }
+
+    computeWorldTimeFromSync(nowMs = Date.now()) {
+        if (!this.worldTimeSync) return null;
+        const cycleSeconds = Number(this.worldTimeSync.cycleSeconds) || (24 * 60 * 60);
+        const hoursPerSecond = 24 / cycleSeconds;
+        const elapsedSinceSyncSec = Math.max(0, (nowMs - this.worldTimeSync.syncedAtMs) / 1000);
+        const totalHours = this.worldTimeSync.baseTimeHours + (elapsedSinceSyncSec * hoursPerSecond);
+        const dayAdvance = Math.floor(totalHours / 24);
+        const wrappedHours = ((((totalHours % 24) + 24) % 24));
+        const baseDay = Number(this.worldTimeSync.baseDay);
+        const computedDay = Number.isFinite(baseDay) && baseDay >= 1
+            ? Math.floor(baseDay) + Math.max(0, dayAdvance)
+            : null;
         return {
+            day: computedDay,
             cycleSeconds,
-            timeHours,
-            dayProgress: timeHours / 24,
-            dayPhase: this.phaseFromHour(timeHours),
-            elapsedSeconds: timeHours * 60 * 60
+            timeHours: wrappedHours,
+            dayProgress: wrappedHours / 24,
+            dayPhase: this.phaseFromHour(wrappedHours),
+            elapsedSeconds: wrappedHours * 60 * 60
         };
     }
 
     deriveWorldTimeState(data = {}) {
         const now = Date.now();
-        const localClock = this.deriveLocalClockState(now);
-        const hasWorldAnchor = Number.isFinite(this.worldCreatedAt) && this.worldCreatedAt > 0;
-        const elapsedSinceWorldStartMs = hasWorldAnchor ? Math.max(0, now - this.worldCreatedAt) : 0;
-        const anchorDay = Math.floor(elapsedSinceWorldStartMs / (localClock.cycleSeconds * 1000)) + 1;
-        const fallbackDay = hasWorldAnchor ? anchorDay : (Number.isFinite(this.cachedWorldDay) ? this.cachedWorldDay : null);
         if (data.worldTime && typeof data.worldTime === 'object') {
             const fromServer = data.worldTime;
             const serverCycle = Number(fromServer.cycleSeconds);
-            if (Number.isFinite(serverCycle) && serverCycle >= 60) {
-                this.worldCycleSeconds = serverCycle;
-            }
+            const cycleSeconds = Number.isFinite(serverCycle) && serverCycle >= 60 ? serverCycle : (24 * 60 * 60);
+            this.worldCycleSeconds = cycleSeconds;
+            const serverHours = Number(fromServer.timeHours);
+            const normalizedHours = Number.isFinite(serverHours) ? ((((serverHours % 24) + 24) % 24)) : 0;
             const serverDay = Number(fromServer.day);
             const hasValidServerDay = Number.isFinite(serverDay) && serverDay >= 1;
             if (hasValidServerDay) {
                 this.hasSyncedWorldDay = true;
                 this.persistCachedWorldDay(serverDay);
             }
-            return {
-                ...fromServer,
-                day: hasValidServerDay ? Math.floor(serverDay) : fallbackDay,
-                ...localClock
+            this.worldTimeSync = {
+                baseTimeHours: normalizedHours,
+                baseDay: hasValidServerDay ? Math.floor(serverDay) : (Number.isFinite(this.cachedWorldDay) ? this.cachedWorldDay : null),
+                cycleSeconds,
+                syncedAtMs: now
             };
+            return this.computeWorldTimeFromSync(now);
         }
 
-        return {
-            day: fallbackDay,
-            ...localClock
-        };
+        return this.computeWorldTimeFromSync(now);
     }
 
     applyWorldLighting(timeState, dtSeconds = 0) {

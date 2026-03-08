@@ -768,10 +768,10 @@ function getWorldTimeState(nowMs = Date.now()) {
   const elapsedSinceWorldStartMs = Math.max(0, nowMs - worldAnchor);
   const now = new Date(nowMs);
   const timeHours = (
-    now.getHours() +
-    (now.getMinutes() / 60) +
-    (now.getSeconds() / 3600) +
-    (now.getMilliseconds() / 3600000)
+    now.getUTCHours() +
+    (now.getUTCMinutes() / 60) +
+    (now.getUTCSeconds() / 3600) +
+    (now.getUTCMilliseconds() / 3600000)
   );
   const elapsedSeconds = timeHours * 60 * 60;
   const simulatedDays = Math.floor(elapsedSinceWorldStartMs / (DAY_NIGHT_CYCLE_SECONDS * 1000));
@@ -781,7 +781,8 @@ function getWorldTimeState(nowMs = Date.now()) {
     timeHours,
     dayPhase: worldPhaseFromHour(timeHours),
     cycleSeconds: DAY_NIGHT_CYCLE_SECONDS,
-    elapsedSeconds
+    elapsedSeconds,
+    clockEpochMs: nowMs
   };
 }
 
