@@ -687,6 +687,12 @@ async function getWorldCreatedAt() {
       SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM entities
       UNION ALL
       SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM agents
+      UNION ALL
+      SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM world_objects
+      UNION ALL
+      SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM activity_summaries
+      UNION ALL
+      SELECT (EXTRACT(EPOCH FROM MIN(created_at)) * 1000)::bigint AS ts FROM entity_daily_reflections
     ) AS world_signals
     WHERE ts IS NOT NULL
   `);

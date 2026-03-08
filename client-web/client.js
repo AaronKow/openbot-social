@@ -2757,7 +2757,8 @@ class OpenBotWorld {
     loadCachedWorldDay() {
         try {
             const cached = Number(window.localStorage.getItem(this.worldDayCacheKey));
-            if (Number.isFinite(cached) && cached >= 1) {
+            // Ignore cached Day 1 to avoid sticky startup regressions from stale old logic.
+            if (Number.isFinite(cached) && cached > 1) {
                 this.cachedWorldDay = Math.floor(cached);
             }
         } catch (error) {
