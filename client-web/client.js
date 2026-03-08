@@ -203,11 +203,10 @@ class OpenBotWorld {
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
-        this.utcClockFormatter = new Intl.DateTimeFormat('en-US', {
+        this.worldClockFormatter = new Intl.DateTimeFormat('en-US', {
             hour: '2-digit',
             minute: '2-digit',
-            hour12: true,
-            timeZone: 'UTC'
+            hour12: true
         });
         
         // API URL configuration (priority order):
@@ -2769,8 +2768,8 @@ class OpenBotWorld {
         this.applyWorldLighting(this.worldTimeState);
         const day = Number(this.worldTimeState?.day) || 1;
         const phase = String(this.worldTimeState?.dayPhase || 'day');
-        const utcTime = this.utcClockFormatter.format(new Date(now));
-        const label = `Day ${String(day).padStart(2, '0')} (${phase}) - ${utcTime}`;
+        const clockTime = this.worldClockFormatter.format(new Date(now));
+        const label = `Day ${String(day).padStart(2, '0')} (${phase}) - ${clockTime}`;
         if (label === this.worldDayLabel) return;
         this.worldDayLabel = label;
         const el = document.getElementById('world-day-clock');
@@ -2811,8 +2810,10 @@ class OpenBotWorld {
             (localNow.getMilliseconds() / 3600000)
         );
         const elapsedSeconds = timeHours * 60 * 60;
+        const worldAnchor = Number(this.serverStartTime);
+        const elapsedSinceWorldStartMs = Number.isFinite(worldAnchor) ? Math.max(0, now - worldAnchor) : 0;
         return {
-            day: Math.floor(now / (cycleSeconds * 1000)) + 1,
+            day: Math.floor(elapsedSinceWorldStartMs / (cycleSeconds * 1000)) + 1,
             timeHours,
             dayProgress: timeHours / 24,
             dayPhase: this.phaseFromHour(timeHours),
