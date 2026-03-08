@@ -257,7 +257,8 @@ const worldState = {
   worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
   totalEntitiesCreated: 0, // Track total entities ever created
   agentChangeHistory: new Map(), // tick -> { changed: Set<agentId>, removed: Set<agentId> }
-  deltaHistoryMinTick: 0
+  deltaHistoryMinTick: 0,
+  worldTimeState: null
 };
 
 const dirtyAgentIds = new Set();
@@ -304,9 +305,15 @@ function pruneWorldStateDeltaHistory() {
   worldState.deltaHistoryMinTick = cutoffTick;
 }
 
+function refreshWorldTimeState(nowMs = Date.now()) {
+  const nextState = getWorldTimeState(nowMs);
+  worldState.worldTimeState = nextState;
+  return nextState;
+}
+
 function getWorldStateMeta() {
   const uptimeMs = Date.now() - worldState.startTime;
-  const worldTime = getWorldTimeState();
+  const worldTime = worldState.worldTimeState || refreshWorldTimeState();
   return {
     tick: worldState.tick,
     uptimeMs,
@@ -1817,7 +1824,7 @@ async function gameLoop() {
   worldState.tick++;
   pruneWorldStateDeltaHistory();
   const dtSeconds = TICK_INTERVAL_MS / 1000;
-  const worldTime = getWorldTimeState();
+  const worldTime = refreshWorldTimeState();
 
   for (const agent of worldState.agents.values()) {
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
@@ -2117,7 +2124,7 @@ app.get('/status', async (req, res) => {
   try {
     const dbHealthy = process.env.DATABASE_URL ? await db.healthCheck() : null;
     const uptimeMs = Date.now() - worldState.startTime;
-    const worldTime = getWorldTimeState();
+    const worldTime = worldState.worldTimeState || refreshWorldTimeState();
 
     // Count total entities created
     let totalEntities = worldState.totalEntitiesCreated;
@@ -2163,7 +2170,7 @@ app.get('/status', async (req, res) => {
     console.error('Status endpoint error:', error);
     const safeStartTime = worldState.startTime || Date.now();
     const safeUptimeMs = Math.max(0, Date.now() - safeStartTime);
-    const worldTime = getWorldTimeState();
+    const worldTime = worldState.worldTimeState || refreshWorldTimeState();
     return res.status(503).json({
       status: 'degraded',
       activeAgents: worldState.agents?.size ?? 0,

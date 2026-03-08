@@ -12,6 +12,100 @@ const RECOVERY_MOVE_DISTANCE = 10;
 const RECOVERY_TIMEOUT_MS = 1200;
 const MOVE_PROGRESS_EPSILON = 0.04;
 const MOVE_STUCK_TIMEOUT_MS = 1000;
+const SKY_UPDATE_MAX_FPS = 24;
+const CLOUD_UPDATE_MAX_FPS = 12;
+const CLOUD_TEXTURE_POOL_SIZE = 10;
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function randomRange(min, max) {
+    return min + (Math.random() * (max - min));
+}
+
+function createGlowTexture({
+    size = 256,
+    inner = 'rgba(255,245,210,0.96)',
+    mid = 'rgba(255,220,140,0.48)',
+    outer = 'rgba(255,190,90,0.0)'
+} = {}) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const center = size / 2;
+
+    const gradient = ctx.createRadialGradient(center, center, size * 0.03, center, center, size * 0.5);
+    gradient.addColorStop(0, inner);
+    gradient.addColorStop(0.38, mid);
+    gradient.addColorStop(1, outer);
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    return texture;
+}
+
+function createCloudTexture(size = 256) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const cx = size / 2;
+    const cy = size / 2;
+    const puffCount = 4 + Math.floor(Math.random() * 5);
+
+    ctx.clearRect(0, 0, size, size);
+    for (let i = 0; i < puffCount; i += 1) {
+        const radius = randomRange(size * 0.13, size * 0.24);
+        const px = cx + randomRange(-size * 0.2, size * 0.2);
+        const py = cy + randomRange(-size * 0.16, size * 0.16);
+        const alpha = randomRange(0.12, 0.3);
+        const gradient = ctx.createRadialGradient(px, py, radius * 0.16, px, py, radius);
+        gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+        gradient.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(px, py, radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    return texture;
+}
+
+function createCloudTexturePool(count = CLOUD_TEXTURE_POOL_SIZE) {
+    const pool = [];
+    for (let i = 0; i < count; i += 1) {
+        pool.push(createCloudTexture(256));
+    }
+    return pool;
+}
+
+function celestialPosition(timeHours, phaseOffsetHours = 0) {
+    const normalizedHours = ((((Number(timeHours) || 0) + phaseOffsetHours) % 24) + 24) % 24;
+    const dayProgress = normalizedHours / 24;
+    const orbitAngle = (dayProgress * Math.PI * 2) - (Math.PI / 2);
+    const elevation = Math.sin(orbitAngle);
+    const horizontalRadius = 74;
+
+    return {
+        x: 50 + (Math.cos(orbitAngle) * horizontalRadius),
+        y: 14 + (elevation * 56),
+        z: 50 + (Math.sin(orbitAngle) * horizontalRadius * 0.82),
+        elevation
+    };
+}
 
 class OpenBotWorld {
     constructor() {
@@ -31,6 +125,7 @@ class OpenBotWorld {
         this.lastChatTimestamp = 0;
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // World clock anchor (worldCreatedAt preferred, serverStartTime fallback)
+        this.worldCycleSeconds = 15 * 60;
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
@@ -96,7 +191,15 @@ class OpenBotWorld {
         this.worldDayLabel = '';
         this.worldClockMinuteKey = '';
         this.worldTimeState = null;
-        this.lastAppliedLightMinute = null;
+        this.skyUpdateAccumulator = 0;
+        this.cloudUpdateAccumulator = 0;
+        this.lastAnimationFrameMs = performance.now();
+        this.clouds = [];
+        this.cloudTexturePool = [];
+        this.cloudBounds = { minX: -30, maxX: 130, minZ: 5, maxZ: 95, minY: 42, maxY: 72 };
+        this.sunMesh = null;
+        this.moonMesh = null;
+        this.sunGlow = null;
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
@@ -149,8 +252,9 @@ class OpenBotWorld {
         this.camera.lookAt(50, 0, 50);
         
         // Renderer
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.getElementById('canvas-container').appendChild(this.renderer.domElement);
@@ -175,6 +279,8 @@ class OpenBotWorld {
         this.directionalLight.shadow.camera.top = 100;
         this.directionalLight.shadow.camera.bottom = -100;
         this.scene.add(this.directionalLight);
+        this.createSkySystem();
+        this.createCloudSystem();
         
         // Ocean floor
         this.createOceanFloor();
@@ -220,6 +326,130 @@ class OpenBotWorld {
     addDecorations() {
         this.clearDecorations();
         this.obstacles = [];
+    }
+
+    createSkySystem() {
+        this.sunMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(3.6, 24, 24),
+            new THREE.MeshBasicMaterial({ color: 0xffd777 })
+        );
+        this.moonMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(2.6, 20, 20),
+            new THREE.MeshBasicMaterial({ color: 0xd7e6ff })
+        );
+
+        this.sunGlowTexture = createGlowTexture();
+        this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: this.sunGlowTexture,
+            transparent: true,
+            opacity: 0.75,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        }));
+        this.sunGlow.scale.set(16, 16, 1);
+
+        this.scene.add(this.sunMesh);
+        this.scene.add(this.moonMesh);
+        this.scene.add(this.sunGlow);
+    }
+
+    createCloudSystem() {
+        this.cloudTexturePool = createCloudTexturePool(CLOUD_TEXTURE_POOL_SIZE);
+        const count = this.getAdaptiveCloudBudget();
+        for (let i = 0; i < count; i += 1) {
+            const cloud = this.spawnCloud(true);
+            this.clouds.push(cloud);
+            this.scene.add(cloud.sprite);
+        }
+    }
+
+    getAdaptiveCloudBudget() {
+        const cores = navigator.hardwareConcurrency || 4;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const pixels = Math.max(1, window.innerWidth * window.innerHeight * dpr * dpr);
+        const pixelFactor = clamp(1_500_000 / pixels, 0.4, 1.1);
+        const base = 56 * pixelFactor * (cores >= 8 ? 1.25 : 1);
+        return Math.max(28, Math.min(96, Math.floor(base)));
+    }
+
+    spawnCloud(initial = false) {
+        const texture = this.cloudTexturePool[Math.floor(Math.random() * this.cloudTexturePool.length)];
+        const material = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            opacity: initial ? randomRange(0.06, 0.22) : 0,
+            depthWrite: false
+        });
+        const sprite = new THREE.Sprite(material);
+        const cloud = {
+            sprite,
+            age: 0,
+            ttl: 0,
+            fadeIn: 0,
+            fadeOut: 0,
+            speed: 0,
+            drift: 0,
+            seed: 0
+        };
+        this.resetCloud(cloud, initial);
+        return cloud;
+    }
+
+    resetCloud(cloud, initial = false) {
+        cloud.age = initial ? randomRange(0, 9) : 0;
+        cloud.ttl = randomRange(32, 60);
+        cloud.fadeIn = randomRange(3, 6);
+        cloud.fadeOut = randomRange(5, 9);
+        cloud.speed = randomRange(0.9, 2.2);
+        cloud.drift = randomRange(-0.22, 0.22);
+        cloud.seed = Math.random() * Math.PI * 2;
+
+        const { minX, maxX, minY, maxY, minZ, maxZ } = this.cloudBounds;
+        cloud.sprite.position.set(
+            Math.random() > 0.5 ? randomRange(minX, 4) : randomRange(96, maxX),
+            randomRange(minY, maxY),
+            randomRange(minZ, maxZ)
+        );
+        const scale = randomRange(14, 28);
+        cloud.sprite.scale.set(scale, scale * randomRange(0.42, 0.66), 1);
+        cloud.sprite.material.opacity = initial ? randomRange(0.06, 0.22) : 0;
+
+        if (!initial && this.cloudTexturePool.length > 0) {
+            const texture = this.cloudTexturePool[Math.floor(Math.random() * this.cloudTexturePool.length)];
+            cloud.sprite.material.map = texture;
+            cloud.sprite.material.needsUpdate = true;
+        }
+    }
+
+    updateClouds(dt, daylight) {
+        if (!this.clouds.length) return;
+        const { minX, maxX, minY, maxY, minZ, maxZ } = this.cloudBounds;
+        const visibility = 0.05 + (daylight * 0.34);
+
+        for (const cloud of this.clouds) {
+            cloud.age += dt;
+            const t = cloud.age;
+            const fadeIn = cloud.fadeIn;
+            const fadeOut = cloud.fadeOut;
+            const life = cloud.ttl;
+
+            let alpha = 1;
+            if (t < fadeIn) alpha = t / Math.max(0.001, fadeIn);
+            if (t > life - fadeOut) alpha = Math.min(alpha, (life - t) / Math.max(0.001, fadeOut));
+            cloud.sprite.material.opacity = clamp(alpha, 0, 1) * visibility;
+
+            cloud.sprite.position.x += cloud.speed * dt;
+            cloud.sprite.position.z += Math.sin((t * 0.33) + cloud.seed) * cloud.drift * dt;
+            cloud.sprite.position.y = clamp(
+                cloud.sprite.position.y + (Math.sin((t * 0.22) + cloud.seed) * 0.3 * dt),
+                minY,
+                maxY
+            );
+
+            if (t >= life || cloud.sprite.position.x > maxX || cloud.sprite.position.x < minX || cloud.sprite.position.z < minZ || cloud.sprite.position.z > maxZ) {
+                this.resetCloud(cloud, false);
+            }
+        }
     }
 
 
@@ -2558,45 +2788,76 @@ class OpenBotWorld {
 
     deriveWorldTimeState(data = {}) {
         if (data.worldTime && typeof data.worldTime === 'object') {
-            return data.worldTime;
+            const fromServer = data.worldTime;
+            const serverCycle = Number(fromServer.cycleSeconds);
+            if (Number.isFinite(serverCycle) && serverCycle >= 60) {
+                this.worldCycleSeconds = serverCycle;
+            }
+            const serverHours = Number(fromServer.timeHours);
+            const normalizedHours = Number.isFinite(serverHours) ? ((((serverHours % 24) + 24) % 24)) : 0;
+            return {
+                ...fromServer,
+                timeHours: normalizedHours,
+                dayProgress: normalizedHours / 24
+            };
         }
 
         if (!this.serverStartTime) return null;
         const now = Date.now();
-        const cycleSeconds = 15 * 60;
+        const cycleSeconds = this.worldCycleSeconds;
         const elapsedSeconds = Math.max(0, (now - this.serverStartTime) / 1000);
         const wrappedCycleSeconds = elapsedSeconds % cycleSeconds;
         const timeHours = (wrappedCycleSeconds / cycleSeconds) * 24;
         return {
             day: Math.floor(elapsedSeconds / cycleSeconds) + 1,
             timeHours,
+            dayProgress: timeHours / 24,
             dayPhase: this.phaseFromHour(timeHours),
             cycleSeconds,
             elapsedSeconds
         };
     }
 
-    applyWorldLighting(timeState) {
+    applyWorldLighting(timeState, dtSeconds = 0) {
         if (!this.scene || !this.ambientLight || !this.directionalLight || !timeState) return;
 
         const hour = Number(timeState.timeHours);
         if (!Number.isFinite(hour)) return;
-        const minuteKey = Math.floor(hour * 60);
-        if (minuteKey === this.lastAppliedLightMinute) return;
-        this.lastAppliedLightMinute = minuteKey;
 
-        const t = ((hour / 24) % 1 + 1) % 1;
-        const sunCurve = Math.max(0, Math.sin(t * Math.PI));
-        const ambientIntensity = THREE.MathUtils.lerp(1.2, 3.2, sunCurve);
-        const directionalIntensity = THREE.MathUtils.lerp(0.22, 1.18, sunCurve);
+        const sun = celestialPosition(hour, 0);
+        const moon = celestialPosition(hour, 12);
+        const sunStrength = clamp(sun.elevation, 0, 1);
+        const moonStrength = clamp(moon.elevation, 0, 1);
 
-        this.ambientLight.intensity = ambientIntensity;
-        this.directionalLight.intensity = directionalIntensity;
+        if (this.sunMesh) {
+            this.sunMesh.position.set(sun.x, sun.y, sun.z);
+            this.sunMesh.visible = sun.elevation > -0.22;
+        }
+        if (this.moonMesh) {
+            this.moonMesh.position.set(moon.x, moon.y, moon.z);
+            this.moonMesh.visible = moon.elevation > -0.3;
+        }
+        if (this.sunGlow) {
+            this.sunGlow.position.set(sun.x, sun.y, sun.z);
+            this.sunGlow.visible = sun.elevation > -0.22;
+            this.sunGlow.material.opacity = 0.18 + (sunStrength * 0.8);
+        }
 
-        const fogColor = new THREE.Color().setHSL(0.57, THREE.MathUtils.lerp(0.28, 0.5, sunCurve), THREE.MathUtils.lerp(0.12, 0.66, sunCurve));
-        this.scene.background.copy(fogColor);
-        if (this.scene.fog) {
-            this.scene.fog.color.copy(fogColor);
+        this.directionalLight.position.set(sun.x, Math.max(8, sun.y), sun.z);
+        this.directionalLight.intensity = 0.1 + (sunStrength * 1.15);
+        this.ambientLight.intensity = 0.35 + (sunStrength * 2.2) + (moonStrength * 0.5);
+
+        const saturation = THREE.MathUtils.lerp(0.22, 0.52, sunStrength);
+        const lightness = THREE.MathUtils.lerp(0.09, 0.7, sunStrength);
+        const skyColor = new THREE.Color().setHSL(0.57, saturation, lightness);
+        this.scene.background.copy(skyColor);
+        if (this.scene.fog) this.scene.fog.color.copy(skyColor);
+
+        this.cloudUpdateAccumulator += dtSeconds;
+        if (this.cloudUpdateAccumulator >= (1 / CLOUD_UPDATE_MAX_FPS)) {
+            const cloudStep = this.cloudUpdateAccumulator;
+            this.cloudUpdateAccumulator = 0;
+            this.updateClouds(cloudStep, sunStrength);
         }
     }
 
@@ -2908,6 +3169,9 @@ class OpenBotWorld {
     animate() {
         requestAnimationFrame(() => this.animate());
         const nowMs = Date.now();
+        const frameNow = performance.now();
+        const dt = Math.min(0.1, Math.max(0, (frameNow - this.lastAnimationFrameMs) / 1000));
+        this.lastAnimationFrameMs = frameNow;
 
         // Update keyboard movement
         this.updateKeyboardMovement();
@@ -2945,6 +3209,17 @@ class OpenBotWorld {
         this.agents.forEach((agent) => {
             this.applyAgentAnimationFrame(agent, nowMs);
         });
+
+        this.skyUpdateAccumulator += dt;
+        if (this.skyUpdateAccumulator >= (1 / SKY_UPDATE_MAX_FPS)) {
+            const skyStep = this.skyUpdateAccumulator;
+            this.skyUpdateAccumulator = 0;
+            const timeState = this.deriveWorldTimeState();
+            if (timeState) {
+                this.worldTimeState = timeState;
+                this.applyWorldLighting(timeState, skyStep);
+            }
+        }
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
