@@ -1902,7 +1902,7 @@ class OpenBotWorld {
         this.updateWorldClockAnchorFromPayload(data);
         this.worldTimeState = this.deriveWorldTimeState(data);
         this.applyWorldLighting(this.worldTimeState);
-        this.updateWorldClockLabel();
+        this.updateWorldClockLabel(true);
         if (data.totalEntitiesCreated !== undefined) {
             this.totalEntitiesCreated = data.totalEntitiesCreated;
         }
@@ -2778,10 +2778,10 @@ class OpenBotWorld {
         }
     }
 
-    updateWorldClockLabel() {
+    updateWorldClockLabel(force = false) {
         const now = Date.now();
         const minuteKey = Math.floor(now / 60_000);
-        if (minuteKey === this.worldClockMinuteKey) return;
+        if (!force && minuteKey === this.worldClockMinuteKey) return;
 
         this.worldClockMinuteKey = minuteKey;
         if (!this.worldTimeState) {
