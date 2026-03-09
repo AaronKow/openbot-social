@@ -197,6 +197,9 @@ const AGENT_ALGAE_CONSUME_THRESHOLD = Number(process.env.AGENT_ALGAE_CONSUME_THR
 const ALGAE_PALLET_RADIUS = Number(process.env.ALGAE_PALLET_RADIUS || 0.95);
 const ALGAE_PALLET_ENERGY_PER_SERVE = Number(process.env.ALGAE_PALLET_ENERGY_PER_SERVE || 24);
 const ALGAE_PALLET_MAX_SERVES = Math.max(1, Math.floor(Number(process.env.ALGAE_PALLET_MAX_SERVES || 3)));
+const HARVEST_INTERACTION_BUFFER = Number(process.env.HARVEST_INTERACTION_BUFFER || 1.2);
+const MAP_EXPANSION_MAX_TILES = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_MAX_TILES || 500)));
+const MAP_EXPANSION_COOLDOWN_TICKS = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_COOLDOWN_TICKS || (TICK_RATE * 25))));
 const SKILL_DEFS = Object.freeze({
   scout: { label: 'Scout', xpPerLevel: 40, maxLevel: 10, cooldownSec: 10 },
   forage: { label: 'Forage', xpPerLevel: 35, maxLevel: 10, cooldownSec: 8 },
@@ -216,7 +219,9 @@ const SKILL_ACTION_MAP = Object.freeze({
   defend: 'shellGuard',
   guard: 'shellGuard',
   wait: 'builder',
-  build: 'builder'
+  build: 'builder',
+  harvest: 'forage',
+  expand_map: 'builder'
 });
 const SKILL_ACTION_XP = Object.freeze({
   move: 2,
@@ -230,7 +235,9 @@ const SKILL_ACTION_XP = Object.freeze({
   defend: 4,
   guard: 4,
   wait: 1,
-  build: 5
+  build: 5,
+  harvest: 4,
+  expand_map: 8
 });
 
 function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
@@ -251,6 +258,8 @@ function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
 const worldState = {
   agents: new Map(), // agentId -> agent data
   objects: new Map(), // objectId -> object data
+  expansionTiles: [], // shared 1x1 map growth tiles
+  mapExpansionLevel: 0,
   chatMessages: [], // Recent chat messages
   tick: 0,
   startTime: Date.now(), // Server start time for uptime calculation
@@ -322,7 +331,9 @@ function getWorldStateMeta() {
     worldCreatedAt: worldState.worldCreatedAt,
     totalEntitiesCreated: worldState.totalEntitiesCreated,
     worldTime,
-    objects: Array.from(worldState.objects.values())
+    objects: Array.from(worldState.objects.values()),
+    expansionTiles: worldState.expansionTiles,
+    mapExpansionLevel: worldState.mapExpansionLevel
   };
 }
 
@@ -602,6 +613,8 @@ class Agent {
     this.updatedAtTick = 0;
     this.skills = createDefaultSkills();
     this.skillsNormalized = true;
+    this.inventory = createDefaultInventory();
+    this.expansionCooldownUntilTick = 0;
     this.energy = AGENT_ENERGY_MAX;
     this.sleeping = false;
     this.lastEnergyEventAt = 0;
@@ -622,6 +635,8 @@ class Agent {
       numericId: this.numericId,
       updatedAtTick: this.updatedAtTick,
       skills: this.skills,
+      inventory: this.inventory,
+      expansionCooldownUntilTick: this.expansionCooldownUntilTick,
       energy: this.energy,
       sleeping: this.sleeping
     };
@@ -634,6 +649,14 @@ function createDefaultSkills() {
     skills[skillId] = { level: 1, xp: 0, cooldown: 0 };
   }
   return skills;
+}
+
+function createDefaultInventory() {
+  return {
+    rock: 0,
+    kelp: 0,
+    seaweed: 0
+  };
 }
 
 function ensureAgentSkills(agent) {
@@ -651,6 +674,18 @@ function ensureAgentSkills(agent) {
   }
 
   agent.skillsNormalized = true;
+}
+
+function ensureAgentInventory(agent) {
+  if (!agent.inventory || typeof agent.inventory !== 'object') {
+    agent.inventory = createDefaultInventory();
+  }
+
+  for (const key of ['rock', 'kelp', 'seaweed']) {
+    agent.inventory[key] = Math.max(0, Math.floor(Number(agent.inventory[key]) || 0));
+  }
+
+  agent.expansionCooldownUntilTick = Math.max(0, Math.floor(Number(agent.expansionCooldownUntilTick) || 0));
 }
 
 function trainAgentSkill(agent, actionType) {
@@ -750,11 +785,14 @@ function normalizeRuntimeSkillPayload(skill) {
 function buildRuntimeStatsPayload(agent) {
   if (!agent || typeof agent !== 'object') return null;
   ensureAgentSkills(agent);
+  ensureAgentInventory(agent);
 
   return {
     energy: clampEnergy(agent.energy),
     sleeping: Boolean(agent.sleeping),
     capturedAt: Date.now(),
+    inventory: { ...agent.inventory },
+    expansionCooldownUntilTick: Math.max(0, Math.floor(Number(agent.expansionCooldownUntilTick) || 0)),
     skills: {
       scout: normalizeRuntimeSkillPayload(agent.skills?.scout),
       forage: normalizeRuntimeSkillPayload(agent.skills?.forage),
@@ -1040,8 +1078,14 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
     const agent = getOwnedAgentOrReject(req, res, agentId);
     if (!agent) return;
 
-    agent.lastAction = action;
-    trainAgentSkill(agent, action?.type || action);
+    const actionType = typeof action === 'object' && action && action.type ? String(action.type) : String(action || '');
+    if (typeof action === 'object' && action && action.type) {
+      applyQueueAction(agent, action);
+    } else {
+      agent.lastAction = action;
+      trainAgentSkill(agent, actionType);
+      markAgentUpdated(agent);
+    }
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
     
@@ -1139,6 +1183,131 @@ function findNearestAvailableAlgaePallet(agent) {
   return { pallet: nearest, distance: nearestDistance };
 }
 
+function inventoryHasExpandCost(inventory) {
+  if (!inventory || typeof inventory !== 'object') return false;
+  return ['rock', 'kelp', 'seaweed'].every((key) => Number(inventory[key] || 0) >= 1);
+}
+
+function deductExpandCost(inventory) {
+  for (const key of ['rock', 'kelp', 'seaweed']) {
+    inventory[key] = Math.max(0, Math.floor(Number(inventory[key] || 0) - 1));
+  }
+}
+
+function findNearestHarvestableObject(agent, requestedType = null, requestedObjectId = null) {
+  const requested = requestedType ? String(requestedType).trim().toLowerCase() : null;
+  const allowed = new Set(['rock', 'kelp', 'seaweed']);
+  if (requested && !allowed.has(requested)) return { object: null, distance: Number.POSITIVE_INFINITY };
+
+  if (requestedObjectId) {
+    const object = worldState.objects.get(requestedObjectId);
+    if (!object) return { object: null, distance: Number.POSITIVE_INFINITY };
+    if (!allowed.has(object.type)) return { object: null, distance: Number.POSITIVE_INFINITY };
+    if (requested && object.type !== requested) return { object: null, distance: Number.POSITIVE_INFINITY };
+    return {
+      object,
+      distance: distance2D(agent.position, object.position)
+    };
+  }
+
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const object of worldState.objects.values()) {
+    if (!allowed.has(object.type)) continue;
+    if (requested && object.type !== requested) continue;
+    const distance = distance2D(agent.position, object.position);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = object;
+    }
+  }
+  return { object: nearest, distance: nearestDistance };
+}
+
+function tileKey(x, z) {
+  return `${x},${z}`;
+}
+
+function hasExpansionTileAt(x, z) {
+  return worldState.expansionTiles.some((tile) => tile.x === x && tile.z === z);
+}
+
+function isBaseWorldTile(x, z) {
+  return x >= 0 && x <= WORLD_SIZE.x && z >= 0 && z <= WORLD_SIZE.y;
+}
+
+function hasGroundTileAt(x, z) {
+  return isBaseWorldTile(x, z) || hasExpansionTileAt(x, z);
+}
+
+function hasAdjacentGroundTile(x, z) {
+  const offsets = [
+    [1, 0], [-1, 0], [0, 1], [0, -1]
+  ];
+  return offsets.some(([dx, dz]) => hasGroundTileAt(x + dx, z + dz));
+}
+
+function chooseExpansionTileForAgent(agent, preferred = null) {
+  const candidates = [];
+
+  if (preferred && Number.isFinite(Number(preferred.x)) && Number.isFinite(Number(preferred.z))) {
+    candidates.push({
+      x: Math.round(Number(preferred.x)),
+      z: Math.round(Number(preferred.z))
+    });
+  }
+
+  const originX = Math.round(Number(agent.position?.x) || 0);
+  const originZ = Math.round(Number(agent.position?.z) || 0);
+  for (let ring = 0; ring <= 5; ring++) {
+    for (let dx = -ring; dx <= ring; dx++) {
+      for (let dz = -ring; dz <= ring; dz++) {
+        if (Math.abs(dx) + Math.abs(dz) !== ring) continue;
+        candidates.push({ x: originX + dx, z: originZ + dz });
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const { x, z } = candidate;
+    if (isBaseWorldTile(x, z)) continue;
+    if (hasExpansionTileAt(x, z)) continue;
+    if (!hasAdjacentGroundTile(x, z)) continue;
+    return candidate;
+  }
+
+  return null;
+}
+
+function addExpansionTile(agent, preferred = null) {
+  if (worldState.expansionTiles.length >= MAP_EXPANSION_MAX_TILES) {
+    return { ok: false, reason: 'max_tiles_reached' };
+  }
+
+  const selected = chooseExpansionTileForAgent(agent, preferred);
+  if (!selected) {
+    return { ok: false, reason: 'no_valid_adjacent_tile' };
+  }
+
+  const tile = {
+    id: `expansion-${uuidv4()}`,
+    x: selected.x,
+    z: selected.z,
+    ownerAgentId: agent.id,
+    ownerEntityId: agent.entityId || null,
+    createdAt: Date.now(),
+    tick: worldState.tick
+  };
+
+  worldState.expansionTiles.push(tile);
+  if (worldState.expansionTiles.length > MAP_EXPANSION_MAX_TILES) {
+    worldState.expansionTiles = worldState.expansionTiles.slice(-MAP_EXPANSION_MAX_TILES);
+  }
+  worldState.mapExpansionLevel = worldState.expansionTiles.length;
+
+  return { ok: true, tile };
+}
+
 function applyAgentEnergyTick(agent, dtSeconds, worldPhase = 'day') {
   if (!agent) return;
 
@@ -1210,6 +1379,7 @@ function buildDeterministicNearbyTarget(agent, targetAgent) {
 
 function applyQueueAction(agent, action) {
   if (!agent || !action) return;
+  ensureAgentInventory(agent);
 
   if (agent.sleeping) {
     agent.lastAction = {
@@ -1335,6 +1505,99 @@ function applyQueueAction(agent, action) {
     agent.state = 'emoting';
     agent.lastAction = emotePayload;
     finishAction('emote');
+    return;
+  }
+
+  if (action.type === 'harvest') {
+    const { object, distance } = findNearestHarvestableObject(agent, action.resourceType, action.objectId);
+    if (!object) {
+      agent.lastAction = {
+        type: 'harvest',
+        skipped: true,
+        reason: 'resource_not_found'
+      };
+      finishAction('harvest');
+      return;
+    }
+
+    const interactionRange = getObjectRadius(object.type, object.data) + HARVEST_INTERACTION_BUFFER;
+    if (distance > interactionRange) {
+      agent.lastAction = {
+        type: 'harvest',
+        skipped: true,
+        reason: 'resource_out_of_range',
+        targetObjectId: object.id
+      };
+      finishAction('harvest');
+      return;
+    }
+
+    const harvestedType = object.type;
+    agent.inventory[harvestedType] = Math.max(0, Math.floor(Number(agent.inventory[harvestedType]) || 0)) + 1;
+    worldState.objects.delete(object.id);
+    if (process.env.DATABASE_URL) {
+      db.deleteWorldObject(object.id).catch((error) => {
+        console.error('Failed deleting harvested world object:', error);
+      });
+    }
+    agent.state = 'acting';
+    agent.lastAction = {
+      type: 'harvest',
+      resourceType: harvestedType,
+      objectId: object.id,
+      inventory: { ...agent.inventory }
+    };
+    finishAction('harvest');
+    return;
+  }
+
+  if (action.type === 'expand_map') {
+    if (worldState.tick < agent.expansionCooldownUntilTick) {
+      agent.lastAction = {
+        type: 'expand_map',
+        skipped: true,
+        reason: 'cooldown_active',
+        cooldownUntilTick: agent.expansionCooldownUntilTick
+      };
+      finishAction('expand_map');
+      return;
+    }
+
+    if (!inventoryHasExpandCost(agent.inventory)) {
+      agent.lastAction = {
+        type: 'expand_map',
+        skipped: true,
+        reason: 'insufficient_inventory',
+        inventory: { ...agent.inventory }
+      };
+      finishAction('expand_map');
+      return;
+    }
+
+    const placement = addExpansionTile(agent, {
+      x: action.x,
+      z: action.z
+    });
+    if (!placement.ok) {
+      agent.lastAction = {
+        type: 'expand_map',
+        skipped: true,
+        reason: placement.reason || 'placement_failed'
+      };
+      finishAction('expand_map');
+      return;
+    }
+
+    deductExpandCost(agent.inventory);
+    agent.expansionCooldownUntilTick = worldState.tick + MAP_EXPANSION_COOLDOWN_TICKS;
+    agent.state = 'acting';
+    agent.lastAction = {
+      type: 'expand_map',
+      tile: placement.tile,
+      inventory: { ...agent.inventory },
+      cooldownUntilTick: agent.expansionCooldownUntilTick
+    };
+    finishAction('expand_map');
     return;
   }
 
@@ -1873,6 +2136,7 @@ async function gameLoop() {
   const worldTime = refreshWorldTimeState();
 
   for (const agent of worldState.agents.values()) {
+    ensureAgentInventory(agent);
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
     applyAgentEnergyTick(agent, dtSeconds, worldTime.dayPhase);
     markAgentUpdated(agent);
@@ -2405,11 +2669,17 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
       return res.json({
         success: true,
         entityId,
+        tick: worldState.tick,
         online: true,
         agentId: onlineAgent.id,
         state: onlineAgent.state || 'idle',
         lastAction,
-        runtime: buildRuntimeStatsPayload(onlineAgent)
+        runtime: buildRuntimeStatsPayload(onlineAgent),
+        expansion: {
+          mapExpansionLevel: worldState.mapExpansionLevel,
+          expansionTilesCount: worldState.expansionTiles.length,
+          maxTiles: MAP_EXPANSION_MAX_TILES
+        }
       });
     }
 
@@ -2421,11 +2691,17 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
     return res.json({
       success: true,
       entityId,
+      tick: worldState.tick,
       online: false,
       agentId: null,
       state: 'offline',
       lastAction: null,
-      runtime: null
+      runtime: null,
+      expansion: {
+        mapExpansionLevel: worldState.mapExpansionLevel,
+        expansionTilesCount: worldState.expansionTiles.length,
+        maxTiles: MAP_EXPANSION_MAX_TILES
+      }
     });
   } catch (error) {
     console.error('Error fetching runtime stats:', error);

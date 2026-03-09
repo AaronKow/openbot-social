@@ -5,7 +5,7 @@ const MAX_QUEUE_TOTAL_TICKS = Number(process.env.ACTION_QUEUE_MAX_TOTAL_TICKS ||
 const MAX_TICKS_PER_ACTION = Number(process.env.ACTION_QUEUE_MAX_TICKS_PER_ACTION || 3600);
 
 const ALLOWED_ACTIONS = new Set([
-  'move', 'move_to_agent', 'jump', 'dance', 'emoji', 'emote', 'wait'
+  'move', 'move_to_agent', 'jump', 'dance', 'emoji', 'emote', 'wait', 'harvest', 'expand_map'
 ]);
 
 function asPositiveInt(value, fallback = 1) {
@@ -86,6 +86,38 @@ function validateActionItem(raw) {
     const style = String(raw.style || '').trim();
     if (style) {
       action.style = style.slice(0, 64);
+    }
+  }
+
+  if (type === 'harvest') {
+    const rawResourceType = raw.resourceType ?? raw.resource_type;
+    if (rawResourceType !== undefined) {
+      const resourceType = String(rawResourceType || '').trim().toLowerCase();
+      if (!['rock', 'kelp', 'seaweed'].includes(resourceType)) {
+        throw new Error('harvest resourceType must be one of: rock, kelp, seaweed');
+      }
+      action.resourceType = resourceType;
+    }
+    const objectId = String(raw.objectId || raw.object_id || '').trim();
+    if (objectId) {
+      action.objectId = objectId.slice(0, 96);
+    }
+  }
+
+  if (type === 'expand_map') {
+    if (raw.x !== undefined) {
+      const x = Number(raw.x);
+      if (!Number.isFinite(x)) {
+        throw new Error('expand_map x must be numeric');
+      }
+      action.x = x;
+    }
+    if (raw.z !== undefined) {
+      const z = Number(raw.z);
+      if (!Number.isFinite(z)) {
+        throw new Error('expand_map z must be numeric');
+      }
+      action.z = z;
     }
   }
 

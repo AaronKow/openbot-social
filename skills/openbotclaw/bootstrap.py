@@ -452,9 +452,18 @@ def run_agent(hub, name: str, personality: str):
     WORLD_SCAN_INTERVAL_SEC = 7.0
     RUNTIME_SCAN_INTERVAL_SEC = 2.5
     GOAL_REFRESH_SEC = 35.0
+    EXPAND_URGE_BASE = 0.35
     pending_mentions = []
     pending_welcomes = []
-    latest_runtime = {"energy": 100.0, "sleeping": False, "state": "idle"}
+    latest_runtime = {
+        "energy": 100.0,
+        "sleeping": False,
+        "state": "idle",
+        "inventory": {"rock": 0, "kelp": 0, "seaweed": 0},
+        "expansionCooldownUntilTick": 0,
+        "tick": 0,
+        "mapExpansionLevel": 0,
+    }
     known_objects = []
     active_goal = None
     last_goal_refresh = 0.0
@@ -520,18 +529,28 @@ def run_agent(hub, name: str, personality: str):
         if now_ts - timers["last_runtime_scan"] < RUNTIME_SCAN_INTERVAL_SEC:
             return
         timers["last_runtime_scan"] = now_ts
-        if not hub.agent_id or not getattr(hub, "session", None):
+        if not getattr(hub, "session", None):
             return
         try:
             response = hub.session.get(
-                f"{hub.url}/agent/{hub.agent_id}",
+                f"{hub.url}/entity/{hub.entity_id or name}/runtime-stats",
                 timeout=hub.connection_timeout
             )
             response.raise_for_status()
             payload = response.json() or {}
-            latest_runtime["energy"] = float(payload.get("energy", latest_runtime["energy"]))
-            latest_runtime["sleeping"] = bool(payload.get("sleeping", latest_runtime["sleeping"]))
+            runtime = payload.get("runtime") or {}
+            latest_runtime["energy"] = float(runtime.get("energy", latest_runtime["energy"]))
+            latest_runtime["sleeping"] = bool(runtime.get("sleeping", latest_runtime["sleeping"]))
             latest_runtime["state"] = payload.get("state", latest_runtime["state"])
+            latest_runtime["inventory"] = runtime.get("inventory") or latest_runtime["inventory"]
+            latest_runtime["expansionCooldownUntilTick"] = int(
+                runtime.get("expansionCooldownUntilTick", latest_runtime["expansionCooldownUntilTick"]) or 0
+            )
+            latest_runtime["tick"] = int(payload.get("tick", latest_runtime["tick"]) or latest_runtime["tick"] or 0)
+            expansion = payload.get("expansion") or {}
+            latest_runtime["mapExpansionLevel"] = int(
+                expansion.get("mapExpansionLevel", latest_runtime["mapExpansionLevel"]) or 0
+            )
         except Exception:
             # Keep previous runtime values on transient failures.
             return
@@ -590,6 +609,55 @@ def run_agent(hub, name: str, personality: str):
                 nearest_dist = dist
         return nearest
 
+    def find_nearest_resource(pos, resource_type: str):
+        nearest = None
+        nearest_dist = None
+        for obj in known_objects:
+            if obj.get("type") != resource_type:
+                continue
+            o_pos = obj.get("position") or {}
+            ox = float(o_pos.get("x", 0))
+            oz = float(o_pos.get("z", 0))
+            dist = math.sqrt((ox - pos["x"]) ** 2 + (oz - pos["z"]) ** 2)
+            if nearest_dist is None or dist < nearest_dist:
+                nearest = {
+                    "id": obj.get("id"),
+                    "x": ox,
+                    "z": oz,
+                    "distance": dist,
+                }
+                nearest_dist = dist
+        return nearest
+
+    def missing_materials():
+        inv = latest_runtime.get("inventory") or {}
+        needed = []
+        for key in ["rock", "kelp", "seaweed"]:
+            if int(inv.get(key, 0) or 0) < 1:
+                needed.append(key)
+        return needed
+
+    def submit_queue_action(action_payload: dict) -> bool:
+        if not getattr(hub, "session", None):
+            return False
+        entity = hub.entity_id or name
+        if not entity:
+            return False
+        try:
+            response = hub.session.post(
+                f"{hub.url}/entity/{entity}/action-queue",
+                json={
+                    "mode": "replace",
+                    "actions": [{**action_payload, "requiredTicks": 1}],
+                },
+                timeout=hub.connection_timeout
+            )
+            if response.status_code >= 400:
+                return False
+            return True
+        except Exception:
+            return False
+
     def compute_shelter_point(pos, nearby_agents):
         # Shelter heuristic: drift away from local crowd center.
         close = [a for a in nearby_agents if float(a.get("distance", 999)) <= 14.0]
@@ -615,8 +683,14 @@ def run_agent(hub, name: str, personality: str):
             tx, tz = active_goal.get("target", (pos["x"], pos["z"]))
             if math.sqrt((tx - pos["x"]) ** 2 + (tz - pos["z"]) ** 2) < 2.2:
                 active_goal = None
-        if active_goal and active_goal.get("type") == "forage":
-            if energy >= ENERGY_RECOVERY:
+        if active_goal and active_goal.get("type") == "collect_material":
+            missing = missing_materials()
+            if not missing:
+                active_goal = None
+            elif active_goal.get("resourceType") and active_goal.get("resourceType") not in missing:
+                active_goal = None
+        if active_goal and active_goal.get("type") == "expand_map":
+            if missing_materials():
                 active_goal = None
         if active_goal and active_goal.get("type") == "socialize":
             if not nearby_social:
@@ -631,9 +705,36 @@ def run_agent(hub, name: str, personality: str):
 
         # Goal generation is contextual, not hard-scripted.
         candidates = []
+        missing = missing_materials()
+        expansion_cooldown_until = int(latest_runtime.get("expansionCooldownUntilTick", 0) or 0)
+        now_tick = int(latest_runtime.get("tick", 0) or 0)
+        expansion_ready = now_tick >= expansion_cooldown_until
+
+        if not missing and energy >= ENERGY_RECOVERY and expansion_ready:
+            crowd_pressure = len([a for a in nearby_social if float(a.get("distance", 999)) <= 20.0])
+            if random.random() < min(0.95, EXPAND_URGE_BASE + (crowd_pressure * 0.08)):
+                candidates.append({
+                    "type": "expand_map",
+                    "label": "expand shared map by 1x1 tile",
+                    "created_at": now_ts
+                })
+
+        if missing and energy >= ENERGY_LOW:
+            target_type = random.choice(missing)
+            nearest_resource = find_nearest_resource(pos, target_type)
+            if nearest_resource:
+                candidates.append({
+                    "type": "collect_material",
+                    "label": f"collect {target_type} for map expansion",
+                    "resourceType": target_type,
+                    "targetObjectId": nearest_resource.get("id"),
+                    "target": (nearest_resource["x"], nearest_resource["z"]),
+                    "created_at": now_ts
+                })
+
         if nearest_algae and energy < ENERGY_RECOVERY:
             candidates.append({
-                "type": "forage",
+                "type": "forage_energy",
                 "label": "recharge energy at algae pallet",
                 "target": (nearest_algae[0], nearest_algae[1]),
                 "created_at": now_ts
@@ -676,7 +777,7 @@ def run_agent(hub, name: str, personality: str):
         return "explore"
 
     def choose_and_act(now_ts: float):
-        nonlocal current_mode
+        nonlocal current_mode, active_goal
         pos = hub.get_position()
         energy = float(latest_runtime.get("energy", 100.0))
         sleeping = bool(latest_runtime.get("sleeping", False))
@@ -733,11 +834,41 @@ def run_agent(hub, name: str, personality: str):
         if mode == "work":
             goal = active_goal or {}
             goal_type = goal.get("type")
-            if goal_type == "forage":
+            if goal_type == "forage_energy":
                 target = nearest_algae
                 if target and can_move:
                     move_towards_point(pos, target[0], target[1], max_step=5.0)
                     return
+            elif goal_type == "collect_material":
+                resource_type = goal.get("resourceType")
+                target = find_nearest_resource(pos, resource_type) if resource_type else None
+                if target and target.get("distance", 999) > 2.3 and can_move:
+                    move_towards_point(pos, target["x"], target["z"], max_step=4.8)
+                    return
+                if resource_type:
+                    queued = submit_queue_action({
+                        "type": "harvest",
+                        "resourceType": resource_type,
+                        "objectId": target.get("id") if target else goal.get("targetObjectId")
+                    })
+                    if queued:
+                        timers["last_move"] = time.time()
+                        return
+            elif goal_type == "expand_map":
+                missing = missing_materials()
+                if missing:
+                    active_goal = None
+                else:
+                    cooldown_until = int(latest_runtime.get("expansionCooldownUntilTick", 0) or 0)
+                    now_tick = int(latest_runtime.get("tick", 0) or 0)
+                    if now_tick >= cooldown_until:
+                        queued = submit_queue_action({"type": "expand_map"})
+                        if queued:
+                            timers["last_move"] = time.time()
+                            if can_chat and random.random() < 0.45:
+                                hub.chat("expanding the seabed by one tile 🌍")
+                                timers["last_chat"] = time.time()
+                            return
             elif goal_type == "socialize":
                 target_name = goal.get("target_name")
                 if target_name and can_move:
