@@ -15,6 +15,7 @@ const MOVE_STUCK_TIMEOUT_MS = 1000;
 const SKY_UPDATE_MAX_FPS = 24;
 const CLOUD_UPDATE_MAX_FPS = 12;
 const CLOUD_TEXTURE_POOL_SIZE = 10;
+const GROUND_Y = 0;
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -50,6 +51,73 @@ function createGlowTexture({
     texture.minFilter = THREE.LinearMipmapLinearFilter;
     texture.magFilter = THREE.LinearFilter;
     return texture;
+}
+
+function createMoonlightTexture({
+    size = 512,
+    coreAlpha = 0.42,
+    midAlpha = 0.24,
+    edgeAlpha = 0.0,
+    breakup = 0.08
+} = {}) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const cx = size / 2;
+    const cy = size / 2;
+    const maxR = size * 0.5;
+
+    ctx.clearRect(0, 0, size, size);
+    const gradient = ctx.createRadialGradient(cx, cy, size * 0.07, cx, cy, maxR);
+    gradient.addColorStop(0, `rgba(226, 242, 255, ${coreAlpha})`);
+    gradient.addColorStop(0.34, `rgba(191, 224, 255, ${midAlpha})`);
+    gradient.addColorStop(0.74, `rgba(164, 208, 255, ${edgeAlpha + 0.06})`);
+    gradient.addColorStop(1, `rgba(150, 200, 255, ${edgeAlpha})`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+
+    // Add slight breakup to avoid a perfectly smooth projected circle.
+    ctx.globalCompositeOperation = 'destination-in';
+    const grain = ctx.createImageData(size, size);
+    const data = grain.data;
+    for (let i = 0; i < data.length; i += 4) {
+        const x = ((i / 4) % size) - cx;
+        const y = Math.floor((i / 4) / size) - cy;
+        const d = Math.min(1, Math.sqrt((x * x) + (y * y)) / maxR);
+        const mask = 1 - d;
+        const n = (Math.random() * 2 - 1) * breakup;
+        const alpha = Math.max(0, Math.min(1, mask + n));
+        data[i] = 255;
+        data[i + 1] = 255;
+        data[i + 2] = 255;
+        data[i + 3] = Math.round(alpha * 255);
+    }
+    ctx.putImageData(grain, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    return texture;
+}
+
+const BEAM_UP = new THREE.Vector3(0, 1, 0);
+const BEAM_VECTOR = new THREE.Vector3();
+
+function positionBeamBetween(mesh, start, end, maxLength = 44) {
+    if (!mesh || !start || !end) return;
+    BEAM_VECTOR.subVectors(end, start);
+    const distance = BEAM_VECTOR.length();
+    if (distance <= 0.0001) return;
+
+    const length = Math.min(maxLength, distance);
+    BEAM_VECTOR.normalize();
+    mesh.position.copy(start).addScaledVector(BEAM_VECTOR, length * 0.5);
+    mesh.quaternion.setFromUnitVectors(BEAM_UP, BEAM_VECTOR);
+    mesh.scale.y = length / maxLength;
 }
 
 function createCloudTexture(size = 256) {
@@ -206,6 +274,18 @@ class OpenBotWorld {
         this.sunMesh = null;
         this.moonMesh = null;
         this.sunGlow = null;
+        this.moonDisc = null;
+        this.moonDiscCore = null;
+        this.moonBeam = null;
+        this.sunDisc = null;
+        this.sunDiscCore = null;
+        this.moonLight = null;
+        this.moonDiscTexture = null;
+        this.moonCoreTexture = null;
+        this._moonTargetVec = new THREE.Vector3();
+        this._sunTargetVec = new THREE.Vector3();
+        this._moonPosVec = new THREE.Vector3();
+        this._sunPosVec = new THREE.Vector3();
         this.ignoredAnimationStateLogThrottleMs = 60_000;
         this.ignoredAnimationStateLogs = new Map(); // "action|state" -> lastLogMs
         this.showAnimationDiagnosticsInAgentList = new URLSearchParams(window.location.search).get('animDebug') === '1';
@@ -329,6 +409,19 @@ class OpenBotWorld {
     }
 
     createSkySystem() {
+        this.moonDiscTexture = createMoonlightTexture({
+            coreAlpha: 0.48,
+            midAlpha: 0.3,
+            edgeAlpha: 0,
+            breakup: 0.06
+        });
+        this.moonCoreTexture = createMoonlightTexture({
+            coreAlpha: 0.34,
+            midAlpha: 0.14,
+            edgeAlpha: 0,
+            breakup: 0.04
+        });
+
         this.sunMesh = new THREE.Mesh(
             new THREE.SphereGeometry(3.6, 24, 24),
             new THREE.MeshBasicMaterial({ color: 0xffd777 })
@@ -348,9 +441,94 @@ class OpenBotWorld {
         }));
         this.sunGlow.scale.set(16, 16, 1);
 
+        this.moonDisc = new THREE.Mesh(
+            new THREE.CircleGeometry(44, 72),
+            new THREE.MeshBasicMaterial({
+                map: this.moonDiscTexture,
+                color: 0xb7dbff,
+                transparent: true,
+                opacity: 0,
+                depthWrite: false,
+                blending: THREE.NormalBlending
+            })
+        );
+        this.moonDisc.rotation.x = -Math.PI / 2;
+        this.moonDisc.position.set(50, 0.04, 50);
+
+        this.moonDiscCore = new THREE.Mesh(
+            new THREE.CircleGeometry(28, 64),
+            new THREE.MeshBasicMaterial({
+                map: this.moonCoreTexture,
+                color: 0xdcf0ff,
+                transparent: true,
+                opacity: 0,
+                depthWrite: false,
+                blending: THREE.NormalBlending
+            })
+        );
+        this.moonDiscCore.rotation.x = -Math.PI / 2;
+        this.moonDiscCore.position.set(50, 0.055, 50);
+
+        this.moonBeam = new THREE.Mesh(
+            new THREE.CylinderGeometry(10, 18, 44, 40, 1, true),
+            new THREE.MeshBasicMaterial({
+                color: 0xaed8ff,
+                transparent: true,
+                opacity: 0,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                clippingPlanes: [new THREE.Plane(new THREE.Vector3(0, -1, 0), GROUND_Y)]
+            })
+        );
+        this.moonBeam.position.set(50, 22, 50);
+
+        this.sunDisc = new THREE.Mesh(
+            new THREE.CircleGeometry(36, 68),
+            new THREE.MeshBasicMaterial({
+                map: this.moonDiscTexture,
+                color: 0xffd986,
+                transparent: true,
+                opacity: 0,
+                depthWrite: false,
+                blending: THREE.NormalBlending
+            })
+        );
+        this.sunDisc.rotation.x = -Math.PI / 2;
+        this.sunDisc.position.set(50, 0.05, 50);
+
+        this.sunDiscCore = new THREE.Mesh(
+            new THREE.CircleGeometry(24, 60),
+            new THREE.MeshBasicMaterial({
+                map: this.moonCoreTexture,
+                color: 0xfff2bd,
+                transparent: true,
+                opacity: 0,
+                depthWrite: false,
+                blending: THREE.NormalBlending
+            })
+        );
+        this.sunDiscCore.rotation.x = -Math.PI / 2;
+        this.sunDiscCore.position.set(50, 0.065, 50);
+
+        this.moonLight = new THREE.SpotLight(0xaad4ff, 0);
+        this.moonLight.position.set(50, 38, 50);
+        this.moonLight.angle = 0.7;
+        this.moonLight.penumbra = 0.8;
+        this.moonLight.decay = 1.35;
+        this.moonLight.distance = 170;
+        this.moonLight.target.position.set(50, 0, 50);
+
         this.scene.add(this.sunMesh);
         this.scene.add(this.moonMesh);
         this.scene.add(this.sunGlow);
+        this.scene.add(this.moonDisc);
+        this.scene.add(this.moonDiscCore);
+        this.scene.add(this.moonBeam);
+        this.scene.add(this.sunDisc);
+        this.scene.add(this.sunDiscCore);
+        this.scene.add(this.moonLight);
+        this.scene.add(this.moonLight.target);
     }
 
     createCloudSystem() {
@@ -2913,31 +3091,86 @@ class OpenBotWorld {
         }
 
         this.directionalLight.position.set(sun.x, Math.max(8, sun.y), sun.z);
+        this._moonTargetVec.set(
+            clamp(50 + ((50 - moon.x) * 0.42), 8, 92),
+            GROUND_Y + 0.14,
+            clamp(50 + ((50 - moon.z) * 0.42), 8, 92)
+        );
+        this._sunTargetVec.set(
+            clamp(50 + ((50 - sun.x) * 0.35), 6, 94),
+            GROUND_Y,
+            clamp(50 + ((50 - sun.z) * 0.35), 6, 94)
+        );
+        this._moonPosVec.set(moon.x, moon.y, moon.z);
+        this._sunPosVec.set(sun.x, sun.y, sun.z);
+
+        if (this.moonLight) {
+            this.moonLight.position.copy(this._moonPosVec);
+            this.moonLight.target.position.copy(this._moonTargetVec);
+        }
+        if (this.moonDisc) this.moonDisc.position.set(this._moonTargetVec.x, 0.04, this._moonTargetVec.z);
+        if (this.moonDiscCore) this.moonDiscCore.position.set(this._moonTargetVec.x, 0.055, this._moonTargetVec.z);
+        if (this.moonBeam) positionBeamBetween(this.moonBeam, this._moonPosVec, this._moonTargetVec, 44);
+        if (this.sunDisc) this.sunDisc.position.set(this._sunTargetVec.x, 0.05, this._sunTargetVec.z);
+        if (this.sunDiscCore) this.sunDiscCore.position.set(this._sunTargetVec.x, 0.065, this._sunTargetVec.z);
+
         let skyHex = 0x77b5de;
         if (phase === 'night') {
             skyHex = 0x0b1a2e;
             this.ambientLight.intensity = 0.38 + (moonStrength * 0.35);
             this.directionalLight.intensity = 0.08 + (sunStrength * 0.25);
             if (this.sunGlow) this.sunGlow.material.opacity = 0.18;
+            if (this.moonDisc) this.moonDisc.material.opacity = 0.18 + (moonStrength * 0.26);
+            if (this.moonDiscCore) this.moonDiscCore.material.opacity = 0.08 + (moonStrength * 0.22);
+            if (this.moonBeam) this.moonBeam.material.opacity = 0.04 + (moonStrength * 0.13);
+            if (this.moonLight) this.moonLight.intensity = 1.2 + (moonStrength * 2.2);
+            if (this.sunDisc) this.sunDisc.material.opacity = 0;
+            if (this.sunDiscCore) this.sunDiscCore.material.opacity = 0;
         } else if (phase === 'dusk') {
             skyHex = 0x5c5470;
             this.ambientLight.intensity = 0.85 + (sunStrength * 0.75);
             this.directionalLight.intensity = 0.35 + (sunStrength * 0.75);
             if (this.sunGlow) this.sunGlow.material.opacity = 0.42 + (sunStrength * 0.2);
+            if (this.moonDisc) this.moonDisc.material.opacity = 0.05 + (moonStrength * 0.16);
+            if (this.moonDiscCore) this.moonDiscCore.material.opacity = 0.03 + (moonStrength * 0.09);
+            if (this.moonBeam) this.moonBeam.material.opacity = 0.02 + (moonStrength * 0.06);
+            if (this.moonLight) this.moonLight.intensity = moonStrength * 1.3;
+            if (this.sunDisc) this.sunDisc.material.opacity = 0.08 + (sunStrength * 0.16);
+            if (this.sunDiscCore) this.sunDiscCore.material.opacity = 0.05 + (sunStrength * 0.1);
         } else if (phase === 'morning') {
             skyHex = 0x6ba3d4;
             this.ambientLight.intensity = 1.8 + (sunStrength * 1.2);
             this.directionalLight.intensity = 0.65 + (sunStrength * 0.75);
             if (this.sunGlow) this.sunGlow.material.opacity = 0.7 + (sunStrength * 0.2);
+            if (this.moonDisc) this.moonDisc.material.opacity = 0;
+            if (this.moonDiscCore) this.moonDiscCore.material.opacity = 0;
+            if (this.moonBeam) this.moonBeam.material.opacity = 0;
+            if (this.moonLight) this.moonLight.intensity = 0;
+            if (this.sunDisc) this.sunDisc.material.opacity = 0.15 + (sunStrength * 0.19);
+            if (this.sunDiscCore) this.sunDiscCore.material.opacity = 0.09 + (sunStrength * 0.12);
         } else {
             skyHex = 0x77b5de;
             this.ambientLight.intensity = 2.4 + (sunStrength * 1.2);
             this.directionalLight.intensity = 0.8 + (sunStrength * 1.1);
             if (this.sunGlow) this.sunGlow.material.opacity = 0.82 + (sunStrength * 0.24);
+            if (this.moonDisc) this.moonDisc.material.opacity = 0;
+            if (this.moonDiscCore) this.moonDiscCore.material.opacity = 0;
+            if (this.moonBeam) this.moonBeam.material.opacity = 0;
+            if (this.moonLight) this.moonLight.intensity = 0;
+            if (this.sunDisc) this.sunDisc.material.opacity = 0.24 + (sunStrength * 0.22);
+            if (this.sunDiscCore) this.sunDiscCore.material.opacity = 0.14 + (sunStrength * 0.14);
         }
 
         this.scene.background.setHex(skyHex);
         if (this.scene.fog) this.scene.fog.color.setHex(skyHex);
+        if (this.moonDisc) this.moonDisc.visible = this.moonDisc.material.opacity > 0.001;
+        if (this.moonDiscCore) this.moonDiscCore.visible = this.moonDiscCore.material.opacity > 0.001;
+        if (this.sunDisc) this.sunDisc.visible = this.sunDisc.material.opacity > 0.001;
+        if (this.sunDiscCore) this.sunDiscCore.visible = this.sunDiscCore.material.opacity > 0.001;
+        if (this.moonLight) this.moonLight.visible = this.moonLight.intensity > 0.01;
+        if (this.moonBeam) {
+            this.moonBeam.visible = this.camera.position.y >= (GROUND_Y - 0.05) && (!this.moonLight || this.moonLight.visible);
+        }
 
         this.cloudUpdateAccumulator += dtSeconds;
         if (this.cloudUpdateAccumulator >= (1 / CLOUD_UPDATE_MAX_FPS)) {
