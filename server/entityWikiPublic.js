@@ -2,6 +2,7 @@ const { ALLOWED_ACTIONS } = require('./actionQueue');
 
 const TERMINAL_QUEUE_STATUSES = new Set(['completed', 'failed', 'cancelled', 'expired']);
 const WIKI_VISIBLE_TERMINAL_QUEUE_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const RELATIONSHIP_EXCLUDED_ENTITY_IDS = new Set(['system']);
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
@@ -142,6 +143,10 @@ function normalizeGoalEntries(goals, fallbackSource = 'persisted') {
 function deriveRelationships(rawPartners) {
   const now = Date.now();
   return (rawPartners || []).map(partner => {
+    const entityId = String(partner.entityId || '').trim();
+    if (!entityId) return null;
+    if (RELATIONSHIP_EXCLUDED_ENTITY_IDS.has(entityId.toLowerCase())) return null;
+
     const messagesExchanged = Number(partner.messagesExchanged || 0);
     const sentMentions = Number(partner.sentMentions || 0);
     const receivedMentions = Number(partner.receivedMentions || 0);
@@ -157,14 +162,14 @@ function deriveRelationships(rawPartners) {
 
     const score = clamp01(0.5 * freq + 0.3 * recency + 0.2 * reciprocity);
     return {
-      entityId: partner.entityId,
+      entityId,
       score: Number(score.toFixed(2)),
       messagesExchanged,
       lastInteractionAt: lastTs,
       sentMentions,
       receivedMentions
     };
-  }).sort((a, b) => b.score - a.score).slice(0, 8);
+  }).filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 8);
 }
 
 function deriveReputation(relationships, recentOwnChats) {

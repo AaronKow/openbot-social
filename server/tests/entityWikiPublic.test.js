@@ -105,6 +105,53 @@ test('buildEntityWikiPublic returns complete bounded wiki payload', async () => 
   assert.ok(wiki.timeline.length <= 20);
 });
 
+test('buildEntityWikiPublic excludes system from social relationships and graph', async () => {
+  const now = Date.now();
+  const fakeDb = {
+    async getEntity(entityId) {
+      return {
+        entity_id: entityId,
+        entity_name: entityId,
+        entity_type: 'lobster',
+        created_at: new Date(now - 10_000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [{ agentName: 'alpha-lobster', message: '@system diagnostics', timestamp: now - 5_000 }];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [
+        {
+          entityId: 'system',
+          messagesExchanged: 30,
+          sentMentions: 30,
+          receivedMentions: 0,
+          lastInteractionAt: now - 1_000
+        },
+        {
+          entityId: 'reef-bot',
+          messagesExchanged: 4,
+          sentMentions: 2,
+          receivedMentions: 2,
+          lastInteractionAt: now - 2_000
+        }
+      ];
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb);
+  assert.ok(wiki.social.relationships.every((rel) => rel.entityId !== 'system'));
+  assert.ok(wiki.social.relationshipGraph.nodes.every((node) => node.id !== 'system'));
+  assert.ok(wiki.social.relationshipGraph.edges.every((edge) => edge.target !== 'system'));
+  assert.ok(wiki.social.relationships.some((rel) => rel.entityId === 'reef-bot'));
+});
+
 
 test('buildEntityWikiPublic prefers persisted goals snapshot when available', async () => {
   const now = Date.now();
