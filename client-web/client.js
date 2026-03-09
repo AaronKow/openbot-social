@@ -679,6 +679,7 @@ class OpenBotWorld {
 
             let mesh = null;
             let radius = Number(data.radius) || 0.9;
+            let yOffset = 0;
             if (type === 'rock') {
                 const geometry = new THREE.DodecahedronGeometry(radius);
                 mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.9 }));
@@ -701,24 +702,59 @@ class OpenBotWorld {
             } else if (type === 'algae_pallet') {
                 radius = Number(data.radius) || 0.95;
                 const servesRemaining = Math.max(0, Math.floor(Number(data.servesRemaining) || 0));
-                const fillRatio = Math.max(0.15, Math.min(1, servesRemaining / 3));
-                const base = new THREE.Mesh(
-                    new THREE.CylinderGeometry(radius, radius * 1.05, 0.35, 14),
-                    new THREE.MeshStandardMaterial({ color: 0x7b5b33, roughness: 0.9 })
-                );
-                const fill = new THREE.Mesh(
-                    new THREE.CylinderGeometry(radius * 0.8, radius * 0.88, 0.18 * fillRatio, 12),
-                    new THREE.MeshStandardMaterial({ color: 0x6cc04a, roughness: 0.55, emissive: 0x214d14, emissiveIntensity: 0.25 })
-                );
-                fill.position.y = 0.12;
+                const fillRatio = Math.max(0.1, Math.min(1, servesRemaining / 3));
                 mesh = new THREE.Group();
-                mesh.add(base);
-                mesh.add(fill);
+
+                const trayHeight = 0.22;
+                const tray = new THREE.Mesh(
+                    new THREE.CylinderGeometry(radius * 0.92, radius, trayHeight, 24),
+                    new THREE.MeshStandardMaterial({ color: 0x7b5b33, roughness: 0.86, metalness: 0.04 })
+                );
+                tray.position.y = trayHeight * 0.5;
+                tray.receiveShadow = true;
+                mesh.add(tray);
+
+                const algaeCore = new THREE.Mesh(
+                    new THREE.SphereGeometry(radius * 0.34, 16, 14),
+                    new THREE.MeshStandardMaterial({
+                        color: 0x6ce070,
+                        roughness: 0.42,
+                        emissive: 0x1f5c2d,
+                        emissiveIntensity: 0.2
+                    })
+                );
+                algaeCore.position.y = trayHeight + (radius * 0.28);
+                algaeCore.scale.setScalar(fillRatio);
+                mesh.add(algaeCore);
+
+                const pelletOffsets = [
+                    [-0.22, 0.16],
+                    [0.24, 0.12],
+                    [0.06, -0.2],
+                    [-0.12, -0.24]
+                ];
+                for (let i = 0; i < pelletOffsets.length; i += 1) {
+                    const [ox, oz] = pelletOffsets[i];
+                    const pellet = new THREE.Mesh(
+                        new THREE.SphereGeometry(radius * 0.16, 12, 10),
+                        new THREE.MeshStandardMaterial({
+                            color: 0x6ce070,
+                            roughness: 0.4,
+                            emissive: 0x2f7f3b,
+                            emissiveIntensity: 0.16
+                        })
+                    );
+                    const pelletScale = Math.max(0.35, fillRatio - (i * 0.12));
+                    pellet.position.set(ox * radius, trayHeight + (radius * 0.16), oz * radius);
+                    pellet.scale.setScalar(pelletScale);
+                    mesh.add(pellet);
+                }
+                yOffset = 0.02;
             } else {
                 continue;
             }
 
-            mesh.position.set(x, y, z);
+            mesh.position.set(x, y + yOffset, z);
             mesh.castShadow = true;
             this.scene.add(mesh);
             this.decorationMeshes.set(String(id || `${type}-${x}-${z}`), mesh);
