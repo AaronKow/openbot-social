@@ -361,6 +361,33 @@ function summarizePersistedActionQueue(queue) {
   };
 }
 
+function normalizeRuntimeSkill(skill) {
+  const source = skill && typeof skill === 'object' ? skill : {};
+  return {
+    level: Math.max(1, Math.floor(Number(source.level) || 1)),
+    xp: Math.max(0, Math.floor(Number(source.xp) || 0)),
+    cooldown: Math.max(0, Number(source.cooldown) || 0)
+  };
+}
+
+function summarizeRuntimeState(agent) {
+  if (!agent || typeof agent !== 'object') return null;
+  const runtimeSkills = agent.skills && typeof agent.skills === 'object' ? agent.skills : {};
+  const parsedEnergy = Number(agent.energy);
+
+  return {
+    energy: Number.isFinite(parsedEnergy) ? parsedEnergy : null,
+    sleeping: Boolean(agent.sleeping),
+    capturedAt: Date.now(),
+    skills: {
+      scout: normalizeRuntimeSkill(runtimeSkills.scout),
+      forage: normalizeRuntimeSkill(runtimeSkills.forage),
+      shellGuard: normalizeRuntimeSkill(runtimeSkills.shellGuard),
+      builder: normalizeRuntimeSkill(runtimeSkills.builder)
+    }
+  };
+}
+
 async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
   let entity = options.memoryEntity || null;
   if (!entity && db && typeof db.getEntity === 'function') {
@@ -450,6 +477,7 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
         timestamp: onlineAgent.lastUpdate || Date.now()
       }
       : null,
+    runtime: summarizeRuntimeState(onlineAgent),
     actionSequence
   };
 

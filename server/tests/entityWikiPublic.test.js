@@ -70,13 +70,31 @@ test('buildEntityWikiPublic returns complete bounded wiki payload', async () => 
 
   const worldState = {
     agents: new Map([
-      ['a1', { id: 'a1', entityId: 'alpha-lobster', state: 'chatting', lastAction: { type: 'chat' }, lastUpdate: now }]
+      ['a1', {
+        id: 'a1',
+        entityId: 'alpha-lobster',
+        state: 'chatting',
+        lastAction: { type: 'chat' },
+        lastUpdate: now,
+        energy: 78.5,
+        sleeping: false,
+        skills: {
+          scout: { level: 3, xp: 12, cooldown: 4.5 },
+          forage: { level: 2, xp: 8, cooldown: 1.2 },
+          shellGuard: { level: 1, xp: 0, cooldown: 0 },
+          builder: { level: 4, xp: 20, cooldown: 7.8 }
+        }
+      }]
     ])
   };
 
   const wiki = await buildEntityWikiPublic('alpha-lobster', worldState, fakeDb);
   assert.equal(wiki.identity.entityId, 'alpha-lobster');
   assert.equal(wiki.currentState.online, true);
+  assert.equal(wiki.currentState.runtime.energy, 78.5);
+  assert.equal(wiki.currentState.runtime.sleeping, false);
+  assert.equal(wiki.currentState.runtime.skills.scout.level, 3);
+  assert.equal(wiki.currentState.runtime.skills.builder.cooldown, 7.8);
   assert.ok(Array.isArray(wiki.cognition.interests));
   assert.ok(wiki.cognition.longTermGoals.length <= 4);
   assert.ok(wiki.cognition.shortTermGoals.length <= 4);
@@ -457,7 +475,21 @@ test('buildEntityWikiPublic preserves payload parity with sequential composition
   const entityId = 'alpha-lobster';
   const worldState = {
     agents: new Map([
-      ['a1', { id: 'a1', entityId, state: 'chatting', lastAction: { type: 'chat' }, lastUpdate: now }]
+      ['a1', {
+        id: 'a1',
+        entityId,
+        state: 'chatting',
+        lastAction: { type: 'chat' },
+        lastUpdate: now,
+        energy: 66,
+        sleeping: false,
+        skills: {
+          scout: { level: 2, xp: 10, cooldown: 3 },
+          forage: { level: 1, xp: 4, cooldown: 1 },
+          shellGuard: { level: 1, xp: 0, cooldown: 0 },
+          builder: { level: 3, xp: 9, cooldown: 6.5 }
+        }
+      }]
     ])
   };
 
@@ -566,6 +598,17 @@ test('buildEntityWikiPublic preserves payload parity with sequential composition
         agentId: 'a1',
         state: 'chatting',
         lastAction: { type: 'chat', timestamp: now },
+        runtime: {
+          energy: 66,
+          sleeping: false,
+          capturedAt: fixedNow,
+          skills: {
+            scout: { level: 2, xp: 10, cooldown: 3 },
+            forage: { level: 1, xp: 4, cooldown: 1 },
+            shellGuard: { level: 1, xp: 0, cooldown: 0 },
+            builder: { level: 3, xp: 9, cooldown: 6.5 }
+          }
+        },
         actionSequence
       },
       interests,

@@ -738,6 +738,46 @@ function getOwnedAgentOrReject(req, res, agentId) {
   return agent;
 }
 
+function normalizeRuntimeSkillPayload(skill) {
+  const source = skill && typeof skill === 'object' ? skill : {};
+  return {
+    level: Math.max(1, Math.floor(Number(source.level) || 1)),
+    xp: Math.max(0, Math.floor(Number(source.xp) || 0)),
+    cooldown: Math.max(0, Number(source.cooldown) || 0)
+  };
+}
+
+function buildRuntimeStatsPayload(agent) {
+  if (!agent || typeof agent !== 'object') return null;
+  ensureAgentSkills(agent);
+
+  return {
+    energy: clampEnergy(agent.energy),
+    sleeping: Boolean(agent.sleeping),
+    capturedAt: Date.now(),
+    skills: {
+      scout: normalizeRuntimeSkillPayload(agent.skills?.scout),
+      forage: normalizeRuntimeSkillPayload(agent.skills?.forage),
+      shellGuard: normalizeRuntimeSkillPayload(agent.skills?.shellGuard),
+      builder: normalizeRuntimeSkillPayload(agent.skills?.builder)
+    }
+  };
+}
+
+function findOnlineAgentByEntityId(entityId) {
+  for (const agent of worldState.agents.values()) {
+    if (agent.entityId === entityId) return agent;
+  }
+  return null;
+}
+
+async function resolveEntityById(entityId) {
+  const memoryEntity = getMemoryEntities()?.get(entityId) || null;
+  if (memoryEntity) return memoryEntity;
+  if (!process.env.DATABASE_URL) return null;
+  return db.getEntity(entityId);
+}
+
 // Format uptime from milliseconds to human readable string
 function formatUptime(ms) {
   const seconds = Math.floor(ms / 1000);
@@ -2288,13 +2328,21 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
   const start = Date.now();
   try {
     const { entityId } = req.params;
+    const refreshFlag = String(req.query.refresh || '').trim().toLowerCase();
+    const forceRefresh = refreshFlag === '1' || refreshFlag === 'true';
+    const now = Date.now();
     if (!entityId) {
       return res.status(400).json({ success: false, error: 'entityId is required' });
     }
 
     const cached = _entityWikiCache.get(entityId);
-    if (cached && (Date.now() - cached.ts) < ENTITY_WIKI_CACHE_TTL_MS) {
-      return res.json({ success: true, wiki: cached.data, cache: 'hit' });
+    const cacheAgeMs = cached ? (now - cached.ts) : Number.POSITIVE_INFINITY;
+    const cacheFresh = Boolean(cached && cacheAgeMs < ENTITY_WIKI_CACHE_TTL_MS);
+    if (cacheFresh) {
+      if (!forceRefresh) {
+        return res.json({ success: true, wiki: cached.data, cache: 'hit' });
+      }
+      return res.json({ success: true, wiki: cached.data, cache: 'hit', refreshThrottled: true });
     }
 
     const memoryEntity = getMemoryEntities()?.get(entityId) || null;
@@ -2333,6 +2381,55 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
   } catch (error) {
     console.error('Error fetching wiki public payload:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Lightweight real-time runtime stats for a single lobster entity.
+app.get('/entity/:entityId/runtime-stats', async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (!entityId) {
+      return res.status(400).json({ success: false, error: 'entityId is required' });
+    }
+
+    const onlineAgent = findOnlineAgentByEntityId(entityId);
+    if (onlineAgent) {
+      const lastAction = onlineAgent.lastAction
+        ? {
+          ...(typeof onlineAgent.lastAction === 'object' && onlineAgent.lastAction
+            ? onlineAgent.lastAction
+            : { type: onlineAgent.lastAction || 'none' }),
+          timestamp: onlineAgent.lastUpdate || Date.now()
+        }
+        : null;
+      return res.json({
+        success: true,
+        entityId,
+        online: true,
+        agentId: onlineAgent.id,
+        state: onlineAgent.state || 'idle',
+        lastAction,
+        runtime: buildRuntimeStatsPayload(onlineAgent)
+      });
+    }
+
+    const entity = await resolveEntityById(entityId);
+    if (!entity) {
+      return res.status(404).json({ success: false, error: 'Entity not found' });
+    }
+
+    return res.json({
+      success: true,
+      entityId,
+      online: false,
+      agentId: null,
+      state: 'offline',
+      lastAction: null,
+      runtime: null
+    });
+  } catch (error) {
+    console.error('Error fetching runtime stats:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 

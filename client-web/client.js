@@ -1170,8 +1170,9 @@ class OpenBotWorld {
         return this.openWikiForEntity(entityId);
     }
 
-    async openWikiForEntity(entityId) {
+    async openWikiForEntity(entityId, options = {}) {
         if (!entityId) return;
+        const forceRefresh = Boolean(options.forceRefresh);
 
         const modal = document.getElementById('lobster-wiki-modal');
         if (!modal) return;
@@ -1181,10 +1182,11 @@ class OpenBotWorld {
         try {
             let wiki = null;
             const cached = this.wikiCache.get(entityId);
-            if (cached && (Date.now() - cached.ts) < this.wikiCacheTtlMs) {
+            if (!forceRefresh && cached && (Date.now() - cached.ts) < this.wikiCacheTtlMs) {
                 wiki = cached.data;
             } else {
-                const response = await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/wiki-public`);
+                const query = forceRefresh ? '?refresh=1' : '';
+                const response = await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/wiki-public${query}`);
                 if (!response.ok) {
                     throw new Error(`Failed to load wiki (${response.status})`);
                 }
@@ -1199,6 +1201,37 @@ class OpenBotWorld {
         } catch (error) {
             console.error('Wiki fetch error:', error);
             this.renderWikiError('Could not load lobster details right now.');
+        }
+    }
+
+    async refreshWikiRuntime(entityId) {
+        if (!entityId || !this.currentWiki || this.currentWikiEntityId !== entityId) return;
+        try {
+            const response = await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/runtime-stats`);
+            if (!response.ok) {
+                throw new Error(`Failed to load runtime stats (${response.status})`);
+            }
+
+            const data = await response.json();
+            const currentState = this.currentWiki.currentState && typeof this.currentWiki.currentState === 'object'
+                ? this.currentWiki.currentState
+                : {};
+            currentState.online = Boolean(data.online);
+            currentState.agentId = data.agentId || null;
+            currentState.state = data.state || (data.online ? 'idle' : 'offline');
+            currentState.lastAction = data.lastAction || null;
+            currentState.runtime = data.runtime && typeof data.runtime === 'object' ? data.runtime : null;
+            this.currentWiki.currentState = currentState;
+
+            const cached = this.wikiCache.get(entityId);
+            if (cached && cached.data) {
+                cached.data.currentState = currentState;
+                this.wikiCache.set(entityId, cached);
+            }
+
+            this.renderWiki(this.currentWiki);
+        } catch (error) {
+            console.error('Runtime stats refresh error:', error);
         }
     }
 
@@ -1498,6 +1531,10 @@ class OpenBotWorld {
 
         const identity = wiki.identity || {};
         const currentState = wiki.currentState || {};
+        const runtime = currentState.runtime && typeof currentState.runtime === 'object' ? currentState.runtime : null;
+        const runtimeSkills = runtime && runtime.skills && typeof runtime.skills === 'object'
+            ? runtime.skills
+            : {};
         const cognition = wiki.cognition || {};
         const social = wiki.social || {};
         const relationships = Array.isArray(social.relationships) ? social.relationships : [];
@@ -1522,6 +1559,29 @@ class OpenBotWorld {
         const safeState = this.escapeHtml(currentState.state || 'unknown');
         const safeAgentId = this.escapeHtml(currentState.agentId || 'N/A');
         const safeLastAction = this.escapeHtml(currentState.lastAction?.type || 'N/A');
+        const safeRuntimeEnergy = runtime && Number.isFinite(Number(runtime.energy))
+            ? this.escapeHtml(Number(runtime.energy).toFixed(1))
+            : 'N/A';
+        const safeRuntimeSleeping = runtime ? (runtime.sleeping ? 'Yes' : 'No') : 'N/A';
+        const safeRuntimeCapturedAt = runtime && Number(runtime.capturedAt) > 0
+            ? this.escapeHtml(new Date(Number(runtime.capturedAt)).toLocaleString())
+            : 'N/A';
+        const renderRuntimeSkill = (skillKey, label) => {
+            const skill = runtimeSkills[skillKey];
+            if (!skill || typeof skill !== 'object') {
+                return `<li><strong>${label}:</strong> N/A</li>`;
+            }
+            const level = Math.max(1, Math.floor(Number(skill.level) || 1));
+            const xp = Math.max(0, Math.floor(Number(skill.xp) || 0));
+            const cooldown = Math.max(0, Number(skill.cooldown) || 0);
+            return `<li><strong>${label}:</strong> L${level} / XP ${xp} / CD ${cooldown.toFixed(1)}s</li>`;
+        };
+        const runtimeSkillsList = [
+            renderRuntimeSkill('scout', 'Scout'),
+            renderRuntimeSkill('forage', 'Forage'),
+            renderRuntimeSkill('shellGuard', 'Shell Guard'),
+            renderRuntimeSkill('builder', 'Builder')
+        ].join('');
         const interestChips = (cognition.interests || []).map(i => {
             const interest = this.escapeHtml(i.interest || 'Unknown');
             const weight = Number(i.weight || 0).toFixed(1);
@@ -1555,6 +1615,7 @@ class OpenBotWorld {
         body.innerHTML = `
             <div class="wiki-actions-row">
                 <button class="wiki-nav-btn" id="wiki-back-directory">← Back to directory</button>
+                <button class="wiki-nav-btn" id="wiki-refresh-current">↻ Refresh Live Stats</button>
             </div>
 
             <section class="wiki-section">
@@ -1589,6 +1650,16 @@ class OpenBotWorld {
                     <div><span class="wiki-key">State:</span>${safeState}</div>
                     <div><span class="wiki-key">Agent ID:</span>${safeAgentId}</div>
                     <div><span class="wiki-key">Last Action:</span>${safeLastAction}</div>
+                    <div><span class="wiki-key">Energy:</span>${safeRuntimeEnergy}</div>
+                    <div><span class="wiki-key">Sleeping:</span>${safeRuntimeSleeping}</div>
+                    <div><span class="wiki-key">Captured At:</span>${safeRuntimeCapturedAt}</div>
+                </div>
+                <div style="height:10px"></div>
+                <div>
+                    <strong>Runtime Skills</strong>
+                    <ul class="wiki-relationship-list">
+                        ${runtimeSkillsList}
+                    </ul>
                 </div>
                 <div style="height:10px"></div>
                 <div>
@@ -1653,6 +1724,20 @@ class OpenBotWorld {
 
         const backBtn = document.getElementById('wiki-back-directory');
         if (backBtn) backBtn.addEventListener('click', () => this.openWikiDirectory());
+        const refreshBtn = document.getElementById('wiki-refresh-current');
+        if (refreshBtn) {
+            refreshBtn.title = 'Fetch latest live stats without rebuilding full wiki';
+            refreshBtn.addEventListener('click', async () => {
+                const targetEntityId = this.currentWikiEntityId || identity.entityId;
+                if (!targetEntityId) return;
+                const originalText = refreshBtn.textContent;
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '↻ Refreshing...';
+                await this.refreshWikiRuntime(targetEntityId);
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = originalText;
+            });
+        }
 
         const avatarCard = document.getElementById('wiki-avatar-card');
         const avatarRange = document.getElementById('wiki-avatar-rotation');
