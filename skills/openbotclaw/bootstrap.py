@@ -441,7 +441,36 @@ def run_agent(hub, name: str, personality: str):
         "welcome to the ocean floor, {}!",
     ]
 
+    # Needs + utility configuration
+    ENERGY_LOW = 45.0
+    ENERGY_CRITICAL = 25.0
+    ENERGY_RECOVERY = 68.0
+    CHAT_COOLDOWN_SEC = 12.0
+    MOVE_COOLDOWN_SEC = 1.8
+    EMOTE_COOLDOWN_SEC = 26.0
+    DECISION_INTERVAL_SEC = 1.6
+    WORLD_SCAN_INTERVAL_SEC = 7.0
+    RUNTIME_SCAN_INTERVAL_SEC = 2.5
+    GOAL_REFRESH_SEC = 35.0
+    pending_mentions = []
+    pending_welcomes = []
+    latest_runtime = {"energy": 100.0, "sleeping": False, "state": "idle"}
+    known_objects = []
+    active_goal = None
+    last_goal_refresh = 0.0
+    current_mode = "explore"
+
     # ---- callbacks ----
+
+    timers = {
+        "last_move": time.time(),
+        "last_chat": time.time(),
+        "last_emote": time.time(),
+        "last_update_check": time.time(),
+        "last_decision": 0.0,
+        "last_world_scan": 0.0,
+        "last_runtime_scan": 0.0,
+    }
 
     def on_registered(data):
         pos = data.get("position", {})
@@ -451,6 +480,7 @@ def run_agent(hub, name: str, personality: str):
         print(f"[{name}] Running. Press Ctrl+C to stop.\n")
         time.sleep(0.5 + random.uniform(0, 1))
         hub.chat(random.choice(spawn_greetings))
+        timers["last_chat"] = time.time()
 
     def on_chat(data):
         if data.get("agent_name") == name:
@@ -459,23 +489,19 @@ def run_agent(hub, name: str, personality: str):
         message = data.get("message", "")
         name_lower = name.lower()
         if name_lower in message.lower() or f"@{name_lower}" in message.lower():
-            # Respond to @mentions in character
-            time.sleep(0.5 + random.uniform(0, 1.5))
-            responses = [
-                f"@{sender} oh hi! ({personality})",
-                f"@{sender} you called? 🦞",
-                f"@{sender} hey there! how can i help?",
-                f"@{sender} yes yes, i'm here!",
-            ]
-            hub.chat(random.choice(responses))
+            # Queue mention handling; let utility loop decide timing.
+            pending_mentions.append(sender)
+            if len(pending_mentions) > 8:
+                del pending_mentions[:len(pending_mentions) - 8]
 
     def on_agent_joined(data):
         joined_name = data.get("name", "?")
         if joined_name == name:
             return
-        if random.random() < 0.8:
-            time.sleep(1 + random.uniform(0, 2))
-            hub.chat(random.choice(welcome_phrases).format(joined_name))
+        if random.random() < 0.65:
+            pending_welcomes.append(joined_name)
+            if len(pending_welcomes) > 6:
+                del pending_welcomes[:len(pending_welcomes) - 6]
 
     def on_error(data):
         print(f"[{name}] Error: {data.get('error', '?')}")
@@ -490,25 +516,293 @@ def run_agent(hub, name: str, personality: str):
     hub.connect()
     hub.register()
 
-    # ---- main loop (with watchdog-style periodic update checking) ----
-    last_move = time.time()
-    last_chat = time.time()
-    last_emote = time.time()
-    last_update_check = time.time()
-    consecutive_update_failures = 0
-    target = None
+    def refresh_runtime_stats(now_ts: float):
+        if now_ts - timers["last_runtime_scan"] < RUNTIME_SCAN_INTERVAL_SEC:
+            return
+        timers["last_runtime_scan"] = now_ts
+        if not hub.agent_id or not getattr(hub, "session", None):
+            return
+        try:
+            response = hub.session.get(
+                f"{hub.url}/agent/{hub.agent_id}",
+                timeout=hub.connection_timeout
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            latest_runtime["energy"] = float(payload.get("energy", latest_runtime["energy"]))
+            latest_runtime["sleeping"] = bool(payload.get("sleeping", latest_runtime["sleeping"]))
+            latest_runtime["state"] = payload.get("state", latest_runtime["state"])
+        except Exception:
+            # Keep previous runtime values on transient failures.
+            return
 
-    move_interval = random.uniform(4, 9)
-    chat_interval = random.uniform(30, 90)
-    emote_interval = random.uniform(20, 60)
+    def refresh_world_objects(now_ts: float):
+        if now_ts - timers["last_world_scan"] < WORLD_SCAN_INTERVAL_SEC:
+            return
+        timers["last_world_scan"] = now_ts
+        if not getattr(hub, "session", None):
+            return
+        try:
+            response = hub.session.get(
+                f"{hub.url}/world-state",
+                timeout=hub.connection_timeout
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            objects = payload.get("objects", [])
+            if isinstance(objects, list):
+                known_objects.clear()
+                known_objects.extend(objects)
+        except Exception:
+            return
+
+    def move_towards_point(pos, target_x: float, target_z: float, max_step: float = 4.5) -> bool:
+        dx = target_x - pos["x"]
+        dz = target_z - pos["z"]
+        dist = math.sqrt(dx * dx + dz * dz)
+        if dist < 0.9:
+            return False
+        step = min(max_step, dist)
+        hub.move(
+            pos["x"] + (dx / dist) * step,
+            0,
+            pos["z"] + (dz / dist) * step,
+        )
+        timers["last_move"] = time.time()
+        return True
+
+    def find_nearest_algae(pos):
+        nearest = None
+        nearest_dist = None
+        for obj in known_objects:
+            if obj.get("type") != "algae_pallet":
+                continue
+            data = obj.get("data") or {}
+            serves_remaining = data.get("servesRemaining")
+            if isinstance(serves_remaining, (int, float)) and serves_remaining <= 0:
+                continue
+            o_pos = obj.get("position") or {}
+            ox = float(o_pos.get("x", 0))
+            oz = float(o_pos.get("z", 0))
+            dist = math.sqrt((ox - pos["x"]) ** 2 + (oz - pos["z"]) ** 2)
+            if nearest_dist is None or dist < nearest_dist:
+                nearest = (ox, oz, dist)
+                nearest_dist = dist
+        return nearest
+
+    def compute_shelter_point(pos, nearby_agents):
+        # Shelter heuristic: drift away from local crowd center.
+        close = [a for a in nearby_agents if float(a.get("distance", 999)) <= 14.0]
+        if not close:
+            return None
+        cx = sum(float(a.get("position", {}).get("x", pos["x"])) for a in close) / len(close)
+        cz = sum(float(a.get("position", {}).get("z", pos["z"])) for a in close) / len(close)
+        vx = pos["x"] - cx
+        vz = pos["z"] - cz
+        norm = math.sqrt(vx * vx + vz * vz)
+        if norm < 0.01:
+            angle = random.uniform(0, math.pi * 2)
+            vx, vz = math.cos(angle), math.sin(angle)
+            norm = 1.0
+        scale = random.uniform(8.0, 16.0)
+        target_x = max(5.0, min(95.0, pos["x"] + (vx / norm) * scale))
+        target_z = max(5.0, min(95.0, pos["z"] + (vz / norm) * scale))
+        return (target_x, target_z)
+
+    def maybe_refresh_goal(now_ts: float, pos, nearby_social, nearest_algae, energy: float):
+        nonlocal active_goal, last_goal_refresh
+        if active_goal and active_goal.get("type") == "explore":
+            tx, tz = active_goal.get("target", (pos["x"], pos["z"]))
+            if math.sqrt((tx - pos["x"]) ** 2 + (tz - pos["z"]) ** 2) < 2.2:
+                active_goal = None
+        if active_goal and active_goal.get("type") == "forage":
+            if energy >= ENERGY_RECOVERY:
+                active_goal = None
+        if active_goal and active_goal.get("type") == "socialize":
+            if not nearby_social:
+                active_goal = None
+        if active_goal and (now_ts - active_goal.get("created_at", now_ts)) > 240:
+            active_goal = None
+
+        if active_goal and (now_ts - last_goal_refresh) < GOAL_REFRESH_SEC:
+            return
+        if active_goal:
+            return
+
+        # Goal generation is contextual, not hard-scripted.
+        candidates = []
+        if nearest_algae and energy < ENERGY_RECOVERY:
+            candidates.append({
+                "type": "forage",
+                "label": "recharge energy at algae pallet",
+                "target": (nearest_algae[0], nearest_algae[1]),
+                "created_at": now_ts
+            })
+        if nearby_social and energy > ENERGY_LOW:
+            target_name = nearby_social[0].get("name") or nearby_social[0].get("id")
+            if target_name:
+                candidates.append({
+                    "type": "socialize",
+                    "label": f"engage with {target_name}",
+                    "target_name": target_name,
+                    "created_at": now_ts
+                })
+        # Exploration goal always available as fallback.
+        candidates.append({
+            "type": "explore",
+            "label": "survey a new ocean sector",
+            "target": (random.uniform(8, 92), random.uniform(8, 92)),
+            "created_at": now_ts
+        })
+
+        active_goal = random.choice(candidates)
+        last_goal_refresh = now_ts
+        print(f"[{name}] goal -> {active_goal['label']}")
+
+    def determine_mode(energy: float, sleeping: bool, nearby_social, nearest_algae):
+        if sleeping:
+            return "recover"
+        if energy <= ENERGY_CRITICAL:
+            return "survive"
+        crowded = len([a for a in nearby_social if float(a.get("distance", 999)) <= 14.0]) >= 4
+        if energy <= ENERGY_LOW and crowded:
+            return "shelter"
+        if energy <= ENERGY_LOW and nearest_algae:
+            return "survive"
+        if active_goal is not None:
+            return "work"
+        if nearby_social:
+            return "social"
+        return "explore"
+
+    def choose_and_act(now_ts: float):
+        nonlocal current_mode
+        pos = hub.get_position()
+        energy = float(latest_runtime.get("energy", 100.0))
+        sleeping = bool(latest_runtime.get("sleeping", False))
+        nearby_chat = hub.get_conversation_partners()
+        nearby_social = hub.get_nearby_agents(radius=35.0)
+        can_chat = (now_ts - timers["last_chat"]) >= CHAT_COOLDOWN_SEC
+        can_move = (now_ts - timers["last_move"]) >= MOVE_COOLDOWN_SEC
+        can_emote = (now_ts - timers["last_emote"]) >= EMOTE_COOLDOWN_SEC
+
+        nearest_algae = find_nearest_algae(pos)
+        maybe_refresh_goal(now_ts, pos, nearby_social, nearest_algae, energy)
+        mode = determine_mode(energy, sleeping, nearby_social, nearest_algae)
+        if mode != current_mode:
+            current_mode = mode
+            print(f"[{name}] mode -> {mode} (energy={int(round(energy))})")
+
+        # Mention replies are always important (unless sleeping).
+        if mode != "recover" and pending_mentions and can_chat:
+            sender = pending_mentions.pop()
+            responses = [
+                f"@{sender} i hear you — currently in {mode} mode",
+                f"@{sender} yes! adapting now (energy {int(round(energy))})",
+                f"@{sender} i'm here, managing ocean priorities 🦞",
+            ]
+            hub.chat(random.choice(responses))
+            timers["last_chat"] = time.time()
+            return
+
+        if mode == "recover":
+            return
+
+        if mode == "survive":
+            if nearest_algae and can_move:
+                target_x, target_z, _ = nearest_algae
+                move_towards_point(pos, target_x, target_z, max_step=5.0)
+                return
+            # fallback if food not visible yet
+            if can_move:
+                move_towards_point(pos, random.uniform(6, 94), random.uniform(6, 94), max_step=4.8)
+                return
+            return
+
+        if mode == "shelter":
+            shelter_target = compute_shelter_point(pos, nearby_social)
+            if shelter_target and can_move:
+                move_towards_point(pos, shelter_target[0], shelter_target[1], max_step=4.6)
+                return
+            if can_emote:
+                hub.action("idle")
+                timers["last_emote"] = time.time()
+                return
+            return
+
+        if mode == "work":
+            goal = active_goal or {}
+            goal_type = goal.get("type")
+            if goal_type == "forage":
+                target = nearest_algae
+                if target and can_move:
+                    move_towards_point(pos, target[0], target[1], max_step=5.0)
+                    return
+            elif goal_type == "socialize":
+                target_name = goal.get("target_name")
+                if target_name and can_move:
+                    moved = hub.move_towards_agent(target_name, stop_distance=3.0, step=5.0)
+                    if moved:
+                        timers["last_move"] = time.time()
+                        return
+                if nearby_chat and can_chat:
+                    hub.chat(f"{target_name}, checking in — any goals for today?")
+                    timers["last_chat"] = time.time()
+                    return
+            elif goal_type == "explore":
+                target = goal.get("target")
+                if isinstance(target, tuple) and len(target) == 2 and can_move:
+                    move_towards_point(pos, float(target[0]), float(target[1]), max_step=4.2)
+                    return
+
+        if mode == "social":
+            if pending_welcomes and can_chat:
+                joined_name = pending_welcomes.pop()
+                hub.chat(random.choice(welcome_phrases).format(joined_name))
+                timers["last_chat"] = time.time()
+                return
+            if nearby_chat and can_chat:
+                partner = nearby_chat[0].get("name", "friend")
+                options = [
+                    f"hey {partner}, how's your mission going?",
+                    f"{partner}, i just switched into social mode 🌊",
+                    f"{partner}, got any ocean-floor rumors?",
+                ]
+                hub.chat(random.choice(options))
+                timers["last_chat"] = time.time()
+                return
+            if nearby_social and can_move:
+                target_id = nearby_social[0].get("id") or nearby_social[0].get("name")
+                if target_id:
+                    moved = hub.move_towards_agent(target_id, stop_distance=3.0, step=5.0)
+                    if moved:
+                        timers["last_move"] = time.time()
+                        return
+
+        # Explore mode (or fallthrough): curiosity-driven movement + occasional low-cost emotes/chats.
+        if can_move:
+            target_x = random.uniform(8, 92)
+            target_z = random.uniform(8, 92)
+            move_towards_point(pos, target_x, target_z, max_step=4.2)
+            return
+        if can_emote:
+            hub.action(random.choice(["wave", "idle", "dance"]))
+            timers["last_emote"] = time.time()
+            return
+        if can_chat and random.random() < 0.35:
+            hub.chat(random.choice(silence_breakers))
+            timers["last_chat"] = time.time()
+            return
+
+    # ---- main loop (with watchdog-style periodic update checking) ----
+    consecutive_update_failures = 0
 
     try:
         while True:
             now = time.time()
-            pos = hub.get_position()
 
             # --- watchdog: periodic script update check ---
-            if now - last_update_check > UPDATE_CHECK_INTERVAL:
+            if now - timers["last_update_check"] > UPDATE_CHECK_INTERVAL:
                 print(f"\n[watchdog] 🔍 Checking for script updates...")
                 try:
                     updated = check_for_updates()
@@ -526,53 +820,21 @@ def run_agent(hub, name: str, personality: str):
                     consecutive_update_failures += 1
                     print(f"[watchdog] ⚠️  Update check failed (attempt {consecutive_update_failures}): {exc}")
                     print(f"[watchdog] Agent continues on current scripts")
-                last_update_check = now
+                timers["last_update_check"] = now
 
-            # --- movement ---
-            if now - last_move > move_interval:
-                if target is None:
-                    target = {
-                        "x": random.uniform(10, 90),
-                        "z": random.uniform(10, 90),
-                    }
-                dx = target["x"] - pos["x"]
-                dz = target["z"] - pos["z"]
-                dist = math.sqrt(dx * dx + dz * dz)
-                if dist < 2.0:
-                    target = None
-                else:
-                    step = min(4.5, dist)
-                    hub.move(
-                        pos["x"] + (dx / dist) * step,
-                        0,
-                        pos["z"] + (dz / dist) * step,
-                    )
-                last_move = now
-                move_interval = random.uniform(3, 8)
+            # --- autonomous perception refresh ---
+            refresh_runtime_stats(now)
+            if latest_runtime.get("energy", 100.0) <= ENERGY_LOW:
+                # Scan world objects more often when hungry.
+                timers["last_world_scan"] = min(timers["last_world_scan"], now - (WORLD_SCAN_INTERVAL_SEC * 0.5))
+            refresh_world_objects(now)
 
-            # --- occasional chat ---
-            if now - last_chat > chat_interval:
-                partners = hub.get_conversation_partners()
-                if partners:
-                    nearby_names = [p.get("name", "?") for p in partners[:2]]
-                    options = [
-                        f"anyone want to chat? i'm near {nearby_names[0]}",
-                        "beautiful day on the ocean floor today!",
-                        f"hey {nearby_names[0]}, what are you up to?",
-                    ] if nearby_names else silence_breakers
-                    hub.chat(random.choice(options))
-                else:
-                    hub.chat(random.choice(silence_breakers))
-                last_chat = now
-                chat_interval = random.uniform(25, 90)
+            # --- choose one action each decision tick ---
+            if now - timers["last_decision"] >= DECISION_INTERVAL_SEC:
+                choose_and_act(now)
+                timers["last_decision"] = now
 
-            # --- occasional emote ---
-            if now - last_emote > emote_interval:
-                hub.action(random.choice(["wave", "dance", "idle"]))
-                last_emote = now
-                emote_interval = random.uniform(20, 70)
-
-            time.sleep(0.5)
+            time.sleep(0.6)
 
     except KeyboardInterrupt:
         print(f"\n[{name}] Disconnecting ...")
