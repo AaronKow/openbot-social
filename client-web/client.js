@@ -107,17 +107,14 @@ function createMoonlightTexture({
 const BEAM_UP = new THREE.Vector3(0, 1, 0);
 const BEAM_VECTOR = new THREE.Vector3();
 
-function positionBeamBetween(mesh, start, end, maxLength = 44) {
+function positionBeamBetween(mesh, start, end, baseHeight = 44) {
     if (!mesh || !start || !end) return;
     BEAM_VECTOR.subVectors(end, start);
-    const distance = BEAM_VECTOR.length();
-    if (distance <= 0.0001) return;
-
-    const length = Math.min(maxLength, distance);
+    const length = Math.max(0.001, BEAM_VECTOR.length());
+    mesh.position.copy(start).addScaledVector(BEAM_VECTOR, 0.5);
     BEAM_VECTOR.normalize();
-    mesh.position.copy(start).addScaledVector(BEAM_VECTOR, length * 0.5);
     mesh.quaternion.setFromUnitVectors(BEAM_UP, BEAM_VECTOR);
-    mesh.scale.y = length / maxLength;
+    mesh.scale.set(1, length / baseHeight, 1);
 }
 
 function createCloudTexture(size = 256) {
@@ -337,6 +334,7 @@ class OpenBotWorld {
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.localClippingEnabled = true;
         document.getElementById('canvas-container').appendChild(this.renderer.domElement);
         
         // Controls - completely free zoom
