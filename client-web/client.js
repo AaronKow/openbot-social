@@ -18,6 +18,11 @@ const CLOUD_TEXTURE_POOL_SIZE = 10;
 const GROUND_Y = 0;
 const THREAT_UPDATE_MAX_FPS = 24;
 const COMBAT_FX_MAX = 220;
+const CAMERA_VIEW_PRESETS = Object.freeze({
+    isometric: Object.freeze({ x: 10, y: 8, z: 10 }),
+    dimetric: Object.freeze({ x: 12, y: 9, z: 6 }),
+    trimetric: Object.freeze({ x: 14, y: 10, z: 4 })
+});
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -271,6 +276,9 @@ class OpenBotWorld {
         this.totalEntitiesCreated = 0; // Total entities ever created
         this.followedAgentId = null; // Agent currently being followed by camera
         this.followedAgentInitialPos = null; // Initial position when started following
+        this.viewPreset = 'isometric';
+        this.followCameraOffset = new THREE.Vector3(10, 8, 10);
+        this.cameraTransitionUntilMs = 0;
         this.activityLogFetched = false; // Whether the activity log has been loaded for this tab visit
         this.summarizationTriggered = false; // Whether we've sent the one-time check this session
         
@@ -385,6 +393,7 @@ class OpenBotWorld {
         this.setupUIControls();
         this.setupKeyboardControls();
         this.setupMouseControls();
+        this.exposeAutomationApi();
         this.startPolling();
         this.startUptimeTimer();
         // triggerSummarizationCheck is called after first successful connection
@@ -1162,6 +1171,198 @@ class OpenBotWorld {
         renderFrame();
         this.wikiAvatarRenderers.push(state);
         return state;
+    }
+
+    normalizeAgentLookupKey(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    getViewPresetOffset(preset) {
+        const key = String(preset || '').toLowerCase();
+        const presetOffset = CAMERA_VIEW_PRESETS[key];
+        if (!presetOffset) return null;
+        return new THREE.Vector3(presetOffset.x, presetOffset.y, presetOffset.z);
+    }
+
+    getCurrentFollowOffset() {
+        return this.followCameraOffset ? this.followCameraOffset.clone() : new THREE.Vector3(10, 8, 10);
+    }
+
+    findAgentByName(name) {
+        const query = this.normalizeAgentLookupKey(name);
+        if (!query) return null;
+
+        for (const [agentId, agent] of this.agents.entries()) {
+            const candidates = [
+                agentId,
+                agent?.data?.entityId,
+                agent?.data?.entityName,
+                agent?.data?.name
+            ].map((value) => this.normalizeAgentLookupKey(value));
+            if (candidates.includes(query)) {
+                return { agentId, agent };
+            }
+        }
+        return null;
+    }
+
+    transitionCameraTo(cameraPosition, targetPosition, durationMs = 0) {
+        if (!this.camera || !this.controls || !cameraPosition || !targetPosition) {
+            return Promise.resolve(false);
+        }
+
+        const safeDuration = Math.max(0, Number(durationMs) || 0);
+        if (safeDuration <= 0) {
+            this.camera.position.copy(cameraPosition);
+            this.controls.target.copy(targetPosition);
+            this.cameraTransitionUntilMs = Date.now();
+            return Promise.resolve(true);
+        }
+
+        this.cameraTransitionUntilMs = Date.now() + safeDuration;
+        const startPos = this.camera.position.clone();
+        const startTarget = this.controls.target.clone();
+        const startTime = Date.now();
+
+        return new Promise((resolve) => {
+            const animateMove = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min(elapsed / safeDuration, 1);
+                const easeProgress = progress < 0.5
+                    ? 2 * progress * progress
+                    : -1 + ((4 - 2 * progress) * progress);
+
+                this.camera.position.lerpVectors(startPos, cameraPosition, easeProgress);
+                this.controls.target.lerpVectors(startTarget, targetPosition, easeProgress);
+
+                if (progress < 1) {
+                    requestAnimationFrame(animateMove);
+                    return;
+                }
+
+                this.camera.position.copy(cameraPosition);
+                this.controls.target.copy(targetPosition);
+                this.cameraTransitionUntilMs = Date.now();
+                resolve(true);
+            };
+
+            requestAnimationFrame(animateMove);
+        });
+    }
+
+    async waitForCameraSettled(options = {}) {
+        const timeoutMs = Math.max(250, Number(options.timeoutMs) || 2500);
+        const startTime = Date.now();
+        while (Date.now() < startTime + timeoutMs) {
+            if (Date.now() >= this.cameraTransitionUntilMs) break;
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+
+        // Allow one extra render tick for Playwright screenshots.
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+
+    async setViewPreset(preset, options = {}) {
+        const key = String(preset || '').toLowerCase();
+        const offset = this.getViewPresetOffset(key);
+        if (!offset) {
+            throw new Error(`Unknown view preset: ${preset}`);
+        }
+
+        this.viewPreset = key;
+        this.followCameraOffset.copy(offset);
+
+        const durationMs = Number(options.durationMs);
+        const shouldAnimate = options.animate !== false;
+        const transitionMs = shouldAnimate ? (Number.isFinite(durationMs) ? durationMs : 450) : 0;
+
+        if (this.followedAgentId) {
+            const followed = this.agents.get(this.followedAgentId);
+            if (!followed) return;
+            const livePos = followed.mesh.position.clone();
+            const desiredCamPos = livePos.clone().add(offset);
+            await this.transitionCameraTo(desiredCamPos, livePos, transitionMs);
+            return;
+        }
+
+        const target = this.controls?.target ? this.controls.target.clone() : new THREE.Vector3(50, 0, 50);
+        const direction = offset.clone().normalize();
+        const currentDistance = this.camera.position.distanceTo(target);
+        const distance = clamp(currentDistance, 8, 260);
+        const desiredCamPos = target.clone().addScaledVector(direction, distance);
+        await this.transitionCameraTo(desiredCamPos, target, transitionMs);
+    }
+
+    async followAgentByName(name, options = {}) {
+        const found = this.findAgentByName(name);
+        if (!found) {
+            return { ok: false, error: `Agent not found: ${name}` };
+        }
+        this.zoomToAgent(found.agentId, options);
+        await this.waitForCameraSettled(options);
+        return {
+            ok: true,
+            agentId: found.agentId,
+            agentName: found.agent?.data?.name || found.agentId
+        };
+    }
+
+    async executeAutomationCommand(commandText, options = {}) {
+        const raw = String(commandText || '').trim();
+        if (!raw) {
+            return { ok: false, error: 'Command cannot be empty' };
+        }
+
+        const followMatch = raw.match(/^follow(?:-|\s+)(.+)$/i);
+        if (followMatch) {
+            return this.followAgentByName(followMatch[1], options);
+        }
+
+        const viewMatch = raw.match(/^(?:view|angle)(?:-|\s+)(isometric|dimetric|trimetric)$/i);
+        if (viewMatch) {
+            const preset = viewMatch[1].toLowerCase();
+            await this.setViewPreset(preset, options);
+            return { ok: true, preset };
+        }
+
+        return {
+            ok: false,
+            error: 'Unsupported command. Allowed: follow-<agent-name>, view-isometric, view-dimetric, view-trimetric'
+        };
+    }
+
+    exposeAutomationApi() {
+        if (typeof window === 'undefined') return;
+
+        window.openbotAutomation = Object.freeze({
+            execute: async (commandText, options = {}) => this.executeAutomationCommand(commandText, options),
+            followByName: async (name, options = {}) => this.followAgentByName(name, options),
+            setViewPreset: async (preset, options = {}) => {
+                await this.setViewPreset(preset, options);
+                return { ok: true, preset: this.viewPreset };
+            },
+            captureReady: async (options = {}) => {
+                await this.waitForCameraSettled(options);
+                return { ok: true };
+            },
+            listAgents: () => {
+                const items = [];
+                for (const [agentId, agent] of this.agents.entries()) {
+                    items.push({
+                        agentId,
+                        name: agent?.data?.name || '',
+                        entityId: agent?.data?.entityId || '',
+                        entityName: agent?.data?.entityName || ''
+                    });
+                }
+                return items;
+            },
+            getState: () => ({
+                viewPreset: this.viewPreset,
+                followedAgentId: this.followedAgentId
+            })
+        });
     }
     
     setupUIControls() {
@@ -2248,7 +2449,7 @@ class OpenBotWorld {
         }
     }
     
-    zoomToAgent(agentId) {
+    zoomToAgent(agentId, options = {}) {
         const agent = this.agents.get(agentId);
         if (!agent) return;
 
@@ -2262,18 +2463,16 @@ class OpenBotWorld {
         this.followedAgentInitialPos = this.camera.position.clone();
         this.controls.enabled = false; // Disable manual orbit while following
 
-        const targetPos = agent.mesh.position.clone();
-
-        // Animate fly-in
+        const followOffset = this.getCurrentFollowOffset();
         const startPos = this.camera.position.clone();
-        const startTarget = this.controls.target.clone();
         const startTime = Date.now();
-        const duration = 1000;
+        const duration = Math.max(0, Number(options.durationMs) || 1000);
+        this.cameraTransitionUntilMs = Date.now() + duration;
 
         const animateMove = () => {
             if (this.followedAgentId !== agentId) return; // cancelled mid-flight
             const elapsed = Date.now() - startTime;
-            const progress = Math.min(elapsed / duration, 1);
+            const progress = duration <= 0 ? 1 : Math.min(elapsed / duration, 1);
             const easeProgress = progress < 0.5
                 ? 2 * progress * progress
                 : -1 + (4 - 2 * progress) * progress;
@@ -2281,9 +2480,9 @@ class OpenBotWorld {
             const livePos = this.agents.get(agentId)?.mesh.position;
             if (!livePos) return;
 
-            const camTargetX = livePos.x + 10;
-            const camTargetY = livePos.y + 8;
-            const camTargetZ = livePos.z + 10;
+            const camTargetX = livePos.x + followOffset.x;
+            const camTargetY = livePos.y + followOffset.y;
+            const camTargetZ = livePos.z + followOffset.z;
 
             this.camera.position.x = startPos.x + (camTargetX - startPos.x) * easeProgress;
             this.camera.position.y = startPos.y + (camTargetY - startPos.y) * easeProgress;
@@ -2293,6 +2492,8 @@ class OpenBotWorld {
 
             if (progress < 1) {
                 requestAnimationFrame(animateMove);
+            } else {
+                this.cameraTransitionUntilMs = Date.now();
             }
         };
 
@@ -3906,9 +4107,9 @@ class OpenBotWorld {
                 this.controls.target.lerp(livePos, 0.1);
                 // Keep camera at a fixed offset above/behind the lobster
                 const desiredCamPos = new THREE.Vector3(
-                    livePos.x + 10,
-                    livePos.y + 8,
-                    livePos.z + 10
+                    livePos.x + this.followCameraOffset.x,
+                    livePos.y + this.followCameraOffset.y,
+                    livePos.z + this.followCameraOffset.z
                 );
                 this.camera.position.lerp(desiredCamPos, 0.1);
             } else {
