@@ -532,6 +532,21 @@ function applyCombatDamageToAgent(agent, amount, sourceType = 'impact') {
 }
 
 function spawnLootDropsAt(position, amount = 3) {
+  const resourceCounts = { rock: 0, kelp: 0, seaweed: 0 };
+  for (const object of worldState.objects.values()) {
+    if (resourceCounts[object.type] !== undefined) {
+      resourceCounts[object.type] += 1;
+    }
+  }
+  const crowdedByType = (
+    resourceCounts.rock >= (MAP_OBJECT_TARGETS.rock || 0)
+    && resourceCounts.kelp >= (MAP_OBJECT_TARGETS.kelp || 0)
+    && resourceCounts.seaweed >= (MAP_OBJECT_TARGETS.seaweed || 0)
+  );
+  if (crowdedByType) {
+    return;
+  }
+
   const lootTypes = ['kelp', 'rock', 'seaweed', 'algae_pallet'];
   const drops = Math.max(1, Math.floor(Number(amount) || 1));
   for (let i = 0; i < drops; i += 1) {
