@@ -168,6 +168,7 @@ const TICK_RATE = getPositiveNumber('TICK_RATE', 30, 5, 60); // 30 updates per s
 const TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const DAY_NIGHT_CYCLE_SECONDS = 24 * 60 * 60;
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
+const MAP_EDGE_BUFFER = 1.35;
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
 const WORLD_STATE_DELTA_TICK_WINDOW = Number(process.env.WORLD_STATE_DELTA_TICK_WINDOW || (TICK_RATE * 60));
 const MAX_WORLD_STATE_LIMIT = Number(process.env.MAX_WORLD_STATE_LIMIT || 500);
@@ -198,6 +199,24 @@ const ALGAE_PALLET_RADIUS = Number(process.env.ALGAE_PALLET_RADIUS || 0.95);
 const ALGAE_PALLET_ENERGY_PER_SERVE = Number(process.env.ALGAE_PALLET_ENERGY_PER_SERVE || 24);
 const ALGAE_PALLET_MAX_SERVES = Math.max(1, Math.floor(Number(process.env.ALGAE_PALLET_MAX_SERVES || 3)));
 const HARVEST_INTERACTION_BUFFER = Number(process.env.HARVEST_INTERACTION_BUFFER || 1.2);
+const COMBAT_EVENTS_MAX = Math.max(40, Math.floor(Number(process.env.COMBAT_EVENTS_MAX || 220)));
+const COMBAT_EVENTS_WORLD_PAYLOAD_MAX = Math.max(20, Math.floor(Number(process.env.COMBAT_EVENTS_WORLD_PAYLOAD_MAX || 80)));
+const OCTOPUS_MAX_ACTIVE = Math.max(1, Math.floor(Number(process.env.OCTOPUS_MAX_ACTIVE || 2)));
+const OCTOPUS_SPAWN_MIN_SEC = Math.max(6, Number(process.env.OCTOPUS_SPAWN_MIN_SEC || 14));
+const OCTOPUS_SPAWN_MAX_SEC = Math.max(OCTOPUS_SPAWN_MIN_SEC + 1, Number(process.env.OCTOPUS_SPAWN_MAX_SEC || 34));
+const OCTOPUS_MAX_HP = Math.max(20, Number(process.env.OCTOPUS_MAX_HP || 140));
+const OCTOPUS_SPEED_PER_SEC = Math.max(0.5, Number(process.env.OCTOPUS_SPEED_PER_SEC || 3.2));
+const OCTOPUS_MELEE_RANGE = Math.max(1.2, Number(process.env.OCTOPUS_MELEE_RANGE || 3.2));
+const OCTOPUS_AOE_RANGE = Math.max(OCTOPUS_MELEE_RANGE + 0.5, Number(process.env.OCTOPUS_AOE_RANGE || 8.5));
+const OCTOPUS_MELEE_COOLDOWN_SEC = Math.max(0.8, Number(process.env.OCTOPUS_MELEE_COOLDOWN_SEC || 2.6));
+const OCTOPUS_AOE_COOLDOWN_SEC = Math.max(OCTOPUS_MELEE_COOLDOWN_SEC + 0.4, Number(process.env.OCTOPUS_AOE_COOLDOWN_SEC || 4.4));
+const LOBSTER_COMBAT_RANGE_MELEE = Math.max(1.2, Number(process.env.LOBSTER_COMBAT_RANGE_MELEE || 4.2));
+const LOBSTER_COMBAT_RANGE_LONG = Math.max(LOBSTER_COMBAT_RANGE_MELEE + 1, Number(process.env.LOBSTER_COMBAT_RANGE_LONG || 11.5));
+const LOBSTER_COMBAT_AOE_RADIUS = Math.max(2.5, Number(process.env.LOBSTER_COMBAT_AOE_RADIUS || 6.8));
+const LOBSTER_COMBAT_SPEED_PER_SEC = Math.max(0.8, Number(process.env.LOBSTER_COMBAT_SPEED_PER_SEC || 3.6));
+const LOBSTER_COMBAT_MELEE_COOLDOWN_SEC = Math.max(0.6, Number(process.env.LOBSTER_COMBAT_MELEE_COOLDOWN_SEC || 1.35));
+const LOBSTER_COMBAT_LONG_COOLDOWN_SEC = Math.max(LOBSTER_COMBAT_MELEE_COOLDOWN_SEC + 0.3, Number(process.env.LOBSTER_COMBAT_LONG_COOLDOWN_SEC || 2.4));
+const LOBSTER_ATTACK_ENERGY_COST = Math.max(0.2, Number(process.env.LOBSTER_ATTACK_ENERGY_COST || 2.4));
 const MAP_EXPANSION_MAX_TILES = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_MAX_TILES || 500)));
 const MAP_EXPANSION_COOLDOWN_TICKS = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_COOLDOWN_TICKS || (TICK_RATE * 25))));
 const SKILL_DEFS = Object.freeze({
@@ -258,9 +277,11 @@ function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
 const worldState = {
   agents: new Map(), // agentId -> agent data
   objects: new Map(), // objectId -> object data
+  threats: new Map(), // threatId -> hostile NPC state
   expansionTiles: [], // shared 1x1 map growth tiles
   mapExpansionLevel: 0,
   chatMessages: [], // Recent chat messages
+  combatEvents: [], // Recent combat events for client-side effects
   tick: 0,
   startTime: Date.now(), // Server start time for uptime calculation
   worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
@@ -332,6 +353,8 @@ function getWorldStateMeta() {
     totalEntitiesCreated: worldState.totalEntitiesCreated,
     worldTime,
     objects: Array.from(worldState.objects.values()),
+    threats: Array.from(worldState.threats.values()),
+    combatEvents: worldState.combatEvents.slice(-COMBAT_EVENTS_WORLD_PAYLOAD_MAX),
     expansionTiles: worldState.expansionTiles,
     mapExpansionLevel: worldState.mapExpansionLevel
   };
@@ -387,6 +410,7 @@ let mapRefillTimer = null;
 let mapRefillInProgress = false;
 let algaePalletRefillTimer = null;
 let algaePalletRefillInProgress = false;
+let nextThreatSpawnInSec = randomInRange(OCTOPUS_SPAWN_MIN_SEC, OCTOPUS_SPAWN_MAX_SEC);
 
 function randomInRange(min, max) {
   return min + Math.random() * (max - min);
@@ -411,6 +435,303 @@ function distance2D(a, b) {
   const dx = Number(a.x || 0) - Number(b.x || 0);
   const dz = Number(a.z || 0) - Number(b.z || 0);
   return Math.sqrt((dx * dx) + (dz * dz));
+}
+
+function clampWorldCoordX(x) {
+  return Math.max(MAP_EDGE_BUFFER, Math.min(WORLD_SIZE.x - MAP_EDGE_BUFFER, Number(x) || 0));
+}
+
+function clampWorldCoordZ(z) {
+  return Math.max(MAP_EDGE_BUFFER, Math.min(WORLD_SIZE.y - MAP_EDGE_BUFFER, Number(z) || 0));
+}
+
+function isAgentCombatTargetable(agent) {
+  if (!agent) return false;
+  if (agent.sleeping) return false;
+  return clampEnergy(agent.energy) > 0;
+}
+
+function pushCombatEvent(event) {
+  if (!event || typeof event !== 'object') return;
+  const enriched = {
+    id: event.id || `combat-${uuidv4()}`,
+    tick: worldState.tick,
+    at: Date.now(),
+    ...event
+  };
+  worldState.combatEvents.push(enriched);
+  if (worldState.combatEvents.length > COMBAT_EVENTS_MAX) {
+    worldState.combatEvents = worldState.combatEvents.slice(-COMBAT_EVENTS_MAX);
+  }
+}
+
+function createOctopusThreat(position = {}) {
+  const maxHp = OCTOPUS_MAX_HP;
+  return {
+    id: `threat-octopus-${uuidv4()}`,
+    type: 'octopus',
+    position: {
+      x: clampWorldCoordX(position.x ?? randomInRange(6, WORLD_SIZE.x - 6)),
+      y: 0.6,
+      z: clampWorldCoordZ(position.z ?? randomInRange(6, WORLD_SIZE.y - 6))
+    },
+    velocity: { x: 0, z: 0 },
+    hp: maxHp,
+    maxHp,
+    targetAgentId: null,
+    state: 'hunting',
+    attackCooldownSec: randomInRange(0.6, 1.8),
+    spawnedAtTick: worldState.tick
+  };
+}
+
+function findNearestCombatAgent(position) {
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const agent of worldState.agents.values()) {
+    if (!isAgentCombatTargetable(agent)) continue;
+    const d = distance2D(position, agent.position);
+    if (d < nearestDistance) {
+      nearest = agent;
+      nearestDistance = d;
+    }
+  }
+  return { agent: nearest, distance: nearestDistance };
+}
+
+function movePointTowards(point, target, maxStep) {
+  if (!point || !target || maxStep <= 0) return;
+  const dx = Number(target.x || 0) - Number(point.x || 0);
+  const dz = Number(target.z || 0) - Number(point.z || 0);
+  const dist = Math.sqrt((dx * dx) + (dz * dz));
+  if (dist <= 0.0001) return;
+  const step = Math.min(dist, maxStep);
+  point.x = clampWorldCoordX(Number(point.x || 0) + ((dx / dist) * step));
+  point.z = clampWorldCoordZ(Number(point.z || 0) + ((dz / dist) * step));
+}
+
+function applyCombatDamageToAgent(agent, amount, sourceType = 'impact') {
+  if (!agent) return 0;
+  const before = clampEnergy(agent.energy);
+  const damage = Math.max(0, Number(amount) || 0);
+  agent.energy = clampEnergy(before - damage);
+  const dealt = before - agent.energy;
+  if (dealt <= 0) return 0;
+
+  if (agent.energy <= AGENT_ENERGY_MIN) {
+    agent.sleeping = true;
+    agent.state = 'sleeping';
+  }
+  agent.lastAction = {
+    type: 'combat_hit',
+    sourceType,
+    damage: dealt
+  };
+  markAgentUpdated(agent);
+  return dealt;
+}
+
+function spawnLootDropsAt(position, amount = 3) {
+  const lootTypes = ['kelp', 'rock', 'seaweed', 'algae_pallet'];
+  const drops = Math.max(1, Math.floor(Number(amount) || 1));
+  for (let i = 0; i < drops; i += 1) {
+    const type = lootTypes[Math.floor(Math.random() * lootTypes.length)];
+    const dropped = buildMapObject(type);
+    const jitterX = randomInRange(-2.8, 2.8);
+    const jitterZ = randomInRange(-2.8, 2.8);
+    dropped.position.x = clampWorldCoordX((Number(position?.x) || 50) + jitterX);
+    dropped.position.z = clampWorldCoordZ((Number(position?.z) || 50) + jitterZ);
+    if (type === 'algae_pallet') {
+      dropped.position.y = 0.45;
+      dropped.data = {
+        ...dropped.data,
+        servesRemaining: Math.max(1, Math.floor(randomInRange(1, ALGAE_PALLET_MAX_SERVES + 1))),
+        energyPerServe: ALGAE_PALLET_ENERGY_PER_SERVE
+      };
+    }
+    worldState.objects.set(dropped.id, dropped);
+    if (process.env.DATABASE_URL) {
+      db.saveWorldObject(dropped.id, dropped.type, dropped.position, dropped.data).catch((error) => {
+        console.error('Failed persisting octopus loot drop:', error);
+      });
+    }
+  }
+}
+
+function removeThreatWithLoot(threat, killedByAgentId = null) {
+  if (!threat) return;
+  worldState.threats.delete(threat.id);
+  spawnLootDropsAt(threat.position, Math.floor(randomInRange(2, 6)));
+  pushCombatEvent({
+    eventType: 'threat_defeated',
+    actorType: 'lobster',
+    actorId: killedByAgentId,
+    threatId: threat.id,
+    threatType: threat.type,
+    position: {
+      x: Number(threat.position?.x) || 0,
+      y: Number(threat.position?.y) || 0,
+      z: Number(threat.position?.z) || 0
+    }
+  });
+}
+
+function maybeSpawnOctopusThreat(dtSeconds) {
+  if (worldState.threats.size >= OCTOPUS_MAX_ACTIVE) return;
+  nextThreatSpawnInSec = Math.max(0, nextThreatSpawnInSec - Math.max(0, Number(dtSeconds) || 0));
+  if (nextThreatSpawnInSec > 0) return;
+  const threat = createOctopusThreat();
+  worldState.threats.set(threat.id, threat);
+  nextThreatSpawnInSec = randomInRange(OCTOPUS_SPAWN_MIN_SEC, OCTOPUS_SPAWN_MAX_SEC);
+}
+
+function processThreatCombatTick(dtSeconds) {
+  maybeSpawnOctopusThreat(dtSeconds);
+
+  for (const threat of worldState.threats.values()) {
+    threat.attackCooldownSec = Math.max(0, Number(threat.attackCooldownSec || 0) - dtSeconds);
+    const { agent: nearestAgent, distance } = findNearestCombatAgent(threat.position);
+    threat.targetAgentId = nearestAgent?.id || null;
+
+    if (!nearestAgent) {
+      threat.state = 'searching';
+      threat.velocity.x = 0;
+      threat.velocity.z = 0;
+      continue;
+    }
+
+    movePointTowards(threat.position, nearestAgent.position, OCTOPUS_SPEED_PER_SEC * dtSeconds);
+    const toTargetX = Number(nearestAgent.position?.x || 0) - Number(threat.position?.x || 0);
+    const toTargetZ = Number(nearestAgent.position?.z || 0) - Number(threat.position?.z || 0);
+    threat.velocity.x = toTargetX;
+    threat.velocity.z = toTargetZ;
+    threat.state = 'hunting';
+
+    if (threat.attackCooldownSec > 0) continue;
+    if (distance > OCTOPUS_AOE_RANGE) continue;
+
+    const useLongRange = Math.random() < 0.33;
+    const attackType = useLongRange ? 'long_range' : 'melee';
+    const targets = useLongRange
+      ? Array.from(worldState.agents.values()).filter((agent) => (
+        isAgentCombatTargetable(agent) && distance2D(agent.position, threat.position) <= OCTOPUS_AOE_RANGE
+      ))
+      : (distance <= OCTOPUS_MELEE_RANGE && isAgentCombatTargetable(nearestAgent) ? [nearestAgent] : []);
+
+    if (targets.length === 0) continue;
+
+    const impacts = [];
+    for (const target of targets) {
+      const damage = useLongRange
+        ? randomInRange(6.5, 11.5)
+        : randomInRange(9.5, 16.5);
+      const dealt = applyCombatDamageToAgent(target, damage, 'octopus');
+      if (dealt <= 0) continue;
+      impacts.push({
+        targetId: target.id,
+        damage: Number(dealt.toFixed(2)),
+        sleeping: Boolean(target.sleeping),
+        energy: Number(clampEnergy(target.energy).toFixed(2))
+      });
+    }
+
+    if (impacts.length === 0) continue;
+    threat.attackCooldownSec = useLongRange ? OCTOPUS_AOE_COOLDOWN_SEC : OCTOPUS_MELEE_COOLDOWN_SEC;
+    threat.state = useLongRange ? 'casting' : 'striking';
+    pushCombatEvent({
+      eventType: 'threat_attack',
+      actorType: 'octopus',
+      actorId: threat.id,
+      threatId: threat.id,
+      attackType,
+      position: { ...threat.position },
+      targets: impacts
+    });
+  }
+
+}
+
+function processLobsterCombatAgainstThreats(dtSeconds) {
+  if (worldState.threats.size === 0) return;
+  const deadThreats = new Map(); // threatId -> killerAgentId
+
+  for (const agent of worldState.agents.values()) {
+    if (!isAgentCombatTargetable(agent)) continue;
+    const attackCooldownSec = Math.max(0, Number(agent.combatCooldownSec || 0) - dtSeconds);
+    agent.combatCooldownSec = attackCooldownSec;
+
+    let nearestThreat = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const threat of worldState.threats.values()) {
+      const d = distance2D(agent.position, threat.position);
+      if (d < nearestDistance) {
+        nearestDistance = d;
+        nearestThreat = threat;
+      }
+    }
+    if (!nearestThreat) continue;
+
+    if (nearestDistance > LOBSTER_COMBAT_RANGE_MELEE) {
+      movePointTowards(agent.position, nearestThreat.position, LOBSTER_COMBAT_SPEED_PER_SEC * dtSeconds);
+      agent.state = 'moving';
+      markAgentUpdated(agent);
+    }
+
+    if (agent.combatCooldownSec > 0) continue;
+    if (nearestDistance > LOBSTER_COMBAT_RANGE_LONG) continue;
+
+    const useLongRange = Math.random() < 0.34;
+    const attackType = useLongRange ? 'long_range' : 'melee';
+    const targets = useLongRange
+      ? Array.from(worldState.threats.values()).filter((threat) => distance2D(agent.position, threat.position) <= LOBSTER_COMBAT_AOE_RADIUS)
+      : [nearestThreat];
+    if (targets.length === 0) continue;
+
+    const impacts = [];
+    for (const target of targets) {
+      const damage = useLongRange
+        ? randomInRange(6.5, 11.5)
+        : randomInRange(10.5, 18.5);
+      target.hp = Math.max(0, Number(target.hp || target.maxHp || OCTOPUS_MAX_HP) - damage);
+      impacts.push({
+        threatId: target.id,
+        damage: Number(damage.toFixed(2)),
+        hp: Number(target.hp.toFixed(2)),
+        maxHp: Number((target.maxHp || OCTOPUS_MAX_HP).toFixed(2))
+      });
+      if (target.hp <= 0) {
+        deadThreats.set(target.id, agent.id);
+      }
+    }
+
+    applyCombatDamageToAgent(agent, LOBSTER_ATTACK_ENERGY_COST, 'self_cost');
+    agent.state = 'acting';
+    agent.lastAction = {
+      type: 'combat_attack',
+      attackType,
+      targetType: 'octopus',
+      targets: impacts.map((entry) => entry.threatId)
+    };
+    trainAgentSkill(agent, 'defend');
+    markAgentUpdated(agent);
+
+    pushCombatEvent({
+      eventType: 'lobster_attack',
+      actorType: 'lobster',
+      actorId: agent.id,
+      attackType,
+      position: { ...agent.position },
+      targets: impacts
+    });
+
+    agent.combatCooldownSec = useLongRange ? LOBSTER_COMBAT_LONG_COOLDOWN_SEC : LOBSTER_COMBAT_MELEE_COOLDOWN_SEC;
+  }
+
+  for (const [threatId, killerAgentId] of deadThreats.entries()) {
+    const threat = worldState.threats.get(threatId);
+    if (!threat) continue;
+    removeThreatWithLoot(threat, killerAgentId);
+  }
 }
 
 function isObjectPlacementValid(x, z, radius) {
@@ -2143,6 +2464,8 @@ async function gameLoop() {
   }
 
   await processActionQueues();
+  processLobsterCombatAgainstThreats(dtSeconds);
+  processThreatCombatTick(dtSeconds);
 }
 
 function runAgentMaintenance() {
