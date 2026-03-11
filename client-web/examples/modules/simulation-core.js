@@ -21,6 +21,13 @@ const BUILD_COSTS = {
   shelter: { rock: 5, kelp: 3, seaweed: 4 },
   expand: { rock: 1, kelp: 1, seaweed: 1 }
 };
+const SHELTER_MAX_HP = 120;
+const SHELTER_PASSIVE_DECAY_PER_SEC = 0.24;
+const SHELTER_THREAT_DPS = 9.5;
+const SHELTER_SAFE_DISTANCE = 0.9;
+const SHELTER_REST_ENERGY_PER_SEC = 2.4;
+const SHELTER_REBUILD_COOLDOWN_SEC = 28;
+const SHELTER_FORCED_FIGHT_SEC = 7.5;
 
 function hashSeed(text) {
   const value = String(text || 'openbot-seed');
@@ -160,6 +167,11 @@ export function createSimulation({ seed, moduleId }) {
           tornadoCenterX: x,
           tornadoCenterZ: z,
           tornadoThrowReady: false
+        },
+        shelterState: {
+          inside: false,
+          rebuildCooldown: 0,
+          forcedFightFor: 0
         },
         damageMarkers: []
       };
@@ -378,6 +390,32 @@ export function createSimulation({ seed, moduleId }) {
 
   function getOwnedShelter(lobsterId) {
     return state.world.shelters.find((entry) => entry.ownerId === lobsterId) || null;
+  }
+
+  function getShelterThreatLevel(lobster, shelter) {
+    let threat = 0;
+
+    if (enabled(6)) {
+      state.world.hazards.forEach((hazard) => {
+        const d = distance2D(shelter, hazard);
+        if (d <= (hazard.radius + shelter.radius + 1.6)) {
+          threat += 1.1;
+        }
+      });
+    }
+
+    if (enabled(5)) {
+      state.lobsters.forEach((other) => {
+        if (other.id === lobster.id || other.sleeping) return;
+        const queued = other.actionQueue[0]?.type || '';
+        if (queued !== 'attack' && other.combat.mode !== 'attack') return;
+        if (distance2D(other.position, shelter) <= 14) {
+          threat += 0.8;
+        }
+      });
+    }
+
+    return threat;
   }
 
   function distancePointToSegment2D(point, from, to) {
@@ -990,15 +1028,22 @@ export function createSimulation({ seed, moduleId }) {
             existing.x = action.payload.to.x;
             existing.z = action.payload.to.z;
             existing.radius = 5;
+            existing.hp = SHELTER_MAX_HP;
+            existing.maxHp = SHELTER_MAX_HP;
           } else {
             state.world.shelters.push({
               id: `shelter-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
               ownerId: lobster.id,
               x: action.payload.to.x,
               z: action.payload.to.z,
-              radius: 5
+              radius: 5,
+              hp: SHELTER_MAX_HP,
+              maxHp: SHELTER_MAX_HP
             });
           }
+          lobster.shelterState.rebuildCooldown = 0;
+          lobster.shelterState.forcedFightFor = 0;
+          lobster.shelterState.inside = false;
           lobster.structuresBuilt += 1;
           awardBuilderXp(lobster, 12);
           pointsFor(lobster.id, 16, 'built shelter');
@@ -1146,13 +1191,19 @@ export function createSimulation({ seed, moduleId }) {
     if (lobster.actionQueue.length > 0) return;
     const hasShelter = Boolean(getOwnedShelter(lobster.id));
     const lowStock = RESOURCE_TYPES.some((key) => (lobster.inventory[key] || 0) < 2);
+    const shelterState = lobster.shelterState || { rebuildCooldown: 0, forcedFightFor: 0, inside: false };
+
+    if (shelterState.forcedFightFor > 0 && enabled(5)) {
+      queuePriorityAction(lobster, 'attack', { ttl: 10, fromShelterExplosion: true });
+      return;
+    }
 
     if (enabled(7) && state.world.rescues.some((entry) => !entry.rescuedBy)) {
       queueAction(lobster, 'rescue', { ttl: 24 });
       return;
     }
 
-    if (!hasShelter && spendInventory(lobster, BUILD_COSTS.shelter) && rng() > 0.68) {
+    if (!hasShelter && shelterState.rebuildCooldown <= 0 && spendInventory(lobster, BUILD_COSTS.shelter)) {
       queueAction(lobster, 'buildShelter', { ttl: 24, to: randomPlayablePoint() });
       return;
     }
@@ -1187,8 +1238,58 @@ export function createSimulation({ seed, moduleId }) {
     });
   }
 
+  function tickShelterState(lobster, dt) {
+    const shelter = getOwnedShelter(lobster.id);
+    const shelterState = lobster.shelterState;
+    shelterState.rebuildCooldown = Math.max(0, shelterState.rebuildCooldown - dt);
+    shelterState.forcedFightFor = Math.max(0, shelterState.forcedFightFor - dt);
+
+    if (!shelter) {
+      shelterState.inside = false;
+      return;
+    }
+
+    shelter.hp = Number.isFinite(shelter.hp) ? shelter.hp : SHELTER_MAX_HP;
+    shelter.maxHp = Number.isFinite(shelter.maxHp) ? shelter.maxHp : SHELTER_MAX_HP;
+
+    const threat = getShelterThreatLevel(lobster, shelter);
+    shelter.hp = Math.max(0, shelter.hp - ((SHELTER_PASSIVE_DECAY_PER_SEC + (threat * SHELTER_THREAT_DPS)) * dt));
+
+    if (shelterState.forcedFightFor <= 0 && threat > 0.15) {
+      const d = distance2D(lobster.position, shelter);
+      if (d <= (shelter.radius + SHELTER_SAFE_DISTANCE)) {
+        shelterState.inside = true;
+        lobster.actionQueue = [];
+        lobster.locomotion.phase = 'idle';
+        lobster.state = 'shelter';
+        lobster.position.x += (shelter.x - lobster.position.x) * 0.22;
+        lobster.position.z += (shelter.z - lobster.position.z) * 0.22;
+        lobster.position.y = 0;
+        lobster.stats.energy = clamp(lobster.stats.energy + (SHELTER_REST_ENERGY_PER_SEC * dt), 0, 100);
+      } else if (lobster.actionQueue.length === 0) {
+        queuePriorityAction(lobster, 'retreat', { ttl: 12, to: { x: shelter.x, z: shelter.z }, toShelter: true });
+      }
+    } else if (shelterState.inside) {
+      shelterState.inside = false;
+      if (lobster.state === 'shelter') {
+        lobster.state = 'idle';
+      }
+    }
+
+    if (shelter.hp <= 0) {
+      state.world.shelters = state.world.shelters.filter((entry) => entry.id !== shelter.id);
+      shelterState.inside = false;
+      shelterState.rebuildCooldown = SHELTER_REBUILD_COOLDOWN_SEC;
+      shelterState.forcedFightFor = SHELTER_FORCED_FIGHT_SEC;
+      lobster.state = 'attack';
+      queuePriorityAction(lobster, 'attack', { ttl: 12, fromShelterExplosion: true });
+      pushEvent('shelter', `${lobster.name}'s shelter exploded after taking heavy octopus pressure.`);
+    }
+  }
+
   function tickStats(lobster, dt) {
     lobster.stats.survivalSeconds += dt;
+    tickShelterState(lobster, dt);
 
     if (lobster.sleeping) {
       lobster.state = 'sleeping';

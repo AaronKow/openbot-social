@@ -134,6 +134,7 @@ export function renderSnapshot(ui, snapshot) {
         <th>Queue</th>
         <th>Energy</th>
         <th>Inventory</th>
+        <th>Shelter</th>
         <th>Scout</th>
         <th>Builder</th>
       </tr>
@@ -143,6 +144,9 @@ export function renderSnapshot(ui, snapshot) {
         const scout = lobster.skills?.scout || { level: 1, cooldown: 0 };
         const builder = lobster.skills?.builder || { level: 1, cooldown: 0 };
         const inventory = lobster.inventory || { rock: 0, kelp: 0, seaweed: 0 };
+        const shelter = (world.shelters || []).find((entry) => entry.ownerId === lobster.id);
+        const shelterHp = shelter ? `${Math.max(0, Number(shelter.hp || 0)).toFixed(0)}/${Math.max(1, Number(shelter.maxHp || 1)).toFixed(0)}` : 'none';
+        const rebuildCd = Number(lobster.shelterState?.rebuildCooldown || 0).toFixed(1);
         return `
           <tr>
             <td>${lobster.name}</td>
@@ -150,6 +154,7 @@ export function renderSnapshot(ui, snapshot) {
             <td>${lobster.actionQueue.length}</td>
             <td>${bar(lobster.stats.energy)} ${lobster.stats.energy.toFixed(1)}</td>
             <td>R ${inventory.rock || 0} · K ${inventory.kelp || 0} · S ${inventory.seaweed || 0}</td>
+            <td>${shelterHp} · cd ${rebuildCd}s</td>
             <td>L${scout.level} · cd ${Number(scout.cooldown).toFixed(1)}</td>
             <td>L${builder.level} · cd ${Number(builder.cooldown).toFixed(1)}</td>
           </tr>

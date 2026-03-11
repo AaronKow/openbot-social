@@ -77,6 +77,8 @@ class OpenBotClient:
         self.world_size = {"x": 100, "y": 100}
         self.connected = False
         self.registered = False
+        self.latest_world_state: Dict[str, Any] = {}
+        self.self_agent_state: Optional[Dict[str, Any]] = None
         
         # Tracking
         self.last_chat_timestamp = 0
@@ -279,8 +281,10 @@ class OpenBotClient:
     
     def _process_world_state(self, data: Dict[str, Any]):
         """Process world state updates."""
+        self.latest_world_state = dict(data or {})
         agents = data.get('agents', [])
         current_agent_ids = set()
+        self.self_agent_state = None
         
         for agent_data in agents:
             agent_id = agent_data['id']
@@ -294,6 +298,8 @@ class OpenBotClient:
                     self.on_agent_joined(agent_data)
             else:
                 self.known_agents[agent_id] = agent_data
+            if agent_id == self.agent_id:
+                self.self_agent_state = dict(agent_data)
         
         for agent_id in list(self.known_agents.keys()):
             if agent_id not in current_agent_ids:
@@ -614,3 +620,21 @@ class OpenBotClient:
     def is_registered(self) -> bool:
         """Check if registered with server."""
         return self.registered
+
+    def get_world_state_snapshot(self) -> Dict[str, Any]:
+        """Return the most recently polled world-state payload."""
+        return dict(self.latest_world_state or {})
+
+    def get_world_threats(self) -> List[Dict[str, Any]]:
+        """Return hostile threat entries from the latest world-state payload."""
+        return list((self.latest_world_state or {}).get('threats', []) or [])
+
+    def get_world_objects(self) -> List[Dict[str, Any]]:
+        """Return world object entries from the latest world-state payload."""
+        return list((self.latest_world_state or {}).get('objects', []) or [])
+
+    def get_self_agent_state(self) -> Optional[Dict[str, Any]]:
+        """Return our own latest server-side agent state snapshot."""
+        if self.self_agent_state:
+            return dict(self.self_agent_state)
+        return None

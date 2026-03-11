@@ -89,7 +89,7 @@ Pivot boring chats toward these. Use news from 📰 lines in observations.
 
 World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
 
-Actions (1–16 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely). For long think intervals, produce enough actions to keep the lobster active until the next AI call.
+Actions (1–16 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), harvest(resource), expand_map(x,z), wait(rarely). For long think intervals, produce enough actions to keep the lobster active until the next AI call.
 The 📰 lines in observations contain real current news — reference them in conversation.
 
 Observation markers:
@@ -189,6 +189,16 @@ INTEREST_MAX_COUNT = 5            # never exceed 5
 INTEREST_SCORE_DECAY = 0.95       # per-tick decay on local engagement scores
 INTEREST_SCORE_BUMP = 3.0         # score bump when keyword matches in chat
 INTEREST_EVOLVE_EVERY_N_TICKS = 50  # LLM evolution check interval
+
+# ── Shelter-survival runtime model (production agent side) ───────
+SHELTER_BUILD_COST = {"rock": 5, "kelp": 3, "seaweed": 4}
+SHELTER_MAX_HP = 120.0
+SHELTER_PASSIVE_DECAY_PER_TICK = 0.06
+SHELTER_THREAT_DAMAGE_PER_TICK = 9.0
+SHELTER_TRIGGER_DISTANCE = 15.0
+SHELTER_HOLD_DISTANCE = 2.8
+SHELTER_REBUILD_COOLDOWN_SECONDS = 28.0
+SHELTER_FORCED_FIGHT_SECONDS = 8.0
 
 
 def _normalize_weights(interests: List[Dict]) -> List[Dict]:
@@ -533,7 +543,7 @@ TOOLS = [
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["chat", "move", "move_to_agent", "emote", "wait"],
+                                "enum": ["chat", "move", "move_to_agent", "emote", "harvest", "expand_map", "wait"],
                                 "description": "The kind of action."
                             },
                             "message": {
@@ -555,6 +565,15 @@ TOOLS = [
                             "emote": {
                                 "type": "string",
                                 "description": "Emote to perform (only for type=emote)."
+                            },
+                            "resource_type": {
+                                "type": "string",
+                                "enum": ["rock", "kelp", "seaweed"],
+                                "description": "Optional resource target when harvesting (only for type=harvest)."
+                            },
+                            "object_id": {
+                                "type": "string",
+                                "description": "Optional world object id to harvest (only for type=harvest)."
                             }
                         },
                         "required": ["type"]
@@ -707,6 +726,16 @@ class AIAgent:
         self._cognitive_loop = CognitiveLoop(self)
         self._pending_plan_actions: List[Dict[str, Any]] = []
         self._next_action_step_at = 0.0
+        self._shelter_runtime: Dict[str, Any] = {
+            "has_shelter": False,
+            "hp": 0.0,
+            "max_hp": SHELTER_MAX_HP,
+            "anchor": None,
+            "build_cooldown_until_tick": 0,
+            "forced_fight_until_tick": 0,
+            "inside": False,
+            "last_event": "",
+        }
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -715,6 +744,123 @@ class AIAgent:
     def _conversation_window_seconds(self) -> float:
         """Recent-conversation fetch window that remains useful for long tick intervals."""
         return max(60.0, self.TICK_INTERVAL * 2)
+
+    def _seconds_to_world_ticks(self, seconds: float) -> int:
+        return max(1, int(round(max(0.0, seconds) * self._queue_world_tick_rate)))
+
+    def _get_nearest_threat(self, position: Dict[str, float], threats: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        nearest = None
+        best = float("inf")
+        px = float(position.get("x", 0.0))
+        pz = float(position.get("z", 0.0))
+        for threat in threats:
+            tpos = threat.get("position") or {}
+            tx = float(tpos.get("x", 0.0))
+            tz = float(tpos.get("z", 0.0))
+            dist = math.hypot(px - tx, pz - tz)
+            if dist < best:
+                best = dist
+                nearest = {
+                    "id": threat.get("id"),
+                    "type": threat.get("type", "octopus"),
+                    "x": tx,
+                    "z": tz,
+                    "distance": dist,
+                }
+        return nearest
+
+    def _can_build_shelter_from_inventory(self, inventory: Dict[str, Any]) -> bool:
+        for key, needed in SHELTER_BUILD_COST.items():
+            if float(inventory.get(key, 0) or 0) < float(needed):
+                return False
+        return True
+
+    def _update_shelter_runtime(
+        self,
+        world_tick: int,
+        position: Dict[str, float],
+        inventory: Dict[str, Any],
+        threats: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        runtime = self._shelter_runtime
+        runtime["inside"] = False
+        runtime["last_event"] = ""
+
+        nearest = self._get_nearest_threat(position, threats)
+        threat_distance = nearest["distance"] if nearest else None
+
+        if runtime["has_shelter"]:
+            damage = SHELTER_PASSIVE_DECAY_PER_TICK
+            if threat_distance is not None and threat_distance <= SHELTER_TRIGGER_DISTANCE:
+                proximity = 1.0 - (threat_distance / SHELTER_TRIGGER_DISTANCE)
+                damage += max(0.0, proximity) * SHELTER_THREAT_DAMAGE_PER_TICK
+            runtime["hp"] = max(0.0, float(runtime["hp"]) - damage)
+            if runtime["hp"] <= 0.0:
+                runtime["has_shelter"] = False
+                runtime["anchor"] = None
+                runtime["build_cooldown_until_tick"] = world_tick + self._seconds_to_world_ticks(SHELTER_REBUILD_COOLDOWN_SECONDS)
+                runtime["forced_fight_until_tick"] = world_tick + self._seconds_to_world_ticks(SHELTER_FORCED_FIGHT_SECONDS)
+                runtime["last_event"] = "exploded"
+
+        can_build = (
+            not runtime["has_shelter"]
+            and world_tick >= int(runtime["build_cooldown_until_tick"] or 0)
+            and self._can_build_shelter_from_inventory(inventory)
+            and (threat_distance is None or threat_distance > 7.0)
+        )
+
+        if can_build:
+            runtime["has_shelter"] = True
+            runtime["hp"] = SHELTER_MAX_HP
+            runtime["max_hp"] = SHELTER_MAX_HP
+            runtime["anchor"] = {
+                "x": float(position.get("x", 0.0)),
+                "z": float(position.get("z", 0.0)),
+            }
+            runtime["forced_fight_until_tick"] = 0
+            runtime["last_event"] = "built"
+
+        if runtime["has_shelter"] and threat_distance is not None and threat_distance <= SHELTER_TRIGGER_DISTANCE:
+            anchor = runtime.get("anchor") or {}
+            dx = float(position.get("x", 0.0)) - float(anchor.get("x", 0.0))
+            dz = float(position.get("z", 0.0)) - float(anchor.get("z", 0.0))
+            if math.hypot(dx, dz) <= SHELTER_HOLD_DISTANCE:
+                runtime["inside"] = True
+
+        runtime["nearest_threat_distance"] = threat_distance
+        return dict(runtime)
+
+    def _apply_survival_reflex(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(actions, list):
+            return [{"type": "wait"}]
+
+        world_tick = int(perception.get("worldTick") or 0)
+        position = perception.get("position") or {"x": 50.0, "z": 50.0}
+        threats = perception.get("threats") or []
+        runtime = perception.get("survival") or self._shelter_runtime
+        nearest = self._get_nearest_threat(position, threats)
+        nearest_distance = nearest["distance"] if nearest else None
+
+        sanitized = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        if not sanitized:
+            sanitized = [{"type": "wait"}]
+
+        if runtime.get("last_event") == "exploded":
+            explode_msg = "shelter collapsed - forced to fight!"
+            if not any(a.get("type") == "chat" for a in sanitized):
+                sanitized.insert(0, {"type": "chat", "message": explode_msg})
+
+        if nearest and world_tick < int(runtime.get("forced_fight_until_tick") or 0):
+            return [{"type": "move", "x": nearest["x"], "z": nearest["z"]}] + [a for a in sanitized if a.get("type") != "wait"]
+
+        if runtime.get("has_shelter") and nearest_distance is not None and nearest_distance <= SHELTER_TRIGGER_DISTANCE:
+            anchor = runtime.get("anchor") or {}
+            if anchor:
+                if not runtime.get("inside"):
+                    return [{"type": "move", "x": float(anchor.get("x", 50.0)), "z": float(anchor.get("z", 50.0))}] + [a for a in sanitized if a.get("type") != "wait"]
+                return [{"type": "wait"}] + [a for a in sanitized if a.get("type") == "chat"][:1]
+
+        return sanitized[:16]
 
     # ── Entity lifecycle ──────────────────────────────────────────
 
@@ -963,6 +1109,21 @@ class AIAgent:
                 # Invalidate system prompt cache so it rebuilds with new interests
                 self._cached_system_prompt = None
 
+        threats = self.client.get_world_threats() if self.client else []
+        nearest_threat = self._get_nearest_threat(pos, threats)
+        if nearest_threat:
+            lines.append(f"🐙 threat {nearest_threat['distance']:.1f}u ({nearest_threat['type']})")
+        else:
+            lines.append("🐙 no threat nearby")
+
+        rt = self._shelter_runtime
+        if rt.get("has_shelter"):
+            lines.append(f"🏠 shelter hp={float(rt.get('hp', 0.0)):.1f}/{float(rt.get('max_hp', SHELTER_MAX_HP)):.1f}")
+        else:
+            lines.append(
+                f"🏚 no shelter (cd={max(0, int(rt.get('build_cooldown_until_tick', 0) - int(self.client.get_world_state_snapshot().get('tick', 0) or 0)))}t)"
+            )
+
         return "\n".join(lines)
 
     # ── News fetch ────────────────────────────────────────────────
@@ -1190,14 +1351,33 @@ class AIAgent:
         self._maybe_fetch_news()
         observation = self._build_observation()
         position = self.client.get_position()
+        world_snapshot = self.client.get_world_state_snapshot()
+        world_tick = int(world_snapshot.get("tick") or 0)
+        threats_raw = self.client.get_world_threats()
+        self_state = self.client.get_self_agent_state() or {}
+        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        survival = self._update_shelter_runtime(
+            world_tick=world_tick,
+            position=position,
+            inventory=inventory,
+            threats=threats_raw if isinstance(threats_raw, list) else [],
+        )
+        nearest = self._get_nearest_threat(position, threats_raw if isinstance(threats_raw, list) else [])
+        threat_items = []
+        if nearest:
+            threat_items.append(nearest)
         return {
             "tick": self._tick_count,
+            "worldTick": world_tick,
             "timestamp": int(time.time() * 1000),
             "position": {"x": position["x"], "z": position["z"]},
             "observation": observation,
             "markers": self._extract_markers(observation),
             "newSenders": list(self._new_senders),
             "taggedBy": list(self._tagged_by),
+            "threats": threat_items,
+            "selfState": self_state,
+            "survival": survival,
         }
 
     def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
@@ -1212,6 +1392,11 @@ class AIAgent:
             "semantic": {
                 "interests": list(self._interests),
                 "context_summary": self._context_summary,
+            },
+            "situational": {
+                "threats": perception.get("threats", []),
+                "survival": perception.get("survival", {}),
+                "world_tick": perception.get("worldTick"),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),
@@ -1245,6 +1430,7 @@ class AIAgent:
             "memory": {
                 "episodic": (memory_bundle or {}).get("episodic", {}),
                 "semantic": (memory_bundle or {}).get("semantic", {}),
+                "situational": (memory_bundle or {}).get("situational", {}),
                 "procedural": (memory_bundle or {}).get("procedural", {}),
             },
             "identity": identity_profile or {},
@@ -1324,6 +1510,7 @@ class AIAgent:
                 actions.append(act)
         if not actions:
             actions = [{"type": "wait"}]
+        actions = self._apply_survival_reflex(actions, perception)
 
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
         if perception.get("markers", {}).get("mentions"):
@@ -1385,6 +1572,22 @@ class AIAgent:
             return {"type": "move_to_agent", "agent_name": agent_name, "requiredTicks": required_ticks}
         if t == "emote":
             return {"type": "emote", "emote": str(action.get("emote", "wave"))[:64], "requiredTicks": required_ticks}
+        if t == "harvest":
+            payload = {"type": "harvest", "requiredTicks": required_ticks}
+            resource_type = action.get("resource_type")
+            if isinstance(resource_type, str) and resource_type.strip():
+                payload["resourceType"] = resource_type.strip().lower()
+            object_id = action.get("object_id")
+            if isinstance(object_id, str) and object_id.strip():
+                payload["objectId"] = object_id.strip()[:96]
+            return payload
+        if t == "expand_map":
+            payload = {"type": "expand_map", "requiredTicks": required_ticks}
+            if action.get("x") is not None:
+                payload["x"] = float(action.get("x"))
+            if action.get("z") is not None:
+                payload["z"] = float(action.get("z"))
+            return payload
         if t == "wait":
             return {"type": "wait", "requiredTicks": required_ticks}
         return None
@@ -1732,6 +1935,30 @@ class AIAgent:
                 print(f"  🙌 emote: {emote}")
                 executed.append({"type": "emote", "emote": emote, "status": "ok"})
 
+            elif t == "harvest":
+                resource_type = act.get("resource_type")
+                object_id = act.get("object_id")
+                payload = {}
+                if isinstance(resource_type, str) and resource_type.strip():
+                    payload["resourceType"] = resource_type.strip().lower()
+                if isinstance(object_id, str) and object_id.strip():
+                    payload["objectId"] = object_id.strip()[:96]
+                ok = self.client.action("harvest", **payload)
+                print(f"  ⛏️ harvest ({'ok' if ok else 'failed'})")
+                executed.append({"type": "harvest", "status": "ok" if ok else "failed", **payload})
+
+            elif t == "expand_map":
+                ex = act.get("x")
+                ez = act.get("z")
+                payload = {}
+                if ex is not None:
+                    payload["x"] = float(ex)
+                if ez is not None:
+                    payload["z"] = float(ez)
+                ok = self.client.action("expand_map", **payload)
+                print(f"  🧱 expand_map ({'ok' if ok else 'failed'})")
+                executed.append({"type": "expand_map", "status": "ok" if ok else "failed", **payload})
+
             elif t == "wait":
                 print("  ⏳ wait")
                 executed.append({"type": "wait", "status": "ok"})
@@ -1827,6 +2054,10 @@ def _action_summary(act: Dict[str, Any]) -> str:
         return f"move_to({act.get('agent_name', '?')})"
     if t == "emote":
         return f"emote:{act.get('emote', '?')}"
+    if t == "harvest":
+        return f"harvest({act.get('resource_type', '*')})"
+    if t == "expand_map":
+        return f"expand_map({act.get('x', '?')}, {act.get('z', '?')})"
     return t
 
 
