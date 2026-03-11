@@ -1205,24 +1205,34 @@ function getWorldTimeState(nowMs = Date.now()) {
   };
 }
 
+function isSystemChatMessage(chatMessage) {
+  return String(chatMessage?.agentName || '').toLowerCase() === 'system';
+}
+
 // Add chat message to history (keep last 100 messages)
 // Also saves conversation per-entity for full chat history
-async function addChatMessage(agentId, agentName, message, entityId) {
+async function addChatMessage(agentId, agentName, message, entityId, options = {}) {
   const timestamp = Date.now();
-  worldState.chatMessages.push({
+  const chatMessage = {
     agentId,
     agentName,
     message,
     timestamp
-  });
-  
-  // Keep only last 100 messages in memory
-  if (worldState.chatMessages.length > 100) {
-    worldState.chatMessages = worldState.chatMessages.slice(-100);
+  };
+  const includeInHistory = options.includeInHistory ?? !isSystemChatMessage(chatMessage);
+  const persistToDatabase = options.persistToDatabase ?? includeInHistory;
+
+  if (includeInHistory) {
+    worldState.chatMessages.push(chatMessage);
+    
+    // Keep only last 100 messages in memory
+    if (worldState.chatMessages.length > 100) {
+      worldState.chatMessages = worldState.chatMessages.slice(-100);
+    }
   }
 
   // Save to database (if enabled)
-  if (process.env.DATABASE_URL) {
+  if (persistToDatabase && process.env.DATABASE_URL) {
     try {
       await db.saveChatMessage(agentId, agentName, message, timestamp);
       // Also save to per-entity conversation history
@@ -2401,6 +2411,8 @@ app.get('/chat', async (req, res) => {
         messages = messages.slice(-pageSize);
       }
 
+      messages = messages.filter(msg => !isSystemChatMessage(msg));
+
       return res.json({ messages, hasMore: messages.length === pageSize });
     }
 
@@ -2446,6 +2458,8 @@ app.get('/chat', async (req, res) => {
         messages = memoryMessages.slice(-sinceLimit);
       }
     }
+
+    messages = messages.filter(msg => !isSystemChatMessage(msg));
 
     res.json({ messages });
   } catch (error) {

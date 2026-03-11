@@ -269,6 +269,7 @@ class OpenBotWorld {
         this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
         this.worldObjectsSignature = '';
         this.lastChatTimestamp = 0;
+        this.agentSleepStateById = new Map(); // agentId -> sleeping flag (for UI-only energy system messages)
         this.agentNameMap = new Map(); // agentName -> agentId
         this.serverStartTime = null; // Server process start time (uptime metadata)
         this.worldCreatedAt = null; // Persistent world day anchor
@@ -2643,6 +2644,9 @@ class OpenBotWorld {
                 messages.forEach(msg => {
                     if (msg.timestamp > this.lastChatTimestamp) {
                         this.lastChatTimestamp = msg.timestamp;
+                        if (String(msg.agentName || '').toLowerCase() === 'system') {
+                            return;
+                        }
                         this.addChatMessage(msg);
                     }
                 });
@@ -2695,6 +2699,7 @@ class OpenBotWorld {
             // Invariant: animation state updates must run in both delta + full-sync paths.
             agents.forEach(agent => {
                 if (this.agents.has(agent.id)) {
+                    this.emitEnergySystemTransitionIfNeeded(agent);
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
                     this.updateAgentAnimationState(agent.id, agent);
                     this.agents.get(agent.id).data = agent;
@@ -2716,6 +2721,7 @@ class OpenBotWorld {
                 serverAgentIds.add(agent.id);
 
                 if (this.agents.has(agent.id)) {
+                    this.emitEnergySystemTransitionIfNeeded(agent);
                     this.updateAgentPosition(agent.id, agent.position, agent.rotation);
                     this.updateAgentAnimationState(agent.id, agent);
                     this.agents.get(agent.id).data = agent;
@@ -2809,6 +2815,7 @@ class OpenBotWorld {
             data: agentData,
             animation
         });
+        this.agentSleepStateById.set(agentData.id, Boolean(agentData.sleeping));
 
         this.updateAgentAnimationState(agentData.id, agentData);
         
@@ -2831,6 +2838,7 @@ class OpenBotWorld {
 
             this.scene.remove(agent.mesh);
             this.agents.delete(agentId);
+            this.agentSleepStateById.delete(agentId);
             
             // Remove from name map
             for (const [name, id] of this.agentNameMap.entries()) {
@@ -3258,8 +3266,10 @@ class OpenBotWorld {
         const agentNameSpan = document.createElement('span');
         agentNameSpan.className = 'chat-message-agent';
         agentNameSpan.textContent = message.agentName;
-        agentNameSpan.style.cursor = 'pointer';
-        agentNameSpan.addEventListener('click', () => this.zoomToAgent(message.agentId));
+        if (String(message.agentName || '').toLowerCase() !== 'system' && message.agentId) {
+            agentNameSpan.style.cursor = 'pointer';
+            agentNameSpan.addEventListener('click', () => this.zoomToAgent(message.agentId));
+        }
 
         messageDiv.appendChild(timeSpan);
         messageDiv.appendChild(agentNameSpan);
@@ -3267,7 +3277,7 @@ class OpenBotWorld {
         return messageDiv;
     }
 
-    addChatMessage(message) {
+    addChatMessage(message, options = {}) {
         const chatDiv = document.getElementById('chat-messages');
         chatDiv.appendChild(this.createChatMessageElement(message));
 
@@ -3285,7 +3295,29 @@ class OpenBotWorld {
         }
 
         // Show chat bubble above lobster in 3D world
-        this.showChatBubble(message.agentId, message.message);
+        if (!options.skipBubble) {
+            this.showChatBubble(message.agentId, message.message);
+        }
+    }
+
+    emitEnergySystemTransitionIfNeeded(agentData) {
+        const previousSleeping = this.agentSleepStateById.get(agentData.id);
+        const nextSleeping = Boolean(agentData.sleeping);
+
+        if (typeof previousSleeping === 'boolean' && previousSleeping !== nextSleeping) {
+            const message = nextSleeping
+                ? `${agentData.name} is low on energy and fell asleep.`
+                : `${agentData.name} woke up after recharging energy.`;
+
+            this.addChatMessage({
+                agentId: agentData.id,
+                agentName: 'system',
+                message,
+                timestamp: Date.now()
+            }, { skipBubble: true });
+        }
+
+        this.agentSleepStateById.set(agentData.id, nextSleeping);
     }
 
     /**
