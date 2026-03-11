@@ -28,6 +28,7 @@ const SHELTER_SAFE_DISTANCE = 0.9;
 const SHELTER_REST_ENERGY_PER_SEC = 2.4;
 const SHELTER_REBUILD_COOLDOWN_SEC = 28;
 const SHELTER_FORCED_FIGHT_SEC = 7.5;
+const OCTOPUS_STRIKE_INTERVAL_TICKS = 18;
 
 function hashSeed(text) {
   const value = String(text || 'openbot-seed');
@@ -96,6 +97,8 @@ export function createSimulation({ seed, moduleId }) {
       resources: [],
       roads: [],
       shelters: [],
+      battleFx: [],
+      octopusAttacks: [],
       expansionTiles: [],
       mapExpansionLevel: 0,
       nextResourceRefillAt: RESOURCE_REFILL_SECONDS
@@ -217,6 +220,29 @@ export function createSimulation({ seed, moduleId }) {
     if (reason) {
       state.scoreboard.highlights.unshift(`${id}: ${reason} (${delta > 0 ? '+' : ''}${delta})`);
       if (state.scoreboard.highlights.length > 25) state.scoreboard.highlights.length = 25;
+    }
+  }
+
+  function pushBattleFx(type, payload = {}) {
+    state.world.battleFx.push({
+      id: `fx-${type}-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+      type,
+      at: state.world.elapsedSeconds,
+      ...payload
+    });
+    if (state.world.battleFx.length > 96) {
+      state.world.battleFx = state.world.battleFx.slice(-96);
+    }
+  }
+
+  function pushOctopusAttack(payload = {}) {
+    state.world.octopusAttacks.push({
+      id: `octo-${state.world.tick}-${Math.floor(rng() * 1e6)}`,
+      at: state.world.elapsedSeconds,
+      ...payload
+    });
+    if (state.world.octopusAttacks.length > 48) {
+      state.world.octopusAttacks = state.world.octopusAttacks.slice(-48);
     }
   }
 
@@ -1067,6 +1093,13 @@ export function createSimulation({ seed, moduleId }) {
           if (closeEnough && hitCooldownReady) {
             lobster.combat.swingUntil = 0.42;
             lobster.combat.lastHitTick = state.world.tick;
+            pushBattleFx('hammer-swing', {
+              attackerId: lobster.id,
+              targetId: target.id,
+              x: lobster.position.x,
+              z: lobster.position.z,
+              power: 0.8 + (rng() * 0.35)
+            });
 
             const dodgeChance = target.stats.energy > 42 ? 0.62 : 0.36;
             if (rng() < dodgeChance) {
@@ -1083,6 +1116,13 @@ export function createSimulation({ seed, moduleId }) {
               pointsFor(target.id, 4, `dodged ${lobster.name}`);
               pointsFor(lobster.id, 2, `forced retreat ${target.name}`);
               pushEvent('combat', `${target.name} dodged ${lobster.name}'s hammer swing and ran.`);
+              pushBattleFx('hammer-whiff', {
+                attackerId: lobster.id,
+                targetId: target.id,
+                x: target.position.x,
+                z: target.position.z,
+                power: 0.55 + (rng() * 0.25)
+              });
             } else {
               const damage = 8 + Math.floor(rng() * 7);
               const pushDx = target.position.x - lobster.position.x;
@@ -1106,6 +1146,13 @@ export function createSimulation({ seed, moduleId }) {
               drainEnergy(lobster, 2.2);
               pointsFor(lobster.id, 8, `hammer hit ${target.name}`);
               pushEvent('combat', `${lobster.name} hit ${target.name} with a hammer (${damage} dmg).`);
+              pushBattleFx('hammer-whack', {
+                attackerId: lobster.id,
+                targetId: target.id,
+                x: target.position.x,
+                z: target.position.z,
+                power: 1.1 + (damage / 16)
+              });
             }
 
             drainEnergy(lobster, 3);
@@ -1254,6 +1301,60 @@ export function createSimulation({ seed, moduleId }) {
 
     const threat = getShelterThreatLevel(lobster, shelter);
     shelter.hp = Math.max(0, shelter.hp - ((SHELTER_PASSIVE_DECAY_PER_SEC + (threat * SHELTER_THREAT_DPS)) * dt));
+
+    if (enabled(5) && threat > 0.35 && (state.world.tick % OCTOPUS_STRIKE_INTERVAL_TICKS === 0)) {
+      const angle = rng() * Math.PI * 2;
+      const strikeRadius = 0.8 + (rng() * Math.max(1.4, shelter.radius - 1));
+      const strikeX = clamp(
+        shelter.x + (Math.cos(angle) * strikeRadius),
+        MAP_EDGE_BUFFER,
+        worldWidth() - MAP_EDGE_BUFFER
+      );
+      const strikeZ = clamp(
+        shelter.z + (Math.sin(angle) * strikeRadius),
+        MAP_EDGE_BUFFER,
+        worldHeight() - MAP_EDGE_BUFFER
+      );
+      const power = clamp(0.65 + (threat * 0.7), 0.65, 2.2);
+      pushOctopusAttack({
+        ownerId: lobster.id,
+        x: strikeX,
+        z: strikeZ,
+        power
+      });
+
+      const strikeDistance = distance2D(lobster.position, { x: strikeX, z: strikeZ });
+      if (strikeDistance <= 2.7) {
+        const damage = 1.8 + (threat * 2.6) + (rng() * 2.7);
+        const lost = drainEnergy(lobster, damage, 'octopus', 0.15);
+        const dx = lobster.position.x - strikeX;
+        const dz = lobster.position.z - strikeZ;
+        const mag = Math.max(0.001, Math.hypot(dx, dz));
+        const blast = 1.4 + (power * 1.1);
+        lobster.position.x = clamp(
+          lobster.position.x + ((dx / mag) * blast),
+          MAP_EDGE_BUFFER,
+          worldWidth() - MAP_EDGE_BUFFER
+        );
+        lobster.position.z = clamp(
+          lobster.position.z + ((dz / mag) * blast),
+          MAP_EDGE_BUFFER,
+          worldHeight() - MAP_EDGE_BUFFER
+        );
+        lobster.position.y = Math.max(lobster.position.y, 0.65 + (power * 0.2));
+        lobster.combat.tookHitUntil = Math.max(lobster.combat.tookHitUntil || 0, 0.72);
+        lobster.combat.lastAttackerId = 'octopus';
+        pushBattleFx('octopus-hit', {
+          targetId: lobster.id,
+          x: lobster.position.x,
+          z: lobster.position.z,
+          power: 0.9 + (lost / 6)
+        });
+        if (lost >= 2.5) {
+          pushEvent('combat', `${lobster.name} was smashed by an octopus tentacle strike.`);
+        }
+      }
+    }
 
     if (shelterState.forcedFightFor <= 0 && threat > 0.15) {
       const d = distance2D(lobster.position, shelter);
@@ -1543,6 +1644,8 @@ export function createSimulation({ seed, moduleId }) {
   function stepSimulation(dt = 1 / 12) {
     state.world.tick += 1;
     state.world.elapsedSeconds += dt;
+    state.world.battleFx = [];
+    state.world.octopusAttacks = [];
     updateTime(dt);
 
     if (enabled(2) && state.world.tick % 40 === 0) {

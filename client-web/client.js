@@ -32,6 +32,19 @@ function randomRange(min, max) {
     return min + (Math.random() * (max - min));
 }
 
+function disposeObject3D(root) {
+    if (!root) return;
+    root.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (!obj.material) return;
+        if (Array.isArray(obj.material)) {
+            obj.material.forEach((mat) => mat?.dispose?.());
+            return;
+        }
+        obj.material.dispose();
+    });
+}
+
 function createGlowTexture({
     size = 256,
     inner = 'rgba(255,245,210,0.96)',
@@ -206,6 +219,55 @@ function createFloatingTextSprite(text, { color = '#ffd86b', stroke = '#281300',
     const sprite = new THREE.Sprite(material);
     sprite.scale.set(3.2, 0.95, 1);
     return { sprite, texture };
+}
+
+function createHammerModel() {
+    const group = new THREE.Group();
+
+    const handle = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.045, 0.045, 1.3, 10),
+        new THREE.MeshStandardMaterial({ color: 0x7b4f2a, roughness: 0.76, metalness: 0.18 })
+    );
+    handle.rotation.z = Math.PI / 2;
+    handle.castShadow = true;
+    group.add(handle);
+
+    const head = new THREE.Mesh(
+        new THREE.BoxGeometry(0.48, 0.34, 0.32),
+        new THREE.MeshStandardMaterial({ color: 0xb6bdc5, roughness: 0.32, metalness: 0.85 })
+    );
+    head.position.x = 0.66;
+    head.castShadow = true;
+    group.add(head);
+
+    const backWeight = new THREE.Mesh(
+        new THREE.BoxGeometry(0.24, 0.22, 0.22),
+        new THREE.MeshStandardMaterial({ color: 0x8f969e, roughness: 0.35, metalness: 0.8 })
+    );
+    backWeight.position.x = 0.31;
+    backWeight.castShadow = true;
+    group.add(backWeight);
+
+    const sideSpikeLeft = new THREE.Mesh(
+        new THREE.ConeGeometry(0.08, 0.18, 8),
+        new THREE.MeshStandardMaterial({
+            color: 0xe5ebf3,
+            roughness: 0.26,
+            metalness: 0.9,
+            emissive: 0x374250,
+            emissiveIntensity: 0.25
+        })
+    );
+    sideSpikeLeft.rotation.z = Math.PI / 2;
+    sideSpikeLeft.position.set(0.9, 0.05, 0);
+    sideSpikeLeft.castShadow = true;
+    group.add(sideSpikeLeft);
+
+    const sideSpikeRight = sideSpikeLeft.clone();
+    sideSpikeRight.position.y = -0.05;
+    group.add(sideSpikeRight);
+
+    return group;
 }
 
 function createOctopusModel() {
@@ -945,6 +1007,138 @@ class OpenBotWorld {
         });
     }
 
+    addHammerWhackAt(position, power = 1) {
+        if (!position) return;
+        const p = clamp(Number(power) || 1, 0.6, 2.6);
+        const group = new THREE.Group();
+
+        const shockRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.72, 1.08, 36),
+            new THREE.MeshBasicMaterial({
+                color: 0xffb347,
+                transparent: true,
+                opacity: 0.92,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        shockRing.rotation.x = -Math.PI / 2;
+        shockRing.position.y = 0.11;
+        group.add(shockRing);
+
+        const coreFlash = new THREE.Mesh(
+            new THREE.SphereGeometry(0.24, 12, 10),
+            new THREE.MeshBasicMaterial({
+                color: 0xfff0c5,
+                transparent: true,
+                opacity: 0.95,
+                depthWrite: false
+            })
+        );
+        coreFlash.position.y = 0.22;
+        group.add(coreFlash);
+
+        const fragments = [];
+        const fragmentCount = 11;
+        for (let i = 0; i < fragmentCount; i += 1) {
+            const frag = new THREE.Mesh(
+                new THREE.BoxGeometry(0.08, 0.34 + (Math.random() * 0.38), 0.08),
+                new THREE.MeshBasicMaterial({
+                    color: 0xfff1bf,
+                    transparent: true,
+                    opacity: 0.88,
+                    depthWrite: false
+                })
+            );
+            frag.position.y = 0.26;
+            frag.userData.theta = (Math.PI * 2 * i) / fragmentCount;
+            frag.userData.radius = 0.35 + (Math.random() * 0.38);
+            frag.userData.speed = 1.4 + (Math.random() * 2.4);
+            group.add(frag);
+            fragments.push(frag);
+        }
+
+        const smashHammer = createHammerModel();
+        smashHammer.scale.set(2.5, 2.5, 2.5);
+        smashHammer.position.set(0, 2.5, 0);
+        smashHammer.rotation.set(0.1, randomRange(-0.15, 0.15), 0.5);
+        group.add(smashHammer);
+
+        group.position.set(Number(position.x) || 0, 0, Number(position.z) || 0);
+        this.scene.add(group);
+        this.combatEffects.push({
+            type: 'hammer_whack',
+            group,
+            shockRing,
+            coreFlash,
+            fragments,
+            smashHammer,
+            power: p,
+            createdAt: performance.now(),
+            ttlMs: 760
+        });
+    }
+
+    addOctopusStrikeAt(position, power = 1) {
+        if (!position) return;
+        const p = clamp(Number(power) || 1, 0.55, 2.6);
+        const group = new THREE.Group();
+
+        const warningRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.7, 1.08, 44),
+            new THREE.MeshBasicMaterial({
+                color: 0xff6f9a,
+                transparent: true,
+                opacity: 0.84,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        warningRing.rotation.x = -Math.PI / 2;
+        warningRing.position.y = 0.1;
+        group.add(warningRing);
+
+        const splash = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.3, 0.56, 0.54, 12),
+            new THREE.MeshBasicMaterial({
+                color: 0xffd7e4,
+                transparent: true,
+                opacity: 0.9,
+                depthWrite: false
+            })
+        );
+        splash.position.y = 0.28;
+        group.add(splash);
+
+        const tentacle = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.24, 0.34, 4.8 + (p * 1.4), 14),
+            new THREE.MeshStandardMaterial({
+                color: 0xcb3f67,
+                emissive: 0x5e122b,
+                emissiveIntensity: 0.42,
+                roughness: 0.58,
+                metalness: 0.08,
+                transparent: true,
+                opacity: 0.92
+            })
+        );
+        tentacle.position.y = 6.3 + (p * 0.8);
+        group.add(tentacle);
+
+        group.position.set(Number(position.x) || 0, 0, Number(position.z) || 0);
+        this.scene.add(group);
+        this.combatEffects.push({
+            type: 'octopus_strike',
+            group,
+            warningRing,
+            splash,
+            tentacle,
+            power: p,
+            createdAt: performance.now(),
+            ttlMs: 1050
+        });
+    }
+
     addDamageMarkerAt(position, amount, type = 'impact') {
         if (!position) return;
         const style = type === 'octopus'
@@ -979,20 +1173,26 @@ class OpenBotWorld {
             const actorPos = event.position || {};
             if (event.eventType === 'lobster_attack') {
                 this.addCombatRing(actorPos, event.attackType === 'long_range' ? 0x7fd0ff : 0xffbe72, event.attackType === 'long_range' ? 7.2 : 4.6, 0.5);
+                if (event.attackType !== 'long_range') {
+                    this.addHammerWhackAt(actorPos, 0.95);
+                }
                 const targets = Array.isArray(event.targets) ? event.targets : [];
                 targets.forEach((target) => {
                     const threat = this.threatMeshes.get(target.threatId);
                     if (threat) {
                         this.addDamageMarkerAt(threat.mesh.position, target.damage, event.attackType);
+                        this.addHammerWhackAt(threat.mesh.position, 1 + ((Number(target.damage) || 0) / 18));
                     }
                 });
             } else if (event.eventType === 'threat_attack') {
                 this.addCombatRing(actorPos, event.attackType === 'long_range' ? 0xb37dff : 0xff5b7f, event.attackType === 'long_range' ? 9.2 : 4.2, 0.7);
+                this.addOctopusStrikeAt(actorPos, event.attackType === 'long_range' ? 1.25 : 0.95);
                 const targets = Array.isArray(event.targets) ? event.targets : [];
                 targets.forEach((target) => {
                     const agent = this.agents.get(target.targetId);
                     if (agent?.mesh) {
                         this.addDamageMarkerAt(agent.mesh.position, target.damage, 'octopus');
+                        this.addOctopusStrikeAt(agent.mesh.position, 0.85 + ((Number(target.damage) || 0) / 22));
                     }
                 });
             } else if (event.eventType === 'threat_defeated') {
@@ -1014,6 +1214,10 @@ class OpenBotWorld {
                     if (fx.mesh.material) fx.mesh.material.dispose();
                     if (fx.mesh.geometry) fx.mesh.geometry.dispose();
                 }
+                if (fx.group) {
+                    this.scene.remove(fx.group);
+                    disposeObject3D(fx.group);
+                }
                 if (fx.sprite) {
                     this.scene.remove(fx.sprite);
                     if (fx.sprite.material) fx.sprite.material.dispose();
@@ -1026,6 +1230,37 @@ class OpenBotWorld {
                 const scale = 1 + ((Number(fx.maxScale) - 1) * progress);
                 fx.mesh.scale.setScalar(scale);
                 fx.mesh.material.opacity = (1 - progress) * 0.9;
+            } else if (fx.type === 'hammer_whack' && fx.group) {
+                const p = Number(fx.power) || 1;
+                fx.shockRing.scale.setScalar(1 + (progress * 4.4 * p));
+                fx.shockRing.material.opacity = (1 - progress) * 0.9;
+                fx.coreFlash.scale.setScalar(1 + (progress * 1.6 * p));
+                fx.coreFlash.material.opacity = (1 - progress) * 0.94;
+                fx.fragments.forEach((frag) => {
+                    const theta = frag.userData.theta + (progress * frag.userData.speed);
+                    const radius = frag.userData.radius + (progress * 1.65 * p);
+                    frag.position.x = Math.cos(theta) * radius;
+                    frag.position.z = Math.sin(theta) * radius;
+                    frag.position.y = 0.2 + (progress * 1.05);
+                    frag.rotation.x += dtSeconds * 5.2;
+                    frag.rotation.z += dtSeconds * 4.3;
+                    frag.material.opacity = (1 - progress) * 0.86;
+                });
+                const descend = clamp(progress / 0.42, 0, 1);
+                const rebound = progress > 0.42 ? clamp((progress - 0.42) / 0.58, 0, 1) : 0;
+                fx.smashHammer.position.y = 2.5 - (descend * 2.5) + (rebound * 0.8);
+                fx.smashHammer.rotation.z = 0.55 - (descend * 1.8);
+            } else if (fx.type === 'octopus_strike' && fx.group) {
+                const p = Number(fx.power) || 1;
+                const descend = clamp(progress / 0.42, 0, 1);
+                const rebound = progress > 0.42 ? clamp((progress - 0.42) / 0.58, 0, 1) : 0;
+                fx.warningRing.scale.setScalar(0.84 + (progress * 2.8 * p));
+                fx.warningRing.material.opacity = (1 - progress) * 0.82;
+                fx.splash.scale.setScalar(0.6 + (Math.sin(Math.min(progress, 0.72) * Math.PI) * 1.25 * p));
+                fx.splash.material.opacity = (1 - progress) * 0.88;
+                fx.tentacle.position.y = (6.3 + (p * 0.8)) - (descend * (6 + (p * 1.1))) + (rebound * 1.6);
+                fx.tentacle.rotation.z = Math.sin(progress * 16) * 0.14;
+                fx.tentacle.material.opacity = 0.92 - (progress * 0.62);
             } else if (fx.type === 'damage' && fx.sprite) {
                 fx.sprite.position.y += dtSeconds * 1.8;
                 fx.sprite.position.x += (Number(fx.driftX) || 0) * dtSeconds;
@@ -1073,8 +1308,10 @@ class OpenBotWorld {
         }
 
         // Claws
-        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: 0.4, z: 0 });
-        addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: -0.4, z: 0 });
+        const leftClaw = addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: 0.4, z: 0 });
+        leftClaw.name = 'lobster-left-claw';
+        const rightClaw = addPart(new THREE.BoxGeometry(0.6, 0.2, 0.2), { x: 0.8, y: -0.4, z: 0 });
+        rightClaw.name = 'lobster-right-claw';
 
         // Antennae
         const antennaMaterial = new THREE.MeshStandardMaterial({ color: 0xcc3333 });
@@ -1090,6 +1327,15 @@ class OpenBotWorld {
             { z: -Math.PI / 6 },
             antennaMaterial
         );
+
+        // Signature weapon: visible hammer mounted on the right claw.
+        const hammerPivot = new THREE.Group();
+        hammerPivot.position.set(0.16, 0.04, 0.02);
+        hammerPivot.rotation.set(0.2, -0.08, 0.45);
+        const hammerMesh = createHammerModel();
+        hammerMesh.scale.set(1.2, 1.2, 1.2);
+        hammerPivot.add(hammerMesh);
+        rightClaw.add(hammerPivot);
 
         return group;
     }

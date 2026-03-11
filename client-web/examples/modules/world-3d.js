@@ -77,20 +77,33 @@ function createHammerModel() {
   group.add(handle);
 
   const head = new THREE.Mesh(
-    new THREE.BoxGeometry(0.34, 0.24, 0.24),
+    new THREE.BoxGeometry(0.48, 0.34, 0.32),
     new THREE.MeshStandardMaterial({ color: 0xb6bdc5, roughness: 0.32, metalness: 0.85 })
   );
-  head.position.x = 0.62;
+  head.position.x = 0.66;
   head.castShadow = true;
   group.add(head);
 
   const backWeight = new THREE.Mesh(
-    new THREE.BoxGeometry(0.16, 0.18, 0.18),
+    new THREE.BoxGeometry(0.24, 0.22, 0.22),
     new THREE.MeshStandardMaterial({ color: 0x8f969e, roughness: 0.35, metalness: 0.8 })
   );
-  backWeight.position.x = 0.42;
+  backWeight.position.x = 0.31;
   backWeight.castShadow = true;
   group.add(backWeight);
+
+  const sideSpikeLeft = new THREE.Mesh(
+    new THREE.ConeGeometry(0.08, 0.18, 8),
+    new THREE.MeshStandardMaterial({ color: 0xe5ebf3, roughness: 0.26, metalness: 0.9, emissive: 0x374250, emissiveIntensity: 0.25 })
+  );
+  sideSpikeLeft.rotation.z = Math.PI / 2;
+  sideSpikeLeft.position.set(0.9, 0.05, 0);
+  sideSpikeLeft.castShadow = true;
+  group.add(sideSpikeLeft);
+
+  const sideSpikeRight = sideSpikeLeft.clone();
+  sideSpikeRight.position.y = -0.05;
+  group.add(sideSpikeRight);
 
   return group;
 }
@@ -147,6 +160,7 @@ function createFloatingTextSprite(text, { color = '#ffd86b', stroke = '#281300',
 function damageMarkerColor(type) {
   if (type === 'hammer') return { color: '#ffb14a', stroke: '#2f1900' };
   if (type === 'evade') return { color: '#9ee6ff', stroke: '#093447' };
+  if (type === 'octopus') return { color: '#ff6d8b', stroke: '#3a0a1a' };
   return { color: '#ff3b30', stroke: '#3b0503' };
 }
 
@@ -232,6 +246,17 @@ function createGlowTexture({
 
 function randomRange(min, max) {
   return min + (Math.random() * (max - min));
+}
+
+function pruneSeenSet(set, maxSize = 2000) {
+  if (!set || set.size <= maxSize) return;
+  const removeCount = set.size - maxSize;
+  let removed = 0;
+  for (const key of set) {
+    set.delete(key);
+    removed += 1;
+    if (removed >= removeCount) break;
+  }
 }
 
 function createCloudTexture({ size = 384 } = {}) {
@@ -623,6 +648,10 @@ export class Example3DWorld {
     this.lastCloudUpdateAt = null;
     this.cloudUpdateAccumulator = 0;
     this.cloudTexturePool = createCloudTexturePool(20);
+    this.combatBursts = new Map();
+    this.seenCombatBurstIds = new Set();
+    this.octopusStrikeEffects = new Map();
+    this.seenOctopusAttackIds = new Set();
 
     this.clockLabel = createTextSprite('');
     this.clockLabel.sprite.position.set(10, 7, 10);
@@ -1084,7 +1113,7 @@ export class Example3DWorld {
     hammerPivot.position.set(0, 2.45, 0);
     hammerPivot.rotation.set(0, 0, 0);
     const hammerMesh = createHammerModel();
-    hammerMesh.scale.set(3.5, 3.5, 3.5);
+    hammerMesh.scale.set(4.8, 4.8, 4.8);
     hammerPivot.visible = false;
     hammerPivot.add(hammerMesh);
     mesh.add(hammerPivot);
@@ -1267,7 +1296,7 @@ export class Example3DWorld {
     if (shock > 0.1) statuses.push('ELECTROCUTED');
     if ((effects.paralyzed || 0) > 0.1) statuses.push('PARALYZED');
     if (tornado > 0.1) statuses.push('TWISTED');
-    if (swing > 0.1) statuses.push('HAMMER SWING');
+    if (swing > 0.1) statuses.push('BIG HAMMER WHACK');
     if (buildIntent && swing <= 0.1) statuses.push('BUILDING');
     if (dodge > 0.1) statuses.push('DODGING');
     if (hitReact > 0.1) statuses.push('HIT');
@@ -1569,6 +1598,201 @@ export class Example3DWorld {
     });
   }
 
+  spawnCombatBurst(effect, timeSec = 0) {
+    const power = clamp(Number(effect.power) || 1, 0.45, 2.8);
+    const type = String(effect.type || 'hammer-whack');
+    const isWhiff = type === 'hammer-whiff';
+    const isOctopus = type === 'octopus-hit';
+    const ringColor = isOctopus ? 0xff6b92 : (isWhiff ? 0xa8e7ff : 0xffb347);
+    const sparkColor = isOctopus ? 0xffd2df : (isWhiff ? 0xdcf8ff : 0xfff2be);
+
+    const group = new THREE.Group();
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.6, 0.95, 36),
+      new THREE.MeshBasicMaterial({
+        color: ringColor,
+        transparent: true,
+        opacity: 0.8,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.12;
+    group.add(ring);
+
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.26, 12, 10),
+      new THREE.MeshBasicMaterial({
+        color: sparkColor,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false
+      })
+    );
+    core.position.y = 0.24;
+    group.add(core);
+
+    const spikes = [];
+    const spikeCount = isWhiff ? 7 : 11;
+    for (let i = 0; i < spikeCount; i += 1) {
+      const spike = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.42 + (Math.random() * 0.34), 0.08),
+        new THREE.MeshBasicMaterial({
+          color: sparkColor,
+          transparent: true,
+          opacity: 0.85,
+          depthWrite: false
+        })
+      );
+      spike.position.y = 0.25;
+      spike.userData.theta = (Math.PI * 2 * i) / spikeCount;
+      spike.userData.radius = 0.34 + (Math.random() * 0.34);
+      spike.userData.speed = 1.4 + (Math.random() * 2.2);
+      spike.userData.tilt = randomRange(-0.25, 0.25);
+      group.add(spike);
+      spikes.push(spike);
+    }
+
+    group.position.set(this.clampWorldX(effect.x), 0, this.clampWorldZ(effect.z));
+    this.scene.add(group);
+    this.combatBursts.set(effect.id, {
+      id: effect.id,
+      group,
+      ring,
+      core,
+      spikes,
+      type,
+      power,
+      startAt: Number.isFinite(effect.at) ? effect.at : timeSec
+    });
+  }
+
+  syncCombatBursts(effects = [], timeSec = 0) {
+    effects.forEach((effect) => {
+      if (!effect || !effect.id || this.seenCombatBurstIds.has(effect.id)) return;
+      this.seenCombatBurstIds.add(effect.id);
+      this.spawnCombatBurst(effect, timeSec);
+    });
+    pruneSeenSet(this.seenCombatBurstIds, 1600);
+
+    for (const [id, burst] of this.combatBursts) {
+      const age = timeSec - burst.startAt;
+      const ttl = burst.type === 'hammer-swing' ? 0.5 : 0.72;
+      if (age > ttl) {
+        this.scene.remove(burst.group);
+        disposeObject3D(burst.group);
+        this.combatBursts.delete(id);
+        continue;
+      }
+      const t = clamp(age / ttl, 0, 1);
+      const swell = burst.power * (0.7 + (t * 1.8));
+      burst.ring.scale.setScalar(Math.max(0.2, swell));
+      burst.ring.material.opacity = (1 - t) * 0.78;
+      burst.core.scale.setScalar(1 + (t * 0.9 * burst.power));
+      burst.core.material.opacity = (1 - t) * 0.88;
+      burst.spikes.forEach((spike) => {
+        const theta = spike.userData.theta + (t * spike.userData.speed);
+        const radius = spike.userData.radius + (t * 1.25 * burst.power);
+        spike.position.x = Math.cos(theta) * radius;
+        spike.position.z = Math.sin(theta) * radius;
+        spike.position.y = 0.2 + (t * 0.9);
+        spike.rotation.x = spike.userData.tilt + (t * 1.35);
+        spike.rotation.z = -spike.userData.tilt + (t * 0.95);
+        spike.material.opacity = (1 - t) * 0.8;
+      });
+    }
+  }
+
+  spawnOctopusStrike(attack, timeSec = 0) {
+    const power = clamp(Number(attack.power) || 1, 0.55, 2.5);
+    const group = new THREE.Group();
+
+    const warningRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.7, 1.08, 44),
+      new THREE.MeshBasicMaterial({
+        color: 0xff6f9a,
+        transparent: true,
+        opacity: 0.78,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      })
+    );
+    warningRing.rotation.x = -Math.PI / 2;
+    warningRing.position.y = 0.09;
+    group.add(warningRing);
+
+    const splash = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.56, 0.54, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0xffd7e4,
+        transparent: true,
+        opacity: 0.84,
+        depthWrite: false
+      })
+    );
+    splash.position.y = 0.28;
+    group.add(splash);
+
+    const tentacle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.24, 0.34, 4.8 + (power * 1.4), 14),
+      new THREE.MeshStandardMaterial({
+        color: 0xcb3f67,
+        emissive: 0x5e122b,
+        emissiveIntensity: 0.42,
+        roughness: 0.58,
+        metalness: 0.08,
+        transparent: true,
+        opacity: 0.9
+      })
+    );
+    tentacle.position.y = 6.3 + (power * 0.8);
+    group.add(tentacle);
+
+    group.position.set(this.clampWorldX(attack.x), 0, this.clampWorldZ(attack.z));
+    this.scene.add(group);
+    this.octopusStrikeEffects.set(attack.id, {
+      id: attack.id,
+      group,
+      power,
+      warningRing,
+      splash,
+      tentacle,
+      startAt: Number.isFinite(attack.at) ? attack.at : timeSec
+    });
+  }
+
+  syncOctopusAttacks(attacks = [], timeSec = 0) {
+    attacks.forEach((attack) => {
+      if (!attack || !attack.id || this.seenOctopusAttackIds.has(attack.id)) return;
+      this.seenOctopusAttackIds.add(attack.id);
+      this.spawnOctopusStrike(attack, timeSec);
+    });
+    pruneSeenSet(this.seenOctopusAttackIds, 1000);
+
+    for (const [id, effect] of this.octopusStrikeEffects) {
+      const age = timeSec - effect.startAt;
+      const ttl = 1.05;
+      if (age > ttl) {
+        this.scene.remove(effect.group);
+        disposeObject3D(effect.group);
+        this.octopusStrikeEffects.delete(id);
+        continue;
+      }
+
+      const t = clamp(age / ttl, 0, 1);
+      const descend = clamp(t / 0.42, 0, 1);
+      const rebound = t > 0.42 ? clamp((t - 0.42) / 0.58, 0, 1) : 0;
+      effect.warningRing.scale.setScalar(0.78 + (t * 2.8 * effect.power));
+      effect.warningRing.material.opacity = (1 - t) * 0.8;
+      effect.splash.scale.setScalar(0.6 + (Math.sin(Math.min(t, 0.72) * Math.PI) * 1.25 * effect.power));
+      effect.splash.material.opacity = (1 - t) * 0.86;
+      effect.tentacle.position.y = (6.3 + (effect.power * 0.8)) - (descend * (6 + (effect.power * 1.1))) + (rebound * 1.6);
+      effect.tentacle.rotation.z = Math.sin(t * 16) * 0.14;
+      effect.tentacle.material.opacity = 0.92 - (t * 0.62);
+    }
+  }
+
   updateCelestialBodies(timeHours = 12) {
     const sun = celestialPosition(timeHours, 0);
     const moon = celestialPosition(timeHours, 12);
@@ -1685,6 +1909,8 @@ export class Example3DWorld {
     this.syncShelters(world.shelters, lobsters);
     this.syncHazards(world.hazards);
     const hzTime = Number.isFinite(world.elapsedSeconds) ? world.elapsedSeconds : (world.tick / 12);
+    this.syncCombatBursts(world.battleFx || [], hzTime);
+    this.syncOctopusAttacks(world.octopusAttacks || [], hzTime);
     for (const hazard of this.hazardVisuals.values()) {
       hazard.update(hzTime);
     }
@@ -1733,6 +1959,9 @@ export class Example3DWorld {
         this.lobsters.delete(id);
       }
     }
+
+    this.syncCombatBursts([], hzTime);
+    this.syncOctopusAttacks([], hzTime);
 
     const labelText = `Day ${String(world.day).padStart(2, '0')} - ${world.dayPhase.toUpperCase()} - Tick ${world.tick}`;
     const ctx = this.clockLabel.canvas.getContext('2d');
@@ -1828,6 +2057,18 @@ export class Example3DWorld {
       disposeObject3D(mesh);
     }
     this.rescueMeshes.clear();
+    for (const burst of this.combatBursts.values()) {
+      this.scene.remove(burst.group);
+      disposeObject3D(burst.group);
+    }
+    this.combatBursts.clear();
+    this.seenCombatBurstIds.clear();
+    for (const effect of this.octopusStrikeEffects.values()) {
+      this.scene.remove(effect.group);
+      disposeObject3D(effect.group);
+    }
+    this.octopusStrikeEffects.clear();
+    this.seenOctopusAttackIds.clear();
     for (const record of this.hazardVisuals.values()) {
       disposeObject3D(record.group);
     }
