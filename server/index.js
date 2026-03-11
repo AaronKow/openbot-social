@@ -2396,24 +2396,57 @@ app.get('/chat', async (req, res) => {
 
       // Search the in-memory store first (most recent 100 msgs)
       let messages = worldState.chatMessages.filter(msg => msg.timestamp < beforeTime);
+      let hasMore = false;
 
       // If the DB is available and in-memory doesn't have enough, query the DB
       if (process.env.DATABASE_URL && messages.length < pageSize) {
         try {
-          messages = await db.getChatMessagesBefore(beforeTime, pageSize);
+          // Backfill non-system rows across a few bounded DB batches so
+          // pagination doesn't prematurely stop on system-heavy windows.
+          const maxDbBatches = 3;
+          const batchSize = pageSize;
+          let cursor = beforeTime;
+          let collected = [];
+          let exhausted = false;
+
+          for (let i = 0; i < maxDbBatches && collected.length < pageSize; i += 1) {
+            const batch = await db.getChatMessagesBefore(cursor, batchSize);
+            if (!batch.length) {
+              exhausted = true;
+              break;
+            }
+
+            const nonSystem = batch.filter(msg => !isSystemChatMessage(msg));
+            collected = nonSystem.concat(collected);
+
+            const oldestTimestamp = Number.parseInt(batch[0]?.timestamp, 10);
+            if (!Number.isFinite(oldestTimestamp) || oldestTimestamp <= 0) {
+              exhausted = true;
+              break;
+            }
+            cursor = oldestTimestamp;
+          }
+
+          messages = collected.slice(-pageSize);
+          hasMore = !exhausted;
         } catch (e) {
           console.error('Error fetching older chat from DB:', e);
           // fall through to whatever in-memory has
-          messages = messages.slice(-pageSize);
+          messages = messages.slice(-pageSize).filter(msg => !isSystemChatMessage(msg));
+          hasMore = messages.length === pageSize;
         }
       } else {
         // Slice to pageSize, keeping the most-recent messages still before the cutoff
-        messages = messages.slice(-pageSize);
+        messages = messages.slice(-pageSize).filter(msg => !isSystemChatMessage(msg));
+        if (messages.length > 0) {
+          const oldestVisibleTs = Number.parseInt(messages[0]?.timestamp, 10);
+          hasMore = Number.isFinite(oldestVisibleTs) && worldState.chatMessages.some(
+            msg => msg.timestamp < oldestVisibleTs && !isSystemChatMessage(msg)
+          );
+        }
       }
 
-      messages = messages.filter(msg => !isSystemChatMessage(msg));
-
-      return res.json({ messages, hasMore: messages.length === pageSize });
+      return res.json({ messages, hasMore });
     }
 
     // ---- Normal polling: return messages after `since` ----

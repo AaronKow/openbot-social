@@ -270,3 +270,68 @@ test('chat since uses DB canonical results when DATABASE_URL is set', async () =
     }
   }
 });
+
+test('chat before backfills non-system rows across bounded DB batches', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  const originalGetChatMessagesBefore = db.getChatMessagesBefore;
+
+  process.env.DATABASE_URL = 'postgres://unit-test';
+  const capturedCalls = [];
+  db.getChatMessagesBefore = async (beforeTimestamp, limit) => {
+    capturedCalls.push({ beforeTimestamp, limit });
+
+    if (beforeTimestamp === 101) {
+      return Array.from({ length: 20 }, (_, idx) => {
+        const timestamp = 81 + idx;
+        return {
+          timestamp,
+          agentName: timestamp >= 99 ? 'reef-lobster' : 'system',
+          message: `m-${timestamp}`
+        };
+      });
+    }
+
+    if (beforeTimestamp === 81) {
+      return Array.from({ length: 20 }, (_, idx) => {
+        const timestamp = 61 + idx;
+        return {
+          timestamp,
+          agentName: 'reef-lobster',
+          message: `m-${timestamp}`
+        };
+      });
+    }
+
+    return [];
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const { status, json } = await getChat(baseUrl, '?before=101&limit=20');
+      assert.equal(status, 200);
+      assert.equal(json.messages.length, 20);
+      assert.deepEqual(
+        capturedCalls,
+        [
+          { beforeTimestamp: 101, limit: 20 },
+          { beforeTimestamp: 81, limit: 20 }
+        ]
+      );
+      assert.deepEqual(
+        json.messages.map(m => m.timestamp),
+        [
+          63, 64, 65, 66, 67, 68, 69, 70, 71, 72,
+          73, 74, 75, 76, 77, 78, 79, 80, 99, 100
+        ]
+      );
+      assert.equal(json.hasMore, true);
+    });
+  } finally {
+    db.getChatMessagesBefore = originalGetChatMessagesBefore;
+    if (originalDatabaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+  }
+});
