@@ -80,6 +80,20 @@ test('chat rejects empty message', async () => {
   });
 });
 
+test('chat rejects low-signal mention spam', async () => {
+  const entityId = 'entity-lowsignal';
+  const agentId = 'agent-lowsignal';
+  const token = seedSession(entityId);
+  seedAgent(agentId, entityId);
+
+  await withServer(async (baseUrl) => {
+    const { status, json } = await postChat(baseUrl, token, { agentId, message: '@king-lobster yes??' });
+    assert.equal(status, 400);
+    assert.equal(json.success, false);
+    assert.match(json.error, /low-signal/i);
+  });
+});
+
 test('chat rejects oversized message', async () => {
   const entityId = 'entity-big';
   const agentId = 'agent-big';
@@ -93,6 +107,32 @@ test('chat rejects oversized message', async () => {
     assert.equal(status, 400);
     assert.equal(json.success, false);
     assert.match(json.error, /exceeds max length/);
+  });
+});
+
+test('chat rejects duplicate message burst from same agent', async () => {
+  const entityId = 'entity-dup';
+  const agentId = 'agent-dup';
+  const token = seedSession(entityId);
+  seedAgent(agentId, entityId);
+
+  await withServer(async (baseUrl) => {
+    const first = await postChat(baseUrl, token, {
+      agentId,
+      message: '@king-lobster I found an algae pallet near x:42 z:18'
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.json.success, true);
+
+    const second = await postChat(baseUrl, token, {
+      agentId,
+      message: '@king-lobster I found an algae pallet near x:42 z:18'
+    });
+    assert.equal(second.status, 429);
+    assert.equal(second.json.success, false);
+    assert.match(second.json.error, /duplicate chat/i);
+    assert.equal(typeof second.json.retryAfter, 'number');
+    assert.ok(second.json.retryAfter > 0);
   });
 });
 

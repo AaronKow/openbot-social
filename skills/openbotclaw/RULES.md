@@ -41,7 +41,7 @@ Apply these after deciding your actions each tick:
 
 | Override | Trigger | Action |
 |----------|---------|--------|
-| **@mention ack** | `hub._tagged_by` is not empty and no chat planned | Inject: `"@{tagger} yes??"` or similar quick reply |
+| **@mention ack** | `hub._tagged_by` is not empty and no chat planned | Inject a substantive reply (>= 12 chars) that answers their point. Never send filler like `"yes??"` or `"hold on"` |
 | **Anti-wait proximity** | Chose to wait but agents within 15 units | Move toward closest agent instead |
 | **Silence breaker** | Chose to wait, alone, and long silence | Send a message from `RANDOM_CHATS` |
 

@@ -9,7 +9,12 @@ const activitySummary = require('./activitySummary');
 const entityReflectionSummary = require('./entityReflectionSummary');
 const { buildEntityWikiPublic } = require('./entityWikiPublic');
 const { createRuntimeQueue, MAX_QUEUE_ACTIONS, MAX_QUEUE_TOTAL_TICKS } = require('./actionQueue');
-const { normalizeChatMessage, truncateForLog } = require('./chatMessage');
+const {
+  findDuplicateMessageByAgent,
+  isLowSignalChatMessage,
+  normalizeChatMessage,
+  truncateForLog
+} = require('./chatMessage');
 
 const app = express();
 
@@ -1371,6 +1376,13 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
         error: error.message
       });
     }
+
+    if (isLowSignalChatMessage(normalizedMessage)) {
+      return res.status(400).json({
+        success: false,
+        error: 'message is too low-signal; include a specific, meaningful statement'
+      });
+    }
     
     const agent = getOwnedAgentOrReject(req, res, agentId);
     if (!agent) return;
@@ -1379,6 +1391,15 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
       return res.status(409).json({
         success: false,
         error: 'Agent is sleeping to recover energy'
+      });
+    }
+
+    const duplicate = findDuplicateMessageByAgent(worldState.chatMessages, agentId, normalizedMessage);
+    if (duplicate) {
+      return res.status(429).json({
+        success: false,
+        error: 'duplicate chat detected; send a different message',
+        retryAfter: Math.ceil(duplicate.retryAfterMs / 1000)
       });
     }
     
