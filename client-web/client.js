@@ -16,6 +16,8 @@ const SKY_UPDATE_MAX_FPS = 24;
 const CLOUD_UPDATE_MAX_FPS = 12;
 const CLOUD_TEXTURE_POOL_SIZE = 10;
 const GROUND_Y = 0;
+const THREAT_UPDATE_MAX_FPS = 24;
+const COMBAT_FX_MAX = 220;
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -172,6 +174,79 @@ function celestialPosition(timeHours, phaseOffsetHours = 0) {
     };
 }
 
+function createFloatingTextSprite(text, { color = '#ffd86b', stroke = '#281300', fontSize = 34 } = {}) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 96;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.font = `bold ${fontSize}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 9;
+    ctx.strokeText(String(text || ''), canvas.width / 2, 64);
+    ctx.fillStyle = color;
+    ctx.fillText(String(text || ''), canvas.width / 2, 64);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.generateMipmaps = false;
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthWrite: false,
+        depthTest: true
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(3.2, 0.95, 1);
+    return { sprite, texture };
+}
+
+function createOctopusModel() {
+    const group = new THREE.Group();
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0x7b57d1,
+        roughness: 0.5,
+        metalness: 0.18,
+        emissive: 0x26154f,
+        emissiveIntensity: 0.18
+    });
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1.3, 20, 18), bodyMaterial);
+    body.position.y = 1.2;
+    body.castShadow = true;
+    group.add(body);
+
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xf5f8ff });
+    const pupilMat = new THREE.MeshBasicMaterial({ color: 0x0d1020 });
+    const eyeOffsets = [-0.34, 0.34];
+    for (const offset of eyeOffsets) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8), eyeMat);
+        eye.position.set(0.48, 1.4, offset);
+        group.add(eye);
+        const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6), pupilMat);
+        pupil.position.set(0.6, 1.38, offset);
+        group.add(pupil);
+    }
+
+    for (let i = 0; i < 8; i += 1) {
+        const angle = (i / 8) * Math.PI * 2;
+        const tentacle = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.08, 0.15, 1.65, 8),
+            new THREE.MeshStandardMaterial({ color: 0x5f3bb4, roughness: 0.62, metalness: 0.08 })
+        );
+        tentacle.position.set(Math.cos(angle) * 0.72, 0.28, Math.sin(angle) * 0.72);
+        tentacle.rotation.z = Math.cos(angle) * 0.26;
+        tentacle.rotation.x = Math.sin(angle) * 0.26;
+        tentacle.castShadow = true;
+        tentacle.userData.baseRotationX = tentacle.rotation.x;
+        tentacle.userData.baseRotationZ = tentacle.rotation.z;
+        group.add(tentacle);
+    }
+
+    return group;
+}
+
 class OpenBotWorld {
     constructor() {
         this.scene = null;
@@ -181,6 +256,7 @@ class OpenBotWorld {
         this.agents = new Map(); // agentId -> { mesh, data }
         this.obstacles = [];
         this.decorationMeshes = new Map();
+        this.threatMeshes = new Map(); // threatId -> render data
         this.chatBubbles = new Map(); // agentId -> { bubble, createdAt }
         this.connected = false;
         this.pollInterval = config.pollInterval;
@@ -267,6 +343,9 @@ class OpenBotWorld {
         this.lastAnimationFrameMs = performance.now();
         this.clouds = [];
         this.cloudTexturePool = [];
+        this.combatEffects = [];
+        this.seenCombatEvents = new Set();
+        this.lastThreatUpdateMs = 0;
         this.cloudBounds = { minX: -30, maxX: 130, minZ: 5, maxZ: 95, minY: 42, maxY: 72 };
         this.sunMesh = null;
         this.moonMesh = null;
@@ -758,6 +837,194 @@ class OpenBotWorld {
             this.decorationMeshes.set(String(id || `${type}-${x}-${z}`), mesh);
             this.obstacles.push({ x, z, radius });
         }
+    }
+
+    syncThreats(threats = []) {
+        const nextIds = new Set();
+        threats.forEach((threat) => {
+            if (!threat?.id) return;
+            nextIds.add(threat.id);
+            const pos = threat.position || {};
+            const x = Number(pos.x);
+            const y = Number(pos.y);
+            const z = Number(pos.z);
+            if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+
+            let record = this.threatMeshes.get(threat.id);
+            if (!record) {
+                const mesh = createOctopusModel();
+                mesh.position.set(x, Number.isFinite(y) ? y : 0.6, z);
+                this.scene.add(mesh);
+
+                const hpGroup = new THREE.Group();
+                const hpBg = new THREE.Mesh(
+                    new THREE.PlaneGeometry(2.8, 0.28),
+                    new THREE.MeshBasicMaterial({ color: 0x1c2233, transparent: true, opacity: 0.85, depthWrite: false })
+                );
+                hpGroup.add(hpBg);
+                const hpFill = new THREE.Mesh(
+                    new THREE.PlaneGeometry(2.7, 0.18),
+                    new THREE.MeshBasicMaterial({ color: 0xff5f6d, transparent: true, opacity: 0.95, depthWrite: false })
+                );
+                hpFill.position.z = 0.01;
+                hpGroup.add(hpFill);
+                this.scene.add(hpGroup);
+
+                record = {
+                    mesh,
+                    hpGroup,
+                    hpFill,
+                    hpRatio: 1,
+                    bobPhase: Math.random() * Math.PI * 2
+                };
+                this.threatMeshes.set(threat.id, record);
+            }
+
+            const targetY = Number.isFinite(y) ? y : 0.6;
+            record.mesh.position.lerp(new THREE.Vector3(x, targetY, z), 0.55);
+            const hp = Math.max(0, Number(threat.hp) || 0);
+            const maxHp = Math.max(1, Number(threat.maxHp) || 1);
+            record.hpRatio = clamp(hp / maxHp, 0, 1);
+            record.hpFill.scale.x = Math.max(0.01, record.hpRatio);
+            record.hpFill.position.x = -1.35 + (1.35 * record.hpFill.scale.x);
+            record.hpGroup.position.set(record.mesh.position.x, record.mesh.position.y + 2.4, record.mesh.position.z);
+            record.hpGroup.lookAt(this.camera.position);
+        });
+
+        for (const [id, record] of this.threatMeshes.entries()) {
+            if (nextIds.has(id)) continue;
+            this.scene.remove(record.mesh);
+            this.scene.remove(record.hpGroup);
+            record.hpFill.material.dispose();
+            record.hpFill.geometry.dispose();
+            record.hpGroup.children.forEach((child) => {
+                if (child !== record.hpFill) {
+                    if (child.material) child.material.dispose();
+                    if (child.geometry) child.geometry.dispose();
+                }
+            });
+            record.mesh.traverse((obj) => {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) obj.material.dispose();
+            });
+            this.threatMeshes.delete(id);
+        }
+    }
+
+    addCombatRing(position, color = 0xffa66a, maxScale = 4.8, ttl = 0.6) {
+        if (!position) return;
+        const ring = new THREE.Mesh(
+            new THREE.RingGeometry(0.6, 0.95, 26),
+            new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: 0.85,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(Number(position.x) || 0, 0.08, Number(position.z) || 0);
+        this.scene.add(ring);
+        this.combatEffects.push({
+            type: 'ring',
+            mesh: ring,
+            createdAt: performance.now(),
+            ttlMs: ttl * 1000,
+            maxScale
+        });
+    }
+
+    addDamageMarkerAt(position, amount, type = 'impact') {
+        if (!position) return;
+        const style = type === 'octopus'
+            ? { color: '#ff6f86', stroke: '#2c0c1a' }
+            : type === 'long_range'
+                ? { color: '#8fd6ff', stroke: '#0d2331' }
+                : { color: '#ffd77a', stroke: '#2a1706' };
+        const marker = createFloatingTextSprite(`-${Math.max(1, Math.round(Number(amount) || 1))}`, style);
+        marker.sprite.position.set(Number(position.x) || 0, 2.6, Number(position.z) || 0);
+        this.scene.add(marker.sprite);
+        this.combatEffects.push({
+            type: 'damage',
+            sprite: marker.sprite,
+            texture: marker.texture,
+            createdAt: performance.now(),
+            ttlMs: 1350,
+            driftX: randomRange(-0.45, 0.45),
+            driftZ: randomRange(-0.25, 0.25)
+        });
+    }
+
+    handleCombatEvents(events = []) {
+        if (!Array.isArray(events) || events.length === 0) return;
+        events.forEach((event) => {
+            if (!event?.id || this.seenCombatEvents.has(event.id)) return;
+            this.seenCombatEvents.add(event.id);
+            if (this.seenCombatEvents.size > 2000) {
+                const keep = Array.from(this.seenCombatEvents).slice(-1000);
+                this.seenCombatEvents = new Set(keep);
+            }
+
+            const actorPos = event.position || {};
+            if (event.eventType === 'lobster_attack') {
+                this.addCombatRing(actorPos, event.attackType === 'long_range' ? 0x7fd0ff : 0xffbe72, event.attackType === 'long_range' ? 7.2 : 4.6, 0.5);
+                const targets = Array.isArray(event.targets) ? event.targets : [];
+                targets.forEach((target) => {
+                    const threat = this.threatMeshes.get(target.threatId);
+                    if (threat) {
+                        this.addDamageMarkerAt(threat.mesh.position, target.damage, event.attackType);
+                    }
+                });
+            } else if (event.eventType === 'threat_attack') {
+                this.addCombatRing(actorPos, event.attackType === 'long_range' ? 0xb37dff : 0xff5b7f, event.attackType === 'long_range' ? 9.2 : 4.2, 0.7);
+                const targets = Array.isArray(event.targets) ? event.targets : [];
+                targets.forEach((target) => {
+                    const agent = this.agents.get(target.targetId);
+                    if (agent?.mesh) {
+                        this.addDamageMarkerAt(agent.mesh.position, target.damage, 'octopus');
+                    }
+                });
+            } else if (event.eventType === 'threat_defeated') {
+                this.addCombatRing(actorPos, 0x65ffad, 6.5, 0.85);
+            }
+        });
+    }
+
+    updateCombatEffectsFrame(nowPerfMs, dtSeconds) {
+        if (!Array.isArray(this.combatEffects) || this.combatEffects.length === 0) return;
+        const next = [];
+        for (const fx of this.combatEffects) {
+            const ageMs = nowPerfMs - Number(fx.createdAt || nowPerfMs);
+            const ttlMs = Math.max(1, Number(fx.ttlMs) || 1);
+            const progress = clamp(ageMs / ttlMs, 0, 1);
+            if (progress >= 1) {
+                if (fx.mesh) {
+                    this.scene.remove(fx.mesh);
+                    if (fx.mesh.material) fx.mesh.material.dispose();
+                    if (fx.mesh.geometry) fx.mesh.geometry.dispose();
+                }
+                if (fx.sprite) {
+                    this.scene.remove(fx.sprite);
+                    if (fx.sprite.material) fx.sprite.material.dispose();
+                }
+                if (fx.texture) fx.texture.dispose();
+                continue;
+            }
+
+            if (fx.type === 'ring' && fx.mesh) {
+                const scale = 1 + ((Number(fx.maxScale) - 1) * progress);
+                fx.mesh.scale.setScalar(scale);
+                fx.mesh.material.opacity = (1 - progress) * 0.9;
+            } else if (fx.type === 'damage' && fx.sprite) {
+                fx.sprite.position.y += dtSeconds * 1.8;
+                fx.sprite.position.x += (Number(fx.driftX) || 0) * dtSeconds;
+                fx.sprite.position.z += (Number(fx.driftZ) || 0) * dtSeconds;
+                fx.sprite.material.opacity = 1 - progress;
+            }
+            next.push(fx);
+        }
+        this.combatEffects = next.slice(-COMBAT_FX_MAX);
     }
     
     createLobsterModel() {
@@ -2214,10 +2481,14 @@ class OpenBotWorld {
         const deltaWindowMissed = data.deltaWindowMissed === true;
         const agents = Array.isArray(data.agents) ? data.agents : [];
         const objects = Array.isArray(data.objects) ? data.objects : [];
+        const threats = Array.isArray(data.threats) ? data.threats : [];
+        const combatEvents = Array.isArray(data.combatEvents) ? data.combatEvents : [];
 
         if (objects.length > 0) {
             this.renderWorldObjects(objects);
         }
+        this.syncThreats(threats);
+        this.handleCombatEvents(combatEvents);
 
         if (isDeltaPayload && !deltaWindowMissed) {
             // Invariant: animation state updates must run in both delta + full-sync paths.
@@ -2613,6 +2884,7 @@ class OpenBotWorld {
         const jumpAliases = ['jump', 'hop', 'leap', 'bounce'];
         const danceAliases = ['dance', 'dancing', 'groove', 'boogie', 'shimmy'];
         const emoteAliases = ['emote', 'wave', 'cheer', 'signal', 'pose', 'react', 'gesture'];
+        const attackAliases = ['combat_attack', 'attack', 'hammer', 'strike'];
 
         const actionTokens = actionType.split(/[^a-z0-9]+/).filter(Boolean);
         const stateTokens = state.split(/[^a-z0-9]+/).filter(Boolean);
@@ -2626,6 +2898,7 @@ class OpenBotWorld {
         if (hasAnyAlias(jumpAliases)) return 'jump';
         if (hasAnyAlias(danceAliases)) return 'dance';
         if (hasAnyAlias(emoteAliases)) return 'emote';
+        if (hasAnyAlias(attackAliases)) return 'attack';
         return null;
     }
 
@@ -2653,6 +2926,7 @@ class OpenBotWorld {
         if (animType === 'jump') return 700;
         if (animType === 'dance') return 2200;
         if (animType === 'emote') return 900;
+        if (animType === 'attack') return 430;
         return 0;
     }
 
@@ -2749,6 +3023,12 @@ class OpenBotWorld {
                 if (rightAntenna) rightAntenna.rotation.x = -0.35 * pulse;
                 if (leftClaw) leftClaw.rotation.z = 0.25 * pulse;
                 if (rightClaw) rightClaw.rotation.z = -0.25 * pulse;
+            } else if (anim.animType === 'attack') {
+                const strike = Math.sin(progress * Math.PI);
+                yOffset = strike * 0.14;
+                if (frontRig) frontRig.rotation.x = -0.12 * strike;
+                if (leftClaw) leftClaw.rotation.z = 0.95 * strike;
+                if (rightClaw) rightClaw.rotation.z = -0.95 * strike;
             }
         }
 
@@ -3658,6 +3938,26 @@ class OpenBotWorld {
                 this.applyWorldLighting(timeState, skyStep);
             }
         }
+
+        if ((nowMs - this.lastThreatUpdateMs) >= (1000 / THREAT_UPDATE_MAX_FPS)) {
+            this.lastThreatUpdateMs = nowMs;
+            for (const record of this.threatMeshes.values()) {
+                record.bobPhase += dt * 4.2;
+                record.mesh.position.y = 0.6 + (Math.sin(record.bobPhase) * 0.08);
+                record.mesh.rotation.y += dt * 0.85;
+                record.mesh.children.forEach((child, idx) => {
+                    if (!child.geometry || !(child.geometry.type || '').includes('CylinderGeometry')) return;
+                    const phase = record.bobPhase + idx * 0.35;
+                    child.rotation.x = (child.userData.baseRotationX || 0) + (Math.sin(phase) * 0.18);
+                    child.rotation.z = (child.userData.baseRotationZ || 0) + (Math.cos(phase) * 0.18);
+                });
+                record.hpGroup.position.set(record.mesh.position.x, record.mesh.position.y + 2.4, record.mesh.position.z);
+                record.hpGroup.lookAt(this.camera.position);
+                record.hpGroup.visible = record.hpRatio > 0;
+            }
+        }
+
+        this.updateCombatEffectsFrame(frameNow, dt);
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
