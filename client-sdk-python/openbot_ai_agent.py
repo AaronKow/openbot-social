@@ -736,6 +736,11 @@ class AIAgent:
             "inside": False,
             "last_event": "",
         }
+        self._stuck_runtime: Dict[str, Any] = {
+            "last_x": None,
+            "last_z": None,
+            "stuck_ticks": 0,
+        }
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -774,6 +779,48 @@ class AIAgent:
             if float(inventory.get(key, 0) or 0) < float(needed):
                 return False
         return True
+
+    def _get_nearest_harvestable_object(self, position: Dict[str, float], objects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        px = float(position.get("x", 0.0))
+        pz = float(position.get("z", 0.0))
+        nearest = None
+        best = float("inf")
+        for obj in objects:
+            obj_type = str(obj.get("type", "")).lower()
+            if obj_type not in {"rock", "kelp", "seaweed"}:
+                continue
+            opos = obj.get("position") or {}
+            ox = float(opos.get("x", 0.0))
+            oz = float(opos.get("z", 0.0))
+            dist = math.hypot(px - ox, pz - oz)
+            if dist < best:
+                best = dist
+                nearest = {
+                    "id": obj.get("id"),
+                    "type": obj_type,
+                    "x": ox,
+                    "z": oz,
+                    "distance": dist,
+                }
+        return nearest
+
+    def _update_stuck_runtime(self, position: Dict[str, float]):
+        sx = float(position.get("x", 0.0))
+        sz = float(position.get("z", 0.0))
+        last_x = self._stuck_runtime.get("last_x")
+        last_z = self._stuck_runtime.get("last_z")
+        if last_x is None or last_z is None:
+            self._stuck_runtime["last_x"] = sx
+            self._stuck_runtime["last_z"] = sz
+            self._stuck_runtime["stuck_ticks"] = 0
+            return
+        moved = math.hypot(sx - float(last_x), sz - float(last_z))
+        if moved < 0.35:
+            self._stuck_runtime["stuck_ticks"] = int(self._stuck_runtime.get("stuck_ticks", 0)) + 1
+        else:
+            self._stuck_runtime["stuck_ticks"] = 0
+        self._stuck_runtime["last_x"] = sx
+        self._stuck_runtime["last_z"] = sz
 
     def _update_shelter_runtime(
         self,
@@ -837,6 +884,7 @@ class AIAgent:
         world_tick = int(perception.get("worldTick") or 0)
         position = perception.get("position") or {"x": 50.0, "z": 50.0}
         threats = perception.get("threats") or []
+        nearest_harvest = perception.get("nearHarvestObject")
         runtime = perception.get("survival") or self._shelter_runtime
         nearest = self._get_nearest_threat(position, threats)
         nearest_distance = nearest["distance"] if nearest else None
@@ -849,6 +897,22 @@ class AIAgent:
             explode_msg = "shelter collapsed - forced to fight!"
             if not any(a.get("type") == "chat" for a in sanitized):
                 sanitized.insert(0, {"type": "chat", "message": explode_msg})
+
+        has_move_intent = any(a.get("type") in ("move", "move_to_agent") for a in sanitized)
+        has_harvest_intent = any(a.get("type") == "harvest" for a in sanitized)
+        stuck_ticks = int(self._stuck_runtime.get("stuck_ticks", 0))
+        if (
+            has_move_intent
+            and not has_harvest_intent
+            and isinstance(nearest_harvest, dict)
+            and float(nearest_harvest.get("distance", 999.0)) <= 3.2
+            and stuck_ticks >= 2
+        ):
+            return [{
+                "type": "harvest",
+                "resource_type": str(nearest_harvest.get("type", "rock")),
+                "object_id": str(nearest_harvest.get("id", "")),
+            }] + sanitized
 
         if nearest and world_tick < int(runtime.get("forced_fight_until_tick") or 0):
             return [{"type": "move", "x": nearest["x"], "z": nearest["z"]}] + [a for a in sanitized if a.get("type") != "wait"]
@@ -1110,11 +1174,15 @@ class AIAgent:
                 self._cached_system_prompt = None
 
         threats = self.client.get_world_threats() if self.client else []
+        objects = self.client.get_world_objects() if self.client else []
+        nearest_object = self._get_nearest_harvestable_object(pos, objects if isinstance(objects, list) else [])
         nearest_threat = self._get_nearest_threat(pos, threats)
         if nearest_threat:
             lines.append(f"🐙 threat {nearest_threat['distance']:.1f}u ({nearest_threat['type']})")
         else:
             lines.append("🐙 no threat nearby")
+        if nearest_object:
+            lines.append(f"🪨 resource {nearest_object['type']} {nearest_object['distance']:.1f}u")
 
         rt = self._shelter_runtime
         if rt.get("has_shelter"):
@@ -1354,8 +1422,10 @@ class AIAgent:
         world_snapshot = self.client.get_world_state_snapshot()
         world_tick = int(world_snapshot.get("tick") or 0)
         threats_raw = self.client.get_world_threats()
+        objects_raw = self.client.get_world_objects()
         self_state = self.client.get_self_agent_state() or {}
         inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        self._update_stuck_runtime(position)
         survival = self._update_shelter_runtime(
             world_tick=world_tick,
             position=position,
@@ -1363,6 +1433,7 @@ class AIAgent:
             threats=threats_raw if isinstance(threats_raw, list) else [],
         )
         nearest = self._get_nearest_threat(position, threats_raw if isinstance(threats_raw, list) else [])
+        nearest_harvest = self._get_nearest_harvestable_object(position, objects_raw if isinstance(objects_raw, list) else [])
         threat_items = []
         if nearest:
             threat_items.append(nearest)
@@ -1376,6 +1447,7 @@ class AIAgent:
             "newSenders": list(self._new_senders),
             "taggedBy": list(self._tagged_by),
             "threats": threat_items,
+            "nearHarvestObject": nearest_harvest,
             "selfState": self_state,
             "survival": survival,
         }
