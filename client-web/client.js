@@ -330,6 +330,13 @@ class OpenBotWorld {
         this.worldTick = null; // Last successfully applied world tick
         this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
         this.worldObjectsSignature = '';
+        this.expansionTileMeshes = new Map(); // tileId -> THREE.Mesh
+        this.expansionPulseMarkers = [];
+        this.expansionTileIds = new Set();
+        this.mapExpansionLevel = 0;
+        this.newExpansionTiles = 0;
+        this.topExpansionBuildersLabel = '—';
+        this.hasExpansionSnapshot = false;
         this.lastChatTimestamp = 0;
         this.agentSleepStateById = new Map(); // agentId -> sleeping flag (for UI-only energy system messages)
         this.agentNameMap = new Map(); // agentName -> agentId
@@ -806,6 +813,127 @@ class OpenBotWorld {
             this.scene.remove(mesh);
         }
         this.decorationMeshes.clear();
+    }
+
+    createExpansionTileMesh(tile) {
+        const mesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(1, 1),
+            new THREE.MeshBasicMaterial({
+                color: 0x53d7ff,
+                transparent: true,
+                opacity: 0.26,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            })
+        );
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.y = 0.09;
+        mesh.renderOrder = 2;
+        mesh.userData.ownerEntityId = tile?.ownerEntityId || null;
+        return mesh;
+    }
+
+    createExpansionPulseMarker(x, z) {
+        const ring = new THREE.Mesh(
+            new THREE.RingGeometry(0.2, 0.45, 24),
+            new THREE.MeshBasicMaterial({
+                color: 0x8dff8f,
+                transparent: true,
+                opacity: 0.92,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.set(x, 0.14, z);
+        ring.renderOrder = 3;
+        this.scene.add(ring);
+        this.expansionPulseMarkers.push({
+            mesh: ring,
+            createdAt: performance.now(),
+            durationMs: 850
+        });
+    }
+
+    syncExpansionTiles(tiles = []) {
+        if (!Array.isArray(tiles)) {
+            return [];
+        }
+
+        const nextIds = new Set();
+        const newlyPlaced = [];
+
+        tiles.forEach((tile, idx) => {
+            if (!tile || typeof tile !== 'object') return;
+            const fallbackId = `tile-${Number(tile.x) || 0}-${Number(tile.z) || 0}-${idx}`;
+            const tileId = String(tile.id || fallbackId);
+            const x = Number(tile.x);
+            const z = Number(tile.z);
+            if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+
+            nextIds.add(tileId);
+            let mesh = this.expansionTileMeshes.get(tileId);
+            if (!mesh) {
+                mesh = this.createExpansionTileMesh(tile);
+                this.expansionTileMeshes.set(tileId, mesh);
+                this.scene.add(mesh);
+                newlyPlaced.push({ id: tileId, x, z, ownerEntityId: tile.ownerEntityId || null });
+            }
+
+            mesh.position.set(x, 0.09, z);
+            mesh.userData.ownerEntityId = tile.ownerEntityId || null;
+        });
+
+        for (const [id, mesh] of this.expansionTileMeshes.entries()) {
+            if (nextIds.has(id)) continue;
+            this.scene.remove(mesh);
+            if (mesh.material) mesh.material.dispose();
+            if (mesh.geometry) mesh.geometry.dispose();
+            this.expansionTileMeshes.delete(id);
+        }
+
+        this.expansionTileIds = nextIds;
+        return newlyPlaced;
+    }
+
+    updateExpansionPulseMarkers(nowMs) {
+        if (!this.expansionPulseMarkers.length) return;
+        this.expansionPulseMarkers = this.expansionPulseMarkers.filter((marker) => {
+            const t = clamp((nowMs - marker.createdAt) / marker.durationMs, 0, 1);
+            const scale = 1 + (t * 2.2);
+            marker.mesh.scale.setScalar(scale);
+            marker.mesh.material.opacity = (1 - t) * 0.95;
+            marker.mesh.position.y = 0.14 + (t * 0.25);
+            if (t >= 1) {
+                this.scene.remove(marker.mesh);
+                if (marker.mesh.material) marker.mesh.material.dispose();
+                if (marker.mesh.geometry) marker.mesh.geometry.dispose();
+                return false;
+            }
+            return true;
+        });
+    }
+
+    updateExpansionHudMetrics(tiles = [], newlyPlaced = []) {
+        this.newExpansionTiles = Array.isArray(newlyPlaced) ? newlyPlaced.length : 0;
+
+        const topCounts = new Map();
+        (Array.isArray(tiles) ? tiles : []).forEach((tile) => {
+            const owner = tile?.ownerEntityId;
+            if (!owner) return;
+            topCounts.set(owner, (topCounts.get(owner) || 0) + 1);
+        });
+
+        const topBuilders = Array.from(topCounts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([owner, count]) => {
+                const agent = this.agents.get(owner);
+                const label = agent?.data?.name || owner;
+                return `${label} (${count})`;
+            });
+
+        this.topExpansionBuildersLabel = topBuilders.length > 0 ? topBuilders.join(', ') : '—';
     }
 
     renderWorldObjects(objects) {
@@ -3074,6 +3202,22 @@ class OpenBotWorld {
         const objects = Array.isArray(data.objects) ? data.objects : [];
         const threats = Array.isArray(data.threats) ? data.threats : [];
         const combatEvents = Array.isArray(data.combatEvents) ? data.combatEvents : [];
+        const expansionTiles = Array.isArray(data.expansionTiles) ? data.expansionTiles : [];
+        const payloadExpansionLevel = Number(data.mapExpansionLevel);
+
+        this.mapExpansionLevel = Number.isFinite(payloadExpansionLevel)
+            ? Math.max(0, Math.floor(payloadExpansionLevel))
+            : expansionTiles.length;
+
+        const newlyPlacedTiles = this.syncExpansionTiles(expansionTiles);
+        const shouldEmitExpansionPulse = this.hasExpansionSnapshot;
+        this.updateExpansionHudMetrics(expansionTiles, shouldEmitExpansionPulse ? newlyPlacedTiles : []);
+        if (shouldEmitExpansionPulse) {
+            newlyPlacedTiles.forEach((tile) => {
+                this.createExpansionPulseMarker(tile.x, tile.z);
+            });
+        }
+        this.hasExpansionSnapshot = true;
 
         if (objects.length > 0) {
             this.renderWorldObjects(objects);
@@ -3887,6 +4031,15 @@ class OpenBotWorld {
         // Update total entities created count (if available)
         const totalEl = document.getElementById('total-created-link');
         if (totalEl) totalEl.textContent = this.totalEntitiesCreated;
+
+        const expansionLevelEl = document.getElementById('map-expansion-level');
+        if (expansionLevelEl) expansionLevelEl.textContent = String(this.mapExpansionLevel);
+
+        const expansionNewEl = document.getElementById('map-expansion-new');
+        if (expansionNewEl) expansionNewEl.textContent = String(this.newExpansionTiles);
+
+        const expansionBuildersEl = document.getElementById('map-expansion-builders');
+        if (expansionBuildersEl) expansionBuildersEl.textContent = this.topExpansionBuildersLabel;
     }
     
     formatUptime(ms) {
@@ -4631,6 +4784,7 @@ class OpenBotWorld {
         }
 
         this.updateCombatEffectsFrame(frameNow, dt);
+        this.updateExpansionPulseMarkers(frameNow);
 
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
