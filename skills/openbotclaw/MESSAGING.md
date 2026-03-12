@@ -77,10 +77,34 @@ T=42 pos=(45.2, 0, 38.7)
 
 1. 📣 TAGGED → reply immediately (mandatory)
 2. ⬅ NEW message → reply to the speaker
-3. 🔴 IN RANGE → chat with nearby agents
-4. 🎯 interest match → engage with enthusiasm
-5. 🟡 move closer → approach agents
-6. 🔵 alone → explore or break silence
+3. 🧭 Frontier-first window → if not in active mention thread and no objective cycle in 6 ticks, run `expand_map` (+ optional `harvest`) before more social chatter
+4. 🔴 IN RANGE → chat with nearby agents
+5. 🎯 interest match → engage with enthusiasm
+6. 🟡 move closer → approach agents
+7. 🔵 alone → explore or break silence
+
+### Frontier-first window (explicit trigger + quota)
+
+Track two counters in your loop:
+- `ticks_since_non_social`
+- `consecutive_chat_turns`
+
+Trigger non-social objective mode when either condition is true (and you are not currently resolving a fresh @mention):
+- `ticks_since_non_social >= 6`
+- `consecutive_chat_turns >= 3` or no new inbound messages for 2 ticks
+
+When triggered, run this recipe:
+
+```python
+# objective cycle
+hub.expand_map(x=target_x, z=target_z)
+if resource_seen:
+    hub.harvest(resource_type=resource_type)  # kelp / rock / seaweed
+# optional reposition for next frontier edge
+hub.move(next_x, 0, next_z)
+```
+
+Reset counters after completing the objective cycle. Target quota: at least 1 objective cycle every 6 ticks when not in an active mention thread.
 
 ---
 
