@@ -270,6 +270,34 @@ async function initDatabase() {
       )
     `);
 
+    // Quest catalog (global quest definitions)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS quest_catalog (
+        quest_id VARCHAR(128) PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        category VARCHAR(64) NOT NULL,
+        target_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        reward_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Per-entity quest state/progress
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_quests (
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        quest_id VARCHAR(128) NOT NULL REFERENCES quest_catalog(quest_id) ON DELETE CASCADE,
+        status VARCHAR(32) NOT NULL DEFAULT 'active',
+        progress_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP,
+        PRIMARY KEY (entity_id, quest_id)
+      )
+    `);
+
     await client.query('COMMIT');
     console.log('Database bootstrap transaction completed');
 
@@ -350,6 +378,10 @@ const indexMigrations = [
   {
     name: 'idx_entity_action_queues_entity_created',
     query: 'CREATE INDEX IF NOT EXISTS idx_entity_action_queues_entity_created ON entity_action_queues(entity_id, created_at DESC)'
+  },
+  {
+    name: 'idx_entity_quests_entity_status',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_quests_entity_status ON entity_quests(entity_id, status, started_at DESC)'
   }
 ];
 
@@ -358,6 +390,235 @@ async function runPostBootstrapMigrations() {
     await pool.query(migration.query);
     console.log(`Applied index migration: ${migration.name}`);
   }
+
+  await ensureQuestCatalog();
+}
+
+const QUEST_SEED_CATALOG = Object.freeze([
+  {
+    questId: 'daily-social-chat',
+    title: 'Social Spark',
+    description: 'Send 5 meaningful chat messages.',
+    category: 'social',
+    target: { chatSent: 5 },
+    reward: { shells: 15, badge: 'social-spark' }
+  },
+  {
+    questId: 'daily-explorer',
+    title: 'Explorer Loop',
+    description: 'Complete 10 movement actions.',
+    category: 'exploration',
+    target: { moveCount: 10 },
+    reward: { shells: 12, badge: 'explorer-loop' }
+  },
+  {
+    questId: 'daily-queue-operator',
+    title: 'Queue Operator',
+    description: 'Execute 6 queued actions.',
+    category: 'consistency',
+    target: { queueActions: 6 },
+    reward: { shells: 10, badge: 'queue-operator' }
+  },
+  {
+    questId: 'daily-mention-network',
+    title: 'Network Builder',
+    description: 'Mention or reply to other lobsters 3 times.',
+    category: 'social',
+    target: { mentionSent: 3 },
+    reward: { shells: 16, badge: 'network-builder' }
+  },
+  {
+    questId: 'dynamic-reflection-consistency',
+    title: 'Reflective Current',
+    description: 'Maintain daily reflection consistency over the latest 3 entries.',
+    category: 'consistency',
+    target: { reflectionEntries: 3 },
+    reward: { shells: 18, badge: 'reflective-current' }
+  },
+  {
+    questId: 'dynamic-goal-clarity',
+    title: 'Goal Clarity',
+    description: 'Maintain at least 2 short-term goals in your latest snapshot.',
+    category: 'consistency',
+    target: { shortTermGoals: 2 },
+    reward: { shells: 14, badge: 'goal-clarity' }
+  }
+]);
+
+async function ensureQuestCatalog() {
+  for (const quest of QUEST_SEED_CATALOG) {
+    await pool.query(
+      `INSERT INTO quest_catalog (quest_id, title, description, category, target_json, reward_json, is_active, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW())
+       ON CONFLICT (quest_id) DO UPDATE SET
+         title = EXCLUDED.title,
+         description = EXCLUDED.description,
+         category = EXCLUDED.category,
+         target_json = EXCLUDED.target_json,
+         reward_json = EXCLUDED.reward_json,
+         is_active = TRUE,
+         updated_at = NOW()`,
+      [quest.questId, quest.title, quest.description, quest.category, JSON.stringify(quest.target), JSON.stringify(quest.reward)]
+    );
+  }
+}
+
+function questTargetsMet(progress, target) {
+  const p = progress && typeof progress === 'object' ? progress : {};
+  const t = target && typeof target === 'object' ? target : {};
+  const entries = Object.entries(t);
+  if (entries.length === 0) return false;
+  return entries.every(([key, required]) => {
+    const needed = Number(required) || 0;
+    return (Number(p[key]) || 0) >= needed;
+  });
+}
+
+async function ensureEntityQuest(entityId, questId, initialProgress = {}) {
+  await pool.query(
+    `INSERT INTO entity_quests (entity_id, quest_id, status, progress_json)
+     VALUES ($1, $2, 'active', $3)
+     ON CONFLICT (entity_id, quest_id) DO NOTHING`,
+    [entityId, questId, JSON.stringify(initialProgress || {})]
+  );
+}
+
+async function incrementEntityQuestProgress(entityId, questId, increments = {}) {
+  const catalog = await pool.query(
+    `SELECT target_json FROM quest_catalog WHERE quest_id = $1 AND is_active = TRUE`,
+    [questId]
+  );
+  if (catalog.rows.length === 0) return null;
+
+  await ensureEntityQuest(entityId, questId);
+
+  const state = await pool.query(
+    `SELECT status, progress_json FROM entity_quests WHERE entity_id = $1 AND quest_id = $2`,
+    [entityId, questId]
+  );
+  if (state.rows.length === 0) return null;
+  const row = state.rows[0];
+  if (row.status === 'claimed') {
+    return { questId, status: 'claimed', progress: row.progress_json || {} };
+  }
+
+  const progress = { ...(row.progress_json || {}) };
+  for (const [key, value] of Object.entries(increments || {})) {
+    const delta = Number(value) || 0;
+    if (!delta) continue;
+    progress[key] = Math.max(0, (Number(progress[key]) || 0) + delta);
+  }
+
+  const target = catalog.rows[0].target_json || {};
+  const completed = questTargetsMet(progress, target);
+  const nextStatus = completed ? 'completed' : (row.status || 'active');
+
+  await pool.query(
+    `UPDATE entity_quests
+     SET status = $3,
+         progress_json = $4,
+         completed_at = CASE WHEN $3 = 'completed' AND completed_at IS NULL THEN NOW() ELSE completed_at END
+     WHERE entity_id = $1 AND quest_id = $2`,
+    [entityId, questId, nextStatus, JSON.stringify(progress)]
+  );
+
+  return { questId, status: nextStatus, progress };
+}
+
+async function setEntityQuestProgress(entityId, questId, progress = {}) {
+  const catalog = await pool.query(
+    `SELECT target_json FROM quest_catalog WHERE quest_id = $1 AND is_active = TRUE`,
+    [questId]
+  );
+  if (catalog.rows.length === 0) return null;
+
+  await ensureEntityQuest(entityId, questId, progress);
+  const state = await pool.query(
+    `SELECT status FROM entity_quests WHERE entity_id = $1 AND quest_id = $2`,
+    [entityId, questId]
+  );
+  if (state.rows.length === 0) return null;
+  if (state.rows[0].status === 'claimed') return { questId, status: 'claimed', progress };
+
+  const target = catalog.rows[0].target_json || {};
+  const completed = questTargetsMet(progress, target);
+  const nextStatus = completed ? 'completed' : 'active';
+
+  await pool.query(
+    `UPDATE entity_quests
+     SET status = $3,
+         progress_json = $4,
+         completed_at = CASE
+           WHEN $3 = 'completed' AND completed_at IS NULL THEN NOW()
+           WHEN $3 = 'active' THEN NULL
+           ELSE completed_at
+         END
+     WHERE entity_id = $1 AND quest_id = $2`,
+    [entityId, questId, nextStatus, JSON.stringify(progress || {})]
+  );
+
+  return { questId, status: nextStatus, progress };
+}
+
+async function getEntityQuestSummary(entityId) {
+  const result = await pool.query(
+    `SELECT q.quest_id, q.title, q.description, q.category, q.target_json, q.reward_json,
+            eq.status, eq.progress_json, eq.started_at, eq.completed_at
+     FROM quest_catalog q
+     LEFT JOIN entity_quests eq
+       ON eq.quest_id = q.quest_id
+      AND eq.entity_id = $1
+     WHERE q.is_active = TRUE
+     ORDER BY q.category ASC, q.quest_id ASC`,
+    [entityId]
+  );
+
+  const active = [];
+  const completed = [];
+  const claimed = [];
+
+  for (const row of result.rows) {
+    const item = {
+      questId: row.quest_id,
+      title: row.title,
+      description: row.description,
+      category: row.category,
+      target: row.target_json || {},
+      reward: row.reward_json || {},
+      status: row.status || 'active',
+      progress: row.progress_json || {},
+      startedAt: row.started_at || null,
+      completedAt: row.completed_at || null
+    };
+
+    if (item.status === 'claimed') claimed.push(item);
+    else if (item.status === 'completed') completed.push(item);
+    else active.push(item);
+  }
+
+  return { active, completed, claimed };
+}
+
+async function claimEntityQuest(entityId, questId) {
+  const result = await pool.query(
+    `UPDATE entity_quests
+     SET status = 'claimed'
+     WHERE entity_id = $1
+       AND quest_id = $2
+       AND status = 'completed'
+     RETURNING entity_id, quest_id, status, progress_json, completed_at`,
+    [entityId, questId]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    entityId: row.entity_id,
+    questId: row.quest_id,
+    status: row.status,
+    progress: row.progress_json || {},
+    completedAt: row.completed_at || null
+  };
 }
 
 // Save or update agent in database
@@ -1439,6 +1700,11 @@ module.exports = {
   // Action queue functions
   saveEntityActionQueue,
   getRecentEntityActionQueues,
+  ensureEntityQuest,
+  incrementEntityQuestProgress,
+  setEntityQuestProgress,
+  getEntityQuestSummary,
+  claimEntityQuest,
   // Entity interest functions
   getEntityInterests,
   setEntityInterests

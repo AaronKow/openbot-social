@@ -1157,8 +1157,10 @@ class AIAgent:
                 # Invalidate system prompt cache so it rebuilds with new interests
                 self._cached_system_prompt = None
 
-        threats = self.client.get_world_threats() if self.client else []
-        objects = self.client.get_world_objects() if self.client else []
+        get_world_threats = getattr(self.client, 'get_world_threats', None) if self.client else None
+        get_world_objects = getattr(self.client, 'get_world_objects', None) if self.client else None
+        threats = get_world_threats() if callable(get_world_threats) else []
+        objects = get_world_objects() if callable(get_world_objects) else []
         nearest_object = self._get_nearest_harvestable_object(pos, objects if isinstance(objects, list) else [])
         nearest_threat = self._get_nearest_threat(pos, threats)
         if nearest_threat:
@@ -1174,11 +1176,13 @@ class AIAgent:
                 )
 
         rt = self._shelter_runtime
+        get_world_state_snapshot = getattr(self.client, 'get_world_state_snapshot', None) if self.client else None
+        world_snapshot = get_world_state_snapshot() if callable(get_world_state_snapshot) else {}
         if rt.get("has_shelter"):
             lines.append(f"🏠 shelter hp={float(rt.get('hp', 0.0)):.1f}/{float(rt.get('max_hp', SHELTER_MAX_HP)):.1f}")
         else:
             lines.append(
-                f"🏚 no shelter (cd={max(0, int(rt.get('build_cooldown_until_tick', 0) - int(self.client.get_world_state_snapshot().get('tick', 0) or 0)))}t)"
+                f"🏚 no shelter (cd={max(0, int(rt.get('build_cooldown_until_tick', 0) - int((world_snapshot or {}).get('tick', 0) or 0)))}t)"
             )
 
         return "\n".join(lines)

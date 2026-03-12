@@ -399,6 +399,9 @@ class OpenBotWorld {
         this.wikiDirectoryCache = { ts: 0, data: [] };
         this.currentWiki = null;
         this.currentWikiEntityId = null;
+        this.currentQuestEntityId = null;
+        this.questSummary = null;
+        this.lastQuestFetchAt = 0;
         this.timelineFilter = 'all';
         this.wikiAvatarRenderers = [];
         this.worldDayLabel = '';
@@ -1720,12 +1723,19 @@ class OpenBotWorld {
         // Controls panel close
         const controlsClose = document.getElementById('controls-close');
         const controlsPanel = document.getElementById('controls-panel');
+        const progressPanel = document.getElementById('progress-panel');
+        const progressClose = document.getElementById('progress-close');
         if (window.matchMedia('(max-width: 768px)').matches && controlsPanel) {
             controlsPanel.style.display = 'none';
         }
         controlsClose.addEventListener('click', () => {
             controlsPanel.style.display = 'none';
         });
+        if (progressClose) {
+            progressClose.addEventListener('click', () => {
+                progressPanel.style.display = 'none';
+            });
+        }
         
         // Sidebar button controls
         const clawhubBtn = document.getElementById('clawhub-btn');
@@ -1765,6 +1775,9 @@ class OpenBotWorld {
         
         document.getElementById('sidebar-controls-btn').addEventListener('click', () => {
             togglePanelVisibility(controlsPanel, 'block');
+        });
+        document.getElementById('sidebar-progress-btn').addEventListener('click', () => {
+            togglePanelVisibility(progressPanel, 'block');
         });
         
         // Chat scroll tracking for auto-scroll detection and lazy loading
@@ -1945,8 +1958,10 @@ class OpenBotWorld {
             }
             this.currentWiki = wiki;
             this.currentWikiEntityId = entityId;
+            this.currentQuestEntityId = entityId;
             this.timelineFilter = 'all';
             this.renderWiki(wiki);
+            this.fetchQuestProgress(entityId);
         } catch (error) {
             console.error('Wiki fetch error:', error);
             this.renderWikiError('Could not load lobster details right now.');
@@ -1982,6 +1997,72 @@ class OpenBotWorld {
         } catch (error) {
             console.error('Runtime stats refresh error:', error);
         }
+    }
+
+    async fetchQuestProgress(entityId, options = {}) {
+        if (!entityId) return;
+        const force = Boolean(options.force);
+        if (!force && this.currentQuestEntityId === entityId && (Date.now() - this.lastQuestFetchAt) < 8000) {
+            return;
+        }
+        try {
+            const response = await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/quests`);
+            if (!response.ok) {
+                throw new Error(`Failed to load quests (${response.status})`);
+            }
+            const data = await response.json();
+            if (!data.success) return;
+            this.currentQuestEntityId = entityId;
+            this.questSummary = data;
+            this.lastQuestFetchAt = Date.now();
+            this.renderQuestProgress();
+        } catch (error) {
+            console.error('Quest progress fetch error:', error);
+        }
+    }
+
+    renderQuestProgress() {
+        const content = document.getElementById('progress-content');
+        if (!content) return;
+
+        if (!this.questSummary) {
+            content.innerHTML = '<p>No quest data loaded yet.</p>';
+            return;
+        }
+
+        const active = Array.isArray(this.questSummary.active) ? this.questSummary.active : [];
+        const completed = Array.isArray(this.questSummary.completed) ? this.questSummary.completed : [];
+        const claimed = Array.isArray(this.questSummary.claimed) ? this.questSummary.claimed : [];
+
+        const renderQuestCard = (quest) => {
+            const targetPairs = Object.entries(quest.target || {});
+            const progressPairs = Object.entries(quest.progress || {});
+            const targetText = targetPairs.length
+                ? targetPairs.map(([k, v]) => `${k}: ${v}`).join(' • ')
+                : 'No target';
+            const progressText = progressPairs.length
+                ? progressPairs.map(([k, v]) => `${k}: ${v}`).join(' • ')
+                : 'No progress';
+            return `
+                <div class="progress-quest-item">
+                    <strong>${this.escapeHtml(quest.title || quest.questId || 'Quest')}</strong>
+                    <div>${this.escapeHtml(quest.description || '')}</div>
+                    <div>🎯 ${this.escapeHtml(targetText)}</div>
+                    <div>📌 ${this.escapeHtml(progressText)}</div>
+                    <div>🏷️ ${this.escapeHtml(quest.status || 'active')}</div>
+                </div>
+            `;
+        };
+
+        content.innerHTML = `
+            <p><strong>Entity:</strong> ${this.escapeHtml(this.currentQuestEntityId || 'unknown')}</p>
+            <p><strong>Streak proxy:</strong> ${active.filter(q => q.questId === 'dynamic-reflection-consistency').length ? 'reflection tracked' : 'not tracked yet'}</p>
+            <p><strong>Claimed rewards:</strong> ${claimed.length}</p>
+            <div><strong>Active Quests (${active.length})</strong></div>
+            ${active.map(renderQuestCard).join('') || '<p>No active quests.</p>'}
+            <div style="margin-top:10px;"><strong>Completed Quests (${completed.length})</strong></div>
+            ${completed.map(renderQuestCard).join('') || '<p>No completed quests yet.</p>'}
+        `;
     }
 
     async fetchLobsterDirectory() {
@@ -2846,6 +2927,9 @@ class OpenBotWorld {
             if (response.ok) {
                 const data = await response.json();
                 this.handleWorldState(data);
+                if (this.currentQuestEntityId) {
+                    this.fetchQuestProgress(this.currentQuestEntityId);
+                }
                 this.worldPollFailures = 0;
             } else {
                 this.connected = false;
