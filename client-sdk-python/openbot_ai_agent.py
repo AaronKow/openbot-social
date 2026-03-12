@@ -701,6 +701,7 @@ class AIAgent:
         self._context_summary: str = ""
         self._recommendations_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
         self._quest_snapshot_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+        self._quest_planning_context_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         # Cached system prompt — rebuilt when interests evolve
         self._cached_system_prompt: Optional[str] = None
         self._cached_interests_key: Optional[str] = None  # hash of interests for cache invalidation
@@ -836,9 +837,9 @@ class AIAgent:
         ranked.sort(key=lambda item: item["distance"])
         return ranked[:max(1, limit)]
 
-    def _get_quest_progress_snapshot(self) -> Dict[str, Any]:
+    def _get_quest_progress_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
-        if (now - float(self._quest_snapshot_cache.get("ts", 0.0))) < 20.0:
+        if not force_refresh and (now - float(self._quest_snapshot_cache.get("ts", 0.0))) < 20.0:
             return dict(self._quest_snapshot_cache.get("data") or {})
         if not self.client:
             return dict(self._quest_snapshot_cache.get("data") or {})
@@ -889,6 +890,120 @@ class AIAgent:
         }
         self._quest_snapshot_cache = {"ts": now, "data": snapshot}
         return dict(snapshot)
+
+    def _build_compact_quest_context(self, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.time()
+        if not force_refresh and (now - float(self._quest_planning_context_cache.get("ts", 0.0))) < 6.0:
+            return dict(self._quest_planning_context_cache.get("data") or {})
+
+        snapshot = self._get_quest_progress_snapshot(force_refresh=force_refresh)
+        active = snapshot.get("active") if isinstance(snapshot.get("active"), list) else []
+        compact_active = []
+        for item in active[:3]:
+            if not isinstance(item, dict):
+                continue
+            deficits = []
+            for metric in item.get("metrics") or []:
+                if not isinstance(metric, dict):
+                    continue
+                target = float(metric.get("target", 0.0) or 0.0)
+                progress = float(metric.get("progress", 0.0) or 0.0)
+                if target <= 0:
+                    continue
+                deficits.append({
+                    "metric": metric.get("metric"),
+                    "remaining": round(max(0.0, target - progress), 2),
+                    "ratio": round(min(1.0, progress / target), 3),
+                })
+            compact_active.append(
+                {
+                    "title": item.get("title"),
+                    "category": item.get("category"),
+                    "deficits": deficits[:4],
+                }
+            )
+
+        compact = {
+            "counts": snapshot.get("counts", {}),
+            "active": compact_active,
+        }
+        self._quest_planning_context_cache = {"ts": now, "data": compact}
+        return dict(compact)
+
+    def _quest_priority_templates(self, perception: Dict[str, Any], quest_context: Dict[str, Any]) -> Dict[str, Any]:
+        deficits: Dict[str, float] = {}
+        for quest in quest_context.get("active") or []:
+            if not isinstance(quest, dict):
+                continue
+            for metric in quest.get("deficits") or []:
+                if not isinstance(metric, dict):
+                    continue
+                name = str(metric.get("metric") or "").strip()
+                if not name:
+                    continue
+                deficits[name] = max(deficits.get(name, 0.0), float(metric.get("remaining", 0.0) or 0.0))
+
+        templates: List[Dict[str, Any]] = []
+        min_non_chat = 0
+
+        move_deficit = deficits.get("moveCount", 0.0)
+        if move_deficit > 0:
+            position = perception.get("position") if isinstance(perception.get("position"), dict) else {}
+            px = float(position.get("x", 50.0) or 50.0)
+            pz = float(position.get("z", 50.0) or 50.0)
+            stride = min(5.0, max(2.0, move_deficit / 4.0))
+            waypoints = [
+                {"type": "move", "x": max(0.0, min(100.0, px + stride)), "z": pz},
+                {"type": "move", "x": px, "z": max(0.0, min(100.0, pz + stride))},
+                {"type": "move", "x": max(0.0, min(100.0, px - stride)), "z": pz},
+            ]
+            templates.extend(waypoints)
+            min_non_chat = max(min_non_chat, min(6, int(move_deficit)))
+
+        queue_deficit = deficits.get("queueActions", 0.0)
+        if queue_deficit > 0:
+            templates.extend([
+                {"type": "move"},
+                {"type": "harvest"},
+                {"type": "move"},
+            ])
+            min_non_chat = max(min_non_chat, min(7, int(max(2.0, queue_deficit))))
+
+        expansion_deficit = sum(
+            remain for key, remain in deficits.items()
+            if "expand" in key.lower() or "tile" in key.lower() or "harvest" in key.lower()
+        )
+        if expansion_deficit > 0:
+            templates.extend([
+                {"type": "harvest"},
+                {"type": "harvest"},
+                {"type": "expand_map"},
+            ])
+            min_non_chat = max(min_non_chat, 3)
+
+        return {"deficits": deficits, "templates": templates[:8], "min_non_chat": min_non_chat}
+
+    def _merge_quest_priorities(
+        self,
+        actions: List[Dict[str, Any]],
+        quest_priority: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        merged = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        if not merged:
+            merged = [{"type": "wait"}]
+
+        templates = [a for a in (quest_priority.get("templates") or []) if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        min_non_chat = max(0, int(quest_priority.get("min_non_chat", 0) or 0))
+        non_chat = [a for a in merged if a.get("type") != "chat"]
+        slots_needed = max(0, min_non_chat - len(non_chat))
+
+        if slots_needed > 0 and templates:
+            injected = templates[:slots_needed]
+            merged = injected + merged
+        elif templates and merged and merged[0].get("type") == "chat":
+            merged = [templates[0]] + merged
+
+        return merged[:16]
 
     def _build_progression_signals(
         self,
@@ -942,7 +1057,7 @@ class AIAgent:
                 "totalTiles": len(expansion_tiles),
                 "recentTilePlacements": recent_tiles,
             },
-            "questProgressSnapshot": self._get_quest_progress_snapshot(),
+            "questProgressSnapshot": self._get_quest_progress_snapshot(force_refresh=True),
         }
 
     def _update_stuck_runtime(self, position: Dict[str, float]):
@@ -1688,6 +1803,7 @@ class AIAgent:
                 "procedural": (memory_bundle or {}).get("procedural", {}),
             },
             "identity": identity_profile or {},
+            "quests": self._build_compact_quest_context(),
         }
         context_text = json.dumps(context_payload, ensure_ascii=True, separators=(",", ":"))[:1200]
         self._llm_history.append({"role": "user", "content": observation})
@@ -1765,6 +1881,9 @@ class AIAgent:
         if not actions:
             actions = [{"type": "wait"}]
         actions = self._apply_progression_policy(actions, perception)
+        quest_context = self._build_compact_quest_context()
+        quest_priority = self._quest_priority_templates(perception, quest_context)
+        actions = self._merge_quest_priorities(actions, quest_priority)
         actions = self._apply_survival_reflex(actions, perception)
 
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
