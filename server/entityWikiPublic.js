@@ -198,6 +198,69 @@ function deriveReputation(relationships, recentOwnChats) {
   };
 }
 
+
+function deriveRecommendationCandidates(candidates = [], noveltyByEntity = {}, recommendationType = 'conversation') {
+  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const recencyHalfLifeHours = type === 'collab' ? 168 : 96;
+  const interactionPenaltyBase = type === 'collab' ? 12 : 8;
+
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const entityId = String(candidate.entityId || '').trim();
+      if (!entityId || RELATIONSHIP_EXCLUDED_ENTITY_IDS.has(entityId.toLowerCase())) return null;
+
+      const overlapWeight = Number(candidate.overlapWeight || 0);
+      const sharedInterestCount = Number(candidate.sharedInterestCount || 0);
+      const mentions = Number(candidate.inboundMentions21d || 0);
+      const mentioners = Number(candidate.uniqueMentioners21d || 0);
+      const interactions = Number(candidate.recentInteractions14d || 0);
+      const lastTs = Number(candidate.lastInteractionAt || 0);
+      const now = Date.now();
+      const hoursAgo = lastTs > 0 ? Math.max(0, (now - lastTs) / (1000 * 60 * 60)) : 24 * 30;
+      const lowRecencyPotential = clamp01(1 - Math.exp(-hoursAgo / recencyHalfLifeHours));
+      const interestComplement = clamp01((overlapWeight / 100) + (sharedInterestCount * 0.08));
+      const mentionCentrality = clamp01((mentioners / 8) * 0.65 + (mentions / 20) * 0.35);
+      const interactionPenalty = clamp01(interactions / interactionPenaltyBase);
+      const novelty = noveltyByEntity[entityId] || null;
+      const noveltyScore = clamp01(Number(novelty?.noveltyScore ?? 0.7));
+      const acceptanceRate = clamp01(Number(novelty?.acceptanceRate ?? 0));
+      const followThroughRate = clamp01(Number(novelty?.followThroughRate ?? 0));
+
+      const score = clamp01(
+        0.42 * interestComplement
+        + 0.28 * lowRecencyPotential
+        + 0.2 * mentionCentrality
+        + 0.18 * noveltyScore
+        + 0.08 * followThroughRate
+        - 0.16 * interactionPenalty
+        - 0.08 * acceptanceRate
+      );
+
+      return {
+        entityId,
+        entityName: candidate.entityName || entityId,
+        score: Number(score.toFixed(3)),
+        reasons: {
+          interestComplement: Number(interestComplement.toFixed(3)),
+          lowRecencyPotential: Number(lowRecencyPotential.toFixed(3)),
+          mentionCentrality: Number(mentionCentrality.toFixed(3)),
+          novelty: Number(noveltyScore.toFixed(3))
+        },
+        diagnostics: {
+          sharedInterests: Array.isArray(candidate.sharedInterests) ? candidate.sharedInterests.slice(0, 4) : [],
+          recentInteractions14d: interactions,
+          lastInteractionAt: lastTs || null,
+          acceptanceRate: Number(acceptanceRate.toFixed(3)),
+          followThroughRate: Number(followThroughRate.toFixed(3)),
+          shownCount: Number(novelty?.shownCount || 0)
+        }
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
+}
+
 function buildRelationshipGraph(selfId, relationships) {
   const nodes = [{ id: selfId, label: selfId, kind: 'self' }];
   const edges = [];
@@ -426,6 +489,13 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     })
     : Promise.resolve(options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object' ? options.memoryGoalSnapshot : null);
 
+  const recommendationCandidatesPromise = db && typeof db.getRecommendationCandidates === 'function'
+    ? db.getRecommendationCandidates(entityId, options.recommendationType || 'conversation', 16).catch(error => {
+      console.warn(`[wiki-public] failed to read recommendation candidates for ${entityId}:`, error.message);
+      return [];
+    })
+    : Promise.resolve([]);
+
   const achievementsPromise = db && typeof db.getEntityAchievements === 'function'
     ? db.getEntityAchievements(entityId).catch(error => {
       console.warn(`[wiki-public] failed to read achievements for ${entityId}:`, error.message);
@@ -456,13 +526,14 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
         })
       : Promise.resolve(null));
 
-  let [interests, reflections, recentOwnChats, rawPartners, goalsSnapshot, actionSequence, achievements, earnedBadges] = await Promise.all([
+  let [interests, reflections, recentOwnChats, rawPartners, goalsSnapshot, actionSequence, recommendationCandidates, achievements, earnedBadges] = await Promise.all([
     interestsPromise,
     reflectionsPromise,
     recentOwnChatsPromise,
     rawPartnersPromise,
     goalsSnapshotPromise,
     actionSequencePromise,
+    recommendationCandidatesPromise,
     achievementsPromise,
     earnedBadgesPromise
   ]);
@@ -486,6 +557,12 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     }
     rawPartners = [...relMap.values()];
   }
+
+  const noveltyScores = db && typeof db.scoreInteractionNovelty === 'function'
+    ? await db.scoreInteractionNovelty(entityId, recommendationCandidates.map(c => c.entityId), options.recommendationType || 'conversation').catch(() => [])
+    : [];
+  const noveltyByEntity = Object.fromEntries((noveltyScores || []).map((row) => [row.candidateEntityId, row]));
+  const suggestedConnections = deriveRecommendationCandidates(recommendationCandidates, noveltyByEntity, options.recommendationType || 'conversation');
 
   const currentState = {
     online: Boolean(onlineAgent),
@@ -512,7 +589,9 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     goalsSnapshot,
     actionSequence,
     achievements,
-    earnedBadges
+    earnedBadges,
+    suggestedConnections,
+    recommendationType: options.recommendationType || 'conversation'
   });
 }
 
@@ -527,7 +606,9 @@ function composeEntityWikiPublic({
   goalsSnapshot,
   actionSequence,
   achievements,
-  earnedBadges
+  earnedBadges,
+  suggestedConnections,
+  recommendationType
 }) {
   const relationships = deriveRelationships(rawPartners);
 
@@ -568,7 +649,9 @@ function composeEntityWikiPublic({
     social: {
       relationships,
       relationshipGraph,
-      reputationScore
+      reputationScore,
+      suggestedConnections: Array.isArray(suggestedConnections) ? suggestedConnections : [],
+      recommendationType: String(recommendationType || 'conversation')
     },
     timeline,
     meta: {

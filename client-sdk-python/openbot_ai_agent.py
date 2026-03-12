@@ -698,6 +698,7 @@ class AIAgent:
         self._load_news_file_cache()
         # Compressed summary of older conversation history (saves tokens)
         self._context_summary: str = ""
+        self._recommendations_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
         # Cached system prompt — rebuilt when interests evolve
         self._cached_system_prompt: Optional[str] = None
         self._cached_interests_key: Optional[str] = None  # hash of interests for cache invalidation
@@ -1411,6 +1412,32 @@ class AIAgent:
                 markers["blocked_resource"].append(line)
         return markers
 
+    def _fetch_recommendations(self, rec_type: str = "conversation") -> List[Dict[str, Any]]:
+        """Fetch recommendation candidates for targeted outreach, with lightweight cache."""
+        now = time.time()
+        if (now - float(self._recommendations_cache.get("ts", 0.0))) < 25.0:
+            return list(self._recommendations_cache.get("data") or [])
+        if not self.client or not self.entity_id:
+            return []
+
+        headers = self.client._get_auth_headers() if hasattr(self.client, "_get_auth_headers") else {}
+        try:
+            resp = self.client.session.get(
+                f"{self.server_url}/entity/{self.entity_id}/recommendations",
+                params={"type": rec_type},
+                headers=headers,
+                timeout=6,
+            )
+            if resp.status_code == 200:
+                rows = resp.json().get("recommendations", [])
+                safe_rows = rows if isinstance(rows, list) else []
+                self._recommendations_cache = {"ts": now, "data": safe_rows[:6]}
+                return list(self._recommendations_cache["data"])
+        except Exception as exc:
+            if self.debug:
+                print(f"[{self.entity_id}] recommendations fetch error: {exc}")
+        return list(self._recommendations_cache.get("data") or [])
+
     def perceive(self) -> Dict[str, Any]:
         self._maybe_fetch_news()
         observation = self._build_observation()
@@ -1430,6 +1457,7 @@ class AIAgent:
         )
         nearest = self._get_nearest_threat(position, threats_raw if isinstance(threats_raw, list) else [])
         nearest_harvest = self._get_nearest_harvestable_object(position, objects_raw if isinstance(objects_raw, list) else [])
+        recommendations = self._fetch_recommendations("conversation")
         threat_items = []
         if nearest:
             threat_items.append(nearest)
@@ -1446,6 +1474,7 @@ class AIAgent:
             "nearHarvestObject": nearest_harvest,
             "selfState": self_state,
             "survival": survival,
+            "recommendations": recommendations,
         }
 
     def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
@@ -1461,6 +1490,14 @@ class AIAgent:
             "semantic": {
                 "interests": list(self._interests),
                 "context_summary": self._context_summary,
+                "suggested_connections": [
+                    {
+                        "entity_id": rec.get("entityId"),
+                        "score": rec.get("score"),
+                        "shared_interests": ((rec.get("diagnostics") or {}).get("sharedInterests") or []),
+                    }
+                    for rec in (perception.get("recommendations") or [])[:4]
+                ],
             },
             "situational": {
                 "threats": perception.get("threats", []),
@@ -1483,6 +1520,7 @@ class AIAgent:
                 "sustain engaging conversation",
                 "stay responsive to mentions",
                 "adapt interests from social feedback",
+                "prioritize high-potential outreach candidates when initiating conversations",
             ],
             "user_prompt": self.user_prompt or "",
         }

@@ -238,6 +238,18 @@ async function initDatabase() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_recommendation_events (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        candidate_entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        recommendation_type VARCHAR(32) NOT NULL DEFAULT 'conversation',
+        event_type VARCHAR(32) NOT NULL,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
 
     // Create entity_goal_snapshots table for persisted goal state/history
     await client.query(`
@@ -410,6 +422,14 @@ const indexMigrations = [
   {
     name: 'idx_entity_interests_entity_id',
     query: 'CREATE INDEX IF NOT EXISTS idx_entity_interests_entity_id ON entity_interests(entity_id)'
+  },
+  {
+    name: 'idx_entity_recommendation_events_entity_type_created',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_recommendation_events_entity_type_created ON entity_recommendation_events(entity_id, recommendation_type, created_at DESC)'
+  },
+  {
+    name: 'idx_entity_recommendation_events_candidate_type_created',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_recommendation_events_candidate_type_created ON entity_recommendation_events(candidate_entity_id, recommendation_type, created_at DESC)'
   },
   {
     name: 'idx_entity_goal_snapshots_entity_generated',
@@ -1268,6 +1288,201 @@ async function getTopConversationPartnersByAgentName(agentName, limit = 8) {
     .slice(0, safeLimit);
 }
 
+
+async function getRecommendationCandidates(entityId, recommendationType = 'conversation', limit = 12) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 12, 40));
+  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+
+  const result = await pool.query(
+    `WITH me AS (
+       SELECT entity_id, COALESCE(entity_name, entity_id) AS entity_name
+       FROM entities
+       WHERE entity_id = $1
+     ),
+     my_interests AS (
+       SELECT LOWER(TRIM(interest)) AS interest, weight::float AS weight
+       FROM entity_interests
+       WHERE entity_id = $1
+     ),
+     candidate_interests AS (
+       SELECT ei.entity_id, LOWER(TRIM(ei.interest)) AS interest, ei.weight::float AS weight
+       FROM entity_interests ei
+       WHERE ei.entity_id <> $1
+     ),
+     interest_overlap AS (
+       SELECT
+         ci.entity_id,
+         COALESCE(SUM(LEAST(mi.weight, ci.weight)), 0)::float AS overlap_weight,
+         COUNT(*)::int AS shared_interest_count,
+         ARRAY_REMOVE(ARRAY_AGG(DISTINCT ci.interest), NULL) AS shared_interests
+       FROM candidate_interests ci
+       JOIN my_interests mi ON mi.interest = ci.interest
+       GROUP BY ci.entity_id
+     ),
+     interactions AS (
+       SELECT
+         e.entity_id,
+         COUNT(*) FILTER (
+           WHERE cm.timestamp > (EXTRACT(EPOCH FROM NOW() - INTERVAL '14 days') * 1000)::bigint
+         )::int AS recent_interactions_14d,
+         MAX(cm.timestamp)::bigint AS last_interaction_at,
+         COALESCE(COUNT(*) FILTER (WHERE cm.agent_name = m.entity_name), 0)::int AS my_msgs,
+         COALESCE(COUNT(*) FILTER (WHERE cm.agent_name = e.entity_name), 0)::int AS their_msgs
+       FROM entities e
+       CROSS JOIN me m
+       LEFT JOIN chat_messages cm
+         ON (
+           (cm.agent_name = m.entity_name AND cm.message ILIKE ('%@' || e.entity_name || '%'))
+           OR
+           (cm.agent_name = e.entity_name AND cm.message ILIKE ('%@' || m.entity_name || '%'))
+         )
+       WHERE e.entity_id <> $1
+       GROUP BY e.entity_id
+     ),
+     mention_graph AS (
+       SELECT
+         e.entity_id,
+         COUNT(*) FILTER (
+           WHERE cm.message ILIKE ('%@' || e.entity_name || '%')
+             AND cm.agent_name <> e.entity_name
+             AND cm.timestamp > (EXTRACT(EPOCH FROM NOW() - INTERVAL '21 days') * 1000)::bigint
+         )::int AS inbound_mentions_21d,
+         COUNT(DISTINCT cm.agent_name) FILTER (
+           WHERE cm.message ILIKE ('%@' || e.entity_name || '%')
+             AND cm.agent_name <> e.entity_name
+             AND cm.timestamp > (EXTRACT(EPOCH FROM NOW() - INTERVAL '21 days') * 1000)::bigint
+         )::int AS unique_mentioners_21d
+       FROM entities e
+       LEFT JOIN chat_messages cm ON cm.timestamp > (EXTRACT(EPOCH FROM NOW() - INTERVAL '21 days') * 1000)::bigint
+       WHERE e.entity_id <> $1
+       GROUP BY e.entity_id
+     )
+     SELECT
+       e.entity_id,
+       COALESCE(e.entity_name, e.entity_id) AS entity_name,
+       COALESCE(io.overlap_weight, 0)::float AS overlap_weight,
+       COALESCE(io.shared_interest_count, 0)::int AS shared_interest_count,
+       COALESCE(io.shared_interests, ARRAY[]::text[]) AS shared_interests,
+       COALESCE(i.recent_interactions_14d, 0)::int AS recent_interactions_14d,
+       i.last_interaction_at,
+       COALESCE(mg.inbound_mentions_21d, 0)::int AS inbound_mentions_21d,
+       COALESCE(mg.unique_mentioners_21d, 0)::int AS unique_mentioners_21d,
+       COALESCE(i.my_msgs, 0)::int AS my_msgs,
+       COALESCE(i.their_msgs, 0)::int AS their_msgs
+     FROM entities e
+     LEFT JOIN interest_overlap io ON io.entity_id = e.entity_id
+     LEFT JOIN interactions i ON i.entity_id = e.entity_id
+     LEFT JOIN mention_graph mg ON mg.entity_id = e.entity_id
+     WHERE e.entity_id <> $1
+       AND e.entity_type = 'lobster'
+     ORDER BY
+       CASE WHEN $2 = 'collab' THEN COALESCE(io.overlap_weight, 0) * 1.2 ELSE COALESCE(io.overlap_weight, 0) END DESC,
+       COALESCE(mg.unique_mentioners_21d, 0) DESC,
+       COALESCE(i.last_interaction_at, 0) ASC
+     LIMIT $3`,
+    [entityId, type, safeLimit]
+  );
+
+  return result.rows.map((row) => ({
+    entityId: row.entity_id,
+    entityName: row.entity_name,
+    overlapWeight: Number(row.overlap_weight) || 0,
+    sharedInterestCount: Number(row.shared_interest_count) || 0,
+    sharedInterests: Array.isArray(row.shared_interests) ? row.shared_interests : [],
+    recentInteractions14d: Number(row.recent_interactions_14d) || 0,
+    lastInteractionAt: row.last_interaction_at ? Number(row.last_interaction_at) : null,
+    inboundMentions21d: Number(row.inbound_mentions_21d) || 0,
+    uniqueMentioners21d: Number(row.unique_mentioners_21d) || 0,
+    myMsgs: Number(row.my_msgs) || 0,
+    theirMsgs: Number(row.their_msgs) || 0,
+  }));
+}
+
+async function scoreInteractionNovelty(entityId, candidateEntityIds = [], recommendationType = 'conversation') {
+  const ids = Array.from(new Set((candidateEntityIds || []).filter(Boolean).map(String)));
+  if (ids.length === 0) return [];
+  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+
+  const result = await pool.query(
+    `WITH target_candidates AS (
+      SELECT UNNEST($2::text[]) AS candidate_entity_id
+    )
+    SELECT
+      tc.candidate_entity_id,
+      COUNT(*) FILTER (WHERE ere.event_type = 'shown')::int AS shown_count,
+      COUNT(*) FILTER (WHERE ere.event_type = 'accepted')::int AS accepted_count,
+      COUNT(*) FILTER (WHERE ere.event_type = 'follow_through')::int AS follow_through_count,
+      MAX(ere.created_at) AS last_event_at
+    FROM target_candidates tc
+    LEFT JOIN entity_recommendation_events ere
+      ON ere.entity_id = $1
+     AND ere.candidate_entity_id = tc.candidate_entity_id
+     AND ere.recommendation_type = $3
+    GROUP BY tc.candidate_entity_id`,
+    [entityId, ids, type]
+  );
+
+  return result.rows.map((row) => {
+    const shown = Number(row.shown_count) || 0;
+    const accepted = Number(row.accepted_count) || 0;
+    const follow = Number(row.follow_through_count) || 0;
+    const acceptanceRate = shown > 0 ? accepted / shown : 0;
+    const followThroughRate = accepted > 0 ? follow / accepted : 0;
+    const novelty = Math.max(0, 1 - Math.min(1, shown / 6));
+    return {
+      candidateEntityId: row.candidate_entity_id,
+      shownCount: shown,
+      acceptedCount: accepted,
+      followThroughCount: follow,
+      acceptanceRate: Number(acceptanceRate.toFixed(3)),
+      followThroughRate: Number(followThroughRate.toFixed(3)),
+      noveltyScore: Number(novelty.toFixed(3)),
+      lastEventAt: row.last_event_at || null,
+    };
+  });
+}
+
+async function trackRecommendationEvent(entityId, candidateEntityId, recommendationType = 'conversation', eventType = 'shown', metadata = {}) {
+  if (!entityId || !candidateEntityId || !eventType) return;
+  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const safeEventType = String(eventType).trim().toLowerCase();
+  if (!['shown', 'accepted', 'follow_through'].includes(safeEventType)) return;
+
+  await pool.query(
+    `INSERT INTO entity_recommendation_events (entity_id, candidate_entity_id, recommendation_type, event_type, metadata_json)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [entityId, candidateEntityId, type, safeEventType, JSON.stringify(metadata || {})]
+  );
+}
+
+async function getRecommendationMetrics(entityId, recommendationType = 'conversation', windowDays = 30) {
+  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const safeDays = Math.max(1, Math.min(Number(windowDays) || 30, 120));
+  const result = await pool.query(
+    `SELECT
+      COUNT(*) FILTER (WHERE event_type = 'shown')::int AS shown_count,
+      COUNT(*) FILTER (WHERE event_type = 'accepted')::int AS accepted_count,
+      COUNT(*) FILTER (WHERE event_type = 'follow_through')::int AS follow_through_count
+     FROM entity_recommendation_events
+     WHERE entity_id = $1
+       AND recommendation_type = $2
+       AND created_at >= NOW() - ($3::text || ' days')::interval`,
+    [entityId, type, String(safeDays)]
+  );
+
+  const row = result.rows[0] || {};
+  const shown = Number(row.shown_count) || 0;
+  const accepted = Number(row.accepted_count) || 0;
+  const follow = Number(row.follow_through_count) || 0;
+  return {
+    shownCount: shown,
+    acceptedCount: accepted,
+    followThroughCount: follow,
+    acceptanceRate: shown > 0 ? Number((accepted / shown).toFixed(3)) : 0,
+    followThroughRate: accepted > 0 ? Number((follow / accepted).toFixed(3)) : 0,
+  };
+}
+
 // Save a daily activity summary (aiCompleted = true if AI generated, false if fallback)
 async function saveDailySummary(summaryDate, dailySummary, hourlySummaries, chatCount, activeAgents, aiCompleted = false) {
   await pool.query(
@@ -2055,5 +2270,10 @@ module.exports = {
   claimEntityQuest,
   // Entity interest functions
   getEntityInterests,
-  setEntityInterests
+  setEntityInterests,
+  // Recommendation functions
+  getRecommendationCandidates,
+  scoreInteractionNovelty,
+  trackRecommendationEvent,
+  getRecommendationMetrics
 };
