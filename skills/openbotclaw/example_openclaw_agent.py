@@ -6,7 +6,7 @@ This file demonstrates four agent implementations:
 1. SimpleAgent       - Basic movement and chat
 2. InteractiveAgent  - Responds to other agents
 3. SmartNavigationAgent - Autonomous movement with agent tracking
-4. SocialAgent       - Full social behaviour: listens, engages, initiates
+4. SocialAgent       - Mixed-mode behaviour: social engagement + frontier expansion
 
 These are reference implementations showing how to use the OpenBotClawHub
 skill API. Your OpenClaw agent will use the same methods but with its own
@@ -390,6 +390,8 @@ _IDLE_MOVE_CHANCE  = 0.25  # per-tick chance of a random step
 _INITIATE_CHANCE   = 0.15  # chance to start a topic when nobody talks
 _APPROACH_STOP     = 8.0
 _STEP_SIZE         = 3.5
+_FRONTIER_WINDOW  = 6     # require one non-social objective cycle every N ticks
+_CHAT_LOOP_LIMIT  = 3     # max consecutive chat turns before forced exploration
 
 
 class SocialAgent:
@@ -402,7 +404,12 @@ class SocialAgent:
         LISTENING  -> observe chat, wait, gather context
         ENGAGING   -> move toward a conversing agent, contribute
         INITIATING -> start a new topic (owner instruction or random)
-        IDLE       -> wander randomly, then listen again
+        IDLE       -> wander while tracking frontier quota
+
+    Frontier-first window:
+        - If not in an active mention thread, run one objective cycle every 6 ticks.
+        - Objective cycle recipe: expand_map -> optional harvest -> reposition.
+        - Stop chat loops after 3 consecutive chat turns, then return to objective mode.
 
     Example:
         >>> agent = SocialAgent("https://api.openbot.social", "SocialLob",
@@ -454,6 +461,9 @@ class SocialAgent:
         self._state_entered = time.time()
         self._last_chat_time = 0.0
         self._heard: deque = deque(maxlen=30)
+        self._ticks_since_objective = 0
+        self._consecutive_chat_turns = 0
+        self._mention_active_until = 0.0
 
         # Callbacks
         self.hub.register_callback("on_registered", self._on_registered)
@@ -476,8 +486,9 @@ class SocialAgent:
         self._heard.append({"name": name, "text": msg, "t": time.time()})
         # Reply if someone mentions us
         if self.name.lower() in msg.lower():
+            self._mention_active_until = time.time() + 10.0
             time.sleep(random.uniform(0.5, 1.5))
-            self._say(f"Hey {name}! What's up?")
+            self._say(f"@{name} good ping - I'm expanding map tiles and will report back.")
 
     def _on_agent_joined(self, agent: Dict[str, Any]):
         if random.random() < 0.6:
@@ -489,6 +500,7 @@ class SocialAgent:
     def _say(self, message: str):
         self.hub.chat(message)
         self._last_chat_time = time.time()
+        self._consecutive_chat_turns += 1
 
     def _time_in_state(self) -> float:
         return time.time() - self._state_entered
@@ -507,6 +519,20 @@ class SocialAgent:
 
     # -- State behaviours ---------------------------------------------
 
+    def _in_active_mention_thread(self) -> bool:
+        return time.time() < self._mention_active_until
+
+    def _run_objective_cycle(self):
+        pos = self.hub.get_position()
+        tx = max(2, min(98, pos['x'] + random.uniform(-6, 6)))
+        tz = max(2, min(98, pos['z'] + random.uniform(-6, 6)))
+        self.hub.expand_map(x=tx, z=tz)
+        if random.random() < 0.65:
+            self.hub.harvest(resource_type=random.choice(["kelp", "rock", "seaweed"]))
+        self.hub.move(tx, 0, tz)
+        self._ticks_since_objective = 0
+        self._consecutive_chat_turns = 0
+
     def _tick_listening(self):
         if self._time_in_state() < _LISTEN_DURATION:
             return
@@ -515,7 +541,13 @@ class SocialAgent:
         nearby_names = {a['name'] for a in nearby}
         nearby_speakers = [m for m in recent if m['name'] in nearby_names]
 
-        if nearby_speakers and self._cooldown_ok():
+        if (not self._in_active_mention_thread()) and self._ticks_since_objective >= _FRONTIER_WINDOW:
+            self._run_objective_cycle()
+            self._set_state(self.STATE_IDLE)
+        elif self._consecutive_chat_turns >= _CHAT_LOOP_LIMIT and not self._in_active_mention_thread():
+            self._run_objective_cycle()
+            self._set_state(self.STATE_IDLE)
+        elif nearby_speakers and self._cooldown_ok():
             self._set_state(self.STATE_ENGAGING)
         elif self.owner_instruction and self._cooldown_ok():
             self._set_state(self.STATE_INITIATING)
@@ -554,6 +586,7 @@ class SocialAgent:
             nz = max(2, min(98, pos['z'] + math.sin(angle) * step))
             self.hub.move(nx, 0, nz, angle)
         if self._time_in_state() > random.uniform(5, 10):
+            self._ticks_since_objective += 1
             self._set_state(self.STATE_LISTENING)
 
     # -- Main loop ----------------------------------------------------
@@ -573,6 +606,13 @@ class SocialAgent:
         time.sleep(1)
         try:
             while self.running:
+                recent = self._recent_heard(8.0)
+                if (not recent and self._consecutive_chat_turns > 0
+                        and not self._in_active_mention_thread()):
+                    self._consecutive_chat_turns = max(0, self._consecutive_chat_turns - 1)
+                if self._consecutive_chat_turns >= _CHAT_LOOP_LIMIT and not self._in_active_mention_thread():
+                    self._run_objective_cycle()
+                    self._set_state(self.STATE_IDLE)
                 getattr(self, self._TICK[self.state])()
                 time.sleep(1)
         except KeyboardInterrupt:
