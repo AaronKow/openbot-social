@@ -32,7 +32,8 @@ import sys
 import time
 import argparse
 import threading
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 # ── path setup ────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +202,123 @@ SHELTER_TRIGGER_DISTANCE = 15.0
 SHELTER_HOLD_DISTANCE = 2.8
 SHELTER_REBUILD_COOLDOWN_SECONDS = 28.0
 SHELTER_FORCED_FIGHT_SECONDS = 8.0
+
+
+class SectorMemory:
+    """Coarse world-memory for frontier-oriented exploration and harvesting."""
+
+    def __init__(self, world_size: int = 100, sector_size: int = 10, recent_window: int = 40):
+        self.world_size = max(10, int(world_size))
+        self.sector_size = max(2, int(sector_size))
+        self.grid_size = max(1, self.world_size // self.sector_size)
+        self.visit_counts: Dict[Tuple[int, int], int] = {}
+        self.last_visit_tick: Dict[Tuple[int, int], int] = {}
+        self.resource_hits: Dict[Tuple[int, int], float] = {}
+        self.recent_visits: Deque[Tuple[int, int]] = deque(maxlen=max(8, int(recent_window)))
+
+    def sector_for(self, x: float, z: float) -> Tuple[int, int]:
+        sx = min(self.grid_size - 1, max(0, int(x // self.sector_size)))
+        sz = min(self.grid_size - 1, max(0, int(z // self.sector_size)))
+        return sx, sz
+
+    def centroid_for(self, sector: Tuple[int, int]) -> Tuple[float, float]:
+        sx, sz = sector
+        cx = min(self.world_size - 1.0, sx * self.sector_size + (self.sector_size / 2.0))
+        cz = min(self.world_size - 1.0, sz * self.sector_size + (self.sector_size / 2.0))
+        return cx, cz
+
+    def observe(self, tick: int, position: Dict[str, float], objects: List[Dict[str, Any]]) -> Tuple[int, int]:
+        sector = self.sector_for(float(position.get("x", 0.0)), float(position.get("z", 0.0)))
+        last_recent = self.recent_visits[-1] if self.recent_visits else None
+        if sector != last_recent:
+            self.visit_counts[sector] = int(self.visit_counts.get(sector, 0)) + 1
+            self.last_visit_tick[sector] = int(tick)
+            self.recent_visits.append(sector)
+
+        decay = 0.94
+        for key in list(self.resource_hits.keys()):
+            self.resource_hits[key] = float(self.resource_hits[key]) * decay
+            if self.resource_hits[key] < 0.03:
+                del self.resource_hits[key]
+
+        for obj in objects:
+            otype = str(obj.get("type", "")).lower()
+            if otype not in {"rock", "kelp", "seaweed"}:
+                continue
+            opos = obj.get("position") or {}
+            rsector = self.sector_for(float(opos.get("x", 0.0)), float(opos.get("z", 0.0)))
+            self.resource_hits[rsector] = float(self.resource_hits.get(rsector, 0.0)) + 0.35
+        return sector
+
+    def choose_frontier(
+        self,
+        tick: int,
+        position: Dict[str, float],
+        objects: List[Dict[str, Any]],
+        radius_sectors: int = 2,
+    ) -> Dict[str, Any]:
+        current = self.sector_for(float(position.get("x", 0.0)), float(position.get("z", 0.0)))
+        sx, sz = current
+        candidates: List[Dict[str, Any]] = []
+        live_resource_counts: Dict[Tuple[int, int], int] = {}
+        for obj in objects:
+            otype = str(obj.get("type", "")).lower()
+            if otype not in {"rock", "kelp", "seaweed"}:
+                continue
+            opos = obj.get("position") or {}
+            sec = self.sector_for(float(opos.get("x", 0.0)), float(opos.get("z", 0.0)))
+            live_resource_counts[sec] = int(live_resource_counts.get(sec, 0)) + 1
+
+        for dx in range(-radius_sectors, radius_sectors + 1):
+            for dz in range(-radius_sectors, radius_sectors + 1):
+                tx, tz = sx + dx, sz + dz
+                if tx < 0 or tz < 0 or tx >= self.grid_size or tz >= self.grid_size:
+                    continue
+                sec = (tx, tz)
+                visits = int(self.visit_counts.get(sec, 0))
+                last_tick = int(self.last_visit_tick.get(sec, 0))
+                novelty = min(1.0, max(0.0, (tick - last_tick) / 35.0)) if last_tick else 1.0
+                live_density = min(1.0, float(live_resource_counts.get(sec, 0)) / 5.0)
+                learned_density = min(1.0, float(self.resource_hits.get(sec, 0.0)) / 3.0)
+                resource_likelihood = round((live_density * 0.7) + (learned_density * 0.3), 3)
+                distance = math.hypot(dx, dz)
+                score = (novelty * 0.55) + (resource_likelihood * 0.35) + (1.0 / (1 + visits) * 0.25) - (distance * 0.08)
+                candidates.append(
+                    {
+                        "sector": sec,
+                        "visits": visits,
+                        "novelty": round(novelty, 3),
+                        "resource_likelihood": resource_likelihood,
+                        "distance": round(distance, 3),
+                        "score": round(score, 3),
+                    }
+                )
+
+        if not candidates:
+            cx, cz = self.centroid_for(current)
+            return {"target_sector": current, "centroid": {"x": cx, "z": cz}, "summary": "frontier unavailable", "candidates": []}
+
+        min_visits = min(c["visits"] for c in candidates)
+        least_visited = [c for c in candidates if c["visits"] == min_visits]
+        least_visited.sort(key=lambda c: (-c["score"], c["distance"]))
+        target = least_visited[0]
+        cx, cz = self.centroid_for(target["sector"])
+
+        top = sorted(candidates, key=lambda c: (-c["score"], c["visits"], c["distance"]))[:3]
+        summary = " | ".join(
+            f"s{c['sector']} v{c['visits']} n{c['novelty']:.2f} r{c['resource_likelihood']:.2f}"
+            for c in top
+        )
+        return {
+            "target_sector": target["sector"],
+            "centroid": {"x": round(cx, 2), "z": round(cz, 2)},
+            "summary": summary,
+            "score": target["score"],
+            "novelty": target["novelty"],
+            "resource_likelihood": target["resource_likelihood"],
+            "least_visited": min_visits,
+            "candidates": top,
+        }
 
 
 def _normalize_weights(interests: List[Dict]) -> List[Dict]:
@@ -746,6 +864,7 @@ class AIAgent:
             "last_z": None,
             "stuck_ticks": 0,
         }
+        self._sector_memory = SectorMemory(world_size=100, sector_size=10, recent_window=48)
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -836,6 +955,48 @@ class AIAgent:
             )
         ranked.sort(key=lambda item: item["distance"])
         return ranked[:max(1, limit)]
+
+    def _compute_inventory_expansion_ready(self, self_state: Dict[str, Any]) -> bool:
+        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        for key, needed in MAP_EXPANSION_COST.items():
+            if float(inventory.get(key, 0) or 0) < float(needed):
+                return False
+        return True
+
+    def _frontier_movement_action(
+        self,
+        perception: Dict[str, Any],
+        prefer_expand: bool = False,
+        force_harvest: bool = False,
+    ) -> List[Dict[str, Any]]:
+        frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+        centroid = frontier.get("centroid") if isinstance(frontier.get("centroid"), dict) else {}
+        cx = float(centroid.get("x", perception.get("position", {}).get("x", 50.0)))
+        cz = float(centroid.get("z", perception.get("position", {}).get("z", 50.0)))
+
+        nearest = perception.get("nearHarvestObject") if isinstance(perception.get("nearHarvestObject"), dict) else {}
+        blocked = bool(perception.get("markers", {}).get("blocked_resource"))
+        dense = float(frontier.get("resource_likelihood", 0.0) or 0.0) >= 0.55
+
+        if force_harvest or blocked or dense:
+            payload: Dict[str, Any] = {"type": "harvest"}
+            rtype = nearest.get("type")
+            rid = nearest.get("id")
+            if isinstance(rtype, str) and rtype:
+                payload["resource_type"] = rtype
+            if isinstance(rid, str) and rid:
+                payload["object_id"] = rid
+            if prefer_expand and self._compute_inventory_expansion_ready(perception.get("selfState", {})):
+                return [payload, {"type": "expand_map", "x": cx, "z": cz}]
+            return [payload]
+
+        actions: List[Dict[str, Any]] = [{"type": "move", "x": cx, "z": cz}]
+        if prefer_expand and self._compute_inventory_expansion_ready(perception.get("selfState", {})):
+            at_edge = bool(frontier.get("edge_sector"))
+            high_novelty = float(frontier.get("novelty", 0.0) or 0.0) >= 0.7
+            if at_edge or high_novelty:
+                actions.append({"type": "expand_map", "x": cx, "z": cz})
+        return actions
 
     def _get_quest_progress_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
@@ -1430,6 +1591,13 @@ class AIAgent:
                     f"🪨 BLOCKED BY RESOURCE {nearest_object['type']} id={nearest_object['id']} d={nearest_object['distance']:.1f} stuck={stuck_ticks}"
                 )
 
+        frontier_hint = self._sector_memory.choose_frontier(self._tick_count, pos, objects if isinstance(objects, list) else [], radius_sectors=2)
+        csec = self._sector_memory.sector_for(float(pos.get('x', 0.0)), float(pos.get('z', 0.0)))
+        tsec = frontier_hint.get("target_sector", csec)
+        lines.append(
+            f"🧭 frontier c={csec}→t={tsec} v={frontier_hint.get('least_visited', 0)} n={float(frontier_hint.get('novelty', 0.0) or 0.0):.2f} r={float(frontier_hint.get('resource_likelihood', 0.0) or 0.0):.2f}"
+        )
+
         rt = self._shelter_runtime
         get_world_state_snapshot = getattr(self.client, 'get_world_state_snapshot', None) if self.client else None
         world_snapshot = get_world_state_snapshot() if callable(get_world_state_snapshot) else {}
@@ -1713,6 +1881,11 @@ class AIAgent:
         objects = objects_raw if isinstance(objects_raw, list) else []
         nearest_harvest = self._get_nearest_harvestable_object(position, objects)
         progression_signals = self._build_progression_signals(position, world_snapshot, objects, self_state)
+        current_sector = self._sector_memory.observe(self._tick_count, position, objects)
+        frontier = self._sector_memory.choose_frontier(self._tick_count, position, objects, radius_sectors=2)
+        tx, tz = frontier.get("target_sector", current_sector)
+        frontier["current_sector"] = current_sector
+        frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
         recommendations = self._fetch_recommendations("conversation")
         threat_items = []
         if nearest:
@@ -1731,6 +1904,7 @@ class AIAgent:
             "selfState": self_state,
             "survival": survival,
             "progressionSignals": progression_signals,
+            "frontier": frontier,
             "recommendations": recommendations,
         }
 
@@ -1761,6 +1935,7 @@ class AIAgent:
                 "survival": perception.get("survival", {}),
                 "world_tick": perception.get("worldTick"),
                 "progression_signals": perception.get("progressionSignals", {}),
+                "frontier": perception.get("frontier", {}),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),
@@ -1889,7 +2064,15 @@ class AIAgent:
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
         if perception.get("markers", {}).get("mentions"):
             confidence = max(confidence, 0.7)
-        return {"actions": actions, "confidence": round(confidence, 2), "fallback": {"type": "wait"}}
+
+        fallback = {"type": "wait"}
+        if len(actions) == 1 and actions[0].get("type") == "wait":
+            frontier_actions = self._frontier_movement_action(perception, prefer_expand=True)
+            if frontier_actions:
+                actions = frontier_actions
+                fallback = dict(frontier_actions[0])
+                confidence = max(confidence, 0.58)
+        return {"actions": actions, "confidence": round(confidence, 2), "fallback": fallback}
 
     def _apply_progression_policy(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
         sanitized = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
@@ -2294,7 +2477,7 @@ class AIAgent:
                 actions = [{"type": "move_to_agent", "agent_name": agent_name}]
                 print(f"  🤖 [override B] LLM chose wait with {len(in_range)} agent(s) nearby — moving toward {agent_name}")
 
-        # Override C: LLM chose wait, genuinely alone — random chat or explore
+        # Override C: LLM chose wait, genuinely alone — push toward frontier sectors.
         elif ai_chose_wait and not in_range:
             recent = self.client.get_recent_conversation(self._conversation_window_seconds())
             silence_secs = self._ticks_to_seconds(self._tick_count - self._last_chat_tick)
@@ -2304,10 +2487,40 @@ class AIAgent:
                 actions = [{"type": "chat", "message": random_msg}]
                 print("  🤖 [override C] silence + alone, forcing random chat")
             else:
-                new_x = random.uniform(1, 99)
-                new_z = random.uniform(1, 99)
-                actions = [{"type": "move", "x": new_x, "z": new_z}]
-                print(f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), forcing exploration")
+                get_world_objects = getattr(self.client, "get_world_objects", None)
+                get_self_agent_state = getattr(self.client, "get_self_agent_state", None)
+                if callable(get_world_objects) and callable(get_self_agent_state):
+                    objects_raw = get_world_objects()
+                    objects = objects_raw if isinstance(objects_raw, list) else []
+                    self_state = get_self_agent_state() or {}
+                    nearest_harvest = self._get_nearest_harvestable_object(pos, objects)
+                    frontier = self._sector_memory.choose_frontier(self._tick_count, pos, objects, radius_sectors=2)
+                    csec = self._sector_memory.sector_for(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
+                    tx, tz = frontier.get("target_sector", csec)
+                    frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
+                    pseudo_perception = {
+                        "position": {"x": float(pos.get("x", 0.0)), "z": float(pos.get("z", 0.0))},
+                        "markers": {"blocked_resource": []},
+                        "nearHarvestObject": nearest_harvest,
+                        "selfState": self_state,
+                        "frontier": frontier,
+                    }
+                    blocked = nearest_harvest is not None and float(nearest_harvest.get("distance", 999.0) or 999.0) <= 2.4 and int(self._stuck_runtime.get("stuck_ticks", 0)) >= 2
+                    actions = self._frontier_movement_action(
+                        pseudo_perception,
+                        prefer_expand=True,
+                        force_harvest=blocked,
+                    )
+                    print(
+                        f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), frontier-targeted {actions[0].get('type', 'move')}"
+                    )
+                else:
+                    new_x = random.uniform(1, 99)
+                    new_z = random.uniform(1, 99)
+                    actions = [{"type": "move", "x": new_x, "z": new_z}]
+                    print(
+                        f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), fallback exploration"
+                    )
         
         for act in actions:
             t = act.get("type", "wait")
