@@ -84,6 +84,24 @@ test('applyQueueAction move_to_agent marks skipped action when target agent is m
   });
 });
 
+
+test('applyQueueAction move can traverse expansion tile beyond base world bounds', () => {
+  worldState.agents.clear();
+  worldState.expansionTiles = [{ id: 'expansion-edge', x: 101, z: 50 }];
+
+  const mover = createAgent('agent-expand', 'expander', { x: 99.5, y: 0, z: 50 });
+  worldState.agents.set(mover.id, mover);
+
+  applyQueueAction(mover, { type: 'move', x: 101.3, y: 0, z: 50, requiredTicks: 1 });
+
+  assert.ok(mover.position.x > 100, `expected x to move beyond base WORLD_SIZE.x, got ${mover.position.x}`);
+  assert.ok(mover.position.x <= 101.5, `expected x to stay within expansion tile extent, got ${mover.position.x}`);
+  assert.equal(mover.state, 'moving');
+
+  worldState.expansionTiles = [];
+  worldState.agents.clear();
+});
+
 test('normalizeQueueActions accepts valid action list', () => {
   const out = normalizeQueueActions([
     { type: 'jump', requiredTicks: 1 },
