@@ -2487,30 +2487,40 @@ class AIAgent:
                 actions = [{"type": "chat", "message": random_msg}]
                 print("  🤖 [override C] silence + alone, forcing random chat")
             else:
-                objects_raw = self.client.get_world_objects()
-                objects = objects_raw if isinstance(objects_raw, list) else []
-                self_state = self.client.get_self_agent_state() or {}
-                nearest_harvest = self._get_nearest_harvestable_object(pos, objects)
-                frontier = self._sector_memory.choose_frontier(self._tick_count, pos, objects, radius_sectors=2)
-                csec = self._sector_memory.sector_for(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
-                tx, tz = frontier.get("target_sector", csec)
-                frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
-                pseudo_perception = {
-                    "position": {"x": float(pos.get("x", 0.0)), "z": float(pos.get("z", 0.0))},
-                    "markers": {"blocked_resource": []},
-                    "nearHarvestObject": nearest_harvest,
-                    "selfState": self_state,
-                    "frontier": frontier,
-                }
-                blocked = nearest_harvest is not None and float(nearest_harvest.get("distance", 999.0) or 999.0) <= 2.4 and int(self._stuck_runtime.get("stuck_ticks", 0)) >= 2
-                actions = self._frontier_movement_action(
-                    pseudo_perception,
-                    prefer_expand=True,
-                    force_harvest=blocked,
-                )
-                print(
-                    f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), frontier-targeted {actions[0].get('type', 'move')}"
-                )
+                get_world_objects = getattr(self.client, "get_world_objects", None)
+                get_self_agent_state = getattr(self.client, "get_self_agent_state", None)
+                if callable(get_world_objects) and callable(get_self_agent_state):
+                    objects_raw = get_world_objects()
+                    objects = objects_raw if isinstance(objects_raw, list) else []
+                    self_state = get_self_agent_state() or {}
+                    nearest_harvest = self._get_nearest_harvestable_object(pos, objects)
+                    frontier = self._sector_memory.choose_frontier(self._tick_count, pos, objects, radius_sectors=2)
+                    csec = self._sector_memory.sector_for(float(pos.get("x", 0.0)), float(pos.get("z", 0.0)))
+                    tx, tz = frontier.get("target_sector", csec)
+                    frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
+                    pseudo_perception = {
+                        "position": {"x": float(pos.get("x", 0.0)), "z": float(pos.get("z", 0.0))},
+                        "markers": {"blocked_resource": []},
+                        "nearHarvestObject": nearest_harvest,
+                        "selfState": self_state,
+                        "frontier": frontier,
+                    }
+                    blocked = nearest_harvest is not None and float(nearest_harvest.get("distance", 999.0) or 999.0) <= 2.4 and int(self._stuck_runtime.get("stuck_ticks", 0)) >= 2
+                    actions = self._frontier_movement_action(
+                        pseudo_perception,
+                        prefer_expand=True,
+                        force_harvest=blocked,
+                    )
+                    print(
+                        f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), frontier-targeted {actions[0].get('type', 'move')}"
+                    )
+                else:
+                    new_x = random.uniform(1, 99)
+                    new_z = random.uniform(1, 99)
+                    actions = [{"type": "move", "x": new_x, "z": new_z}]
+                    print(
+                        f"  🤖 [override C] alone (total known: {len(self.client.known_agents)}), fallback exploration"
+                    )
         
         for act in actions:
             t = act.get("type", "wait")
