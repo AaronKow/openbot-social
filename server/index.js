@@ -3261,6 +3261,97 @@ app.get('/leaderboard/current', async (req, res) => {
   }
 });
 
+
+app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    const typeRaw = String(req.query.type || 'conversation').toLowerCase();
+    const type = typeRaw === 'collab' ? 'collab' : 'conversation';
+
+    if (!entityId) {
+      return res.status(400).json({ success: false, error: 'entityId is required' });
+    }
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Can only read your own recommendations' });
+    }
+
+    const dbAdapter = process.env.DATABASE_URL ? db : null;
+    if (!dbAdapter || typeof dbAdapter.getRecommendationCandidates !== 'function') {
+      return res.json({ success: true, entityId, type, recommendations: [], metrics: {} });
+    }
+
+    const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
+      memoryEntity: getMemoryEntities()?.get(entityId) || null,
+      memoryInterests: app._memoryInterests?.get(entityId) || [],
+      memoryGoalSnapshot: app._memoryGoalSnapshots?.get(entityId) || null,
+      runtimeActionQueue: actionQueues.get(entityId) || null,
+      recommendationType: type,
+    });
+
+    const recommendations = Array.isArray(wiki?.social?.suggestedConnections)
+      ? wiki.social.suggestedConnections
+      : [];
+
+    await Promise.all(
+      recommendations.slice(0, 6).map((candidate) => (
+        db.trackRecommendationEvent(entityId, candidate.entityId, type, 'shown', {
+          score: candidate.score,
+          source: 'recommendations-endpoint'
+        }).catch(() => null)
+      ))
+    );
+
+    const metrics = typeof db.getRecommendationMetrics === 'function'
+      ? await db.getRecommendationMetrics(entityId, type, 30)
+      : {};
+
+    return res.json({
+      success: true,
+      entityId,
+      type,
+      generatedAt: new Date().toISOString(),
+      recommendations,
+      metrics,
+    });
+  } catch (error) {
+    console.error('Error loading recommendations:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/entity/:entityId/recommendations/events', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    const candidateEntityId = String(req.body?.candidateEntityId || '').trim();
+    const typeRaw = String(req.body?.type || 'conversation').toLowerCase();
+    const type = typeRaw === 'collab' ? 'collab' : 'conversation';
+    const eventType = String(req.body?.eventType || '').trim().toLowerCase();
+
+    if (!entityId) return res.status(400).json({ success: false, error: 'entityId is required' });
+    if (req.entityId !== entityId) return res.status(403).json({ success: false, error: 'Can only write your own recommendation events' });
+    if (!candidateEntityId) return res.status(400).json({ success: false, error: 'candidateEntityId is required' });
+    if (!['accepted', 'follow_through'].includes(eventType)) {
+      return res.status(400).json({ success: false, error: 'eventType must be accepted or follow_through' });
+    }
+
+    if (process.env.DATABASE_URL && typeof db.trackRecommendationEvent === 'function') {
+      await db.trackRecommendationEvent(entityId, candidateEntityId, type, eventType, {
+        source: 'client-event',
+        userAgent: req.get('user-agent') || null
+      });
+    }
+
+    const metrics = (process.env.DATABASE_URL && typeof db.getRecommendationMetrics === 'function')
+      ? await db.getRecommendationMetrics(entityId, type, 30)
+      : {};
+
+    res.json({ success: true, entityId, candidateEntityId, type, eventType, metrics });
+  } catch (error) {
+    console.error('Error tracking recommendation event:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 app.get('/entity/:entityId/achievements', async (req, res) => {
   try {
     const { entityId } = req.params;

@@ -2354,6 +2354,19 @@ class OpenBotWorld {
         `;
     }
 
+    async trackRecommendationEvent(entityId, candidateEntityId, eventType, type = 'conversation') {
+        if (!entityId || !candidateEntityId || !eventType) return;
+        try {
+            await fetch(`${this.apiBase}/entity/${encodeURIComponent(entityId)}/recommendations/events`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ candidateEntityId, eventType, type })
+            });
+        } catch (error) {
+            console.warn('Recommendation event tracking failed:', error);
+        }
+    }
+
     renderWiki(wiki) {
         this.cleanupWikiAvatarRenderers();
         const body = document.getElementById('lobster-wiki-body');
@@ -2370,6 +2383,8 @@ class OpenBotWorld {
         const cognition = wiki.cognition || {};
         const social = wiki.social || {};
         const relationships = Array.isArray(social.relationships) ? social.relationships : [];
+        const suggestedConnections = Array.isArray(social.suggestedConnections) ? social.suggestedConnections : [];
+        const recommendationType = social.recommendationType || "conversation";
         const timeline = Array.isArray(wiki.timeline) ? wiki.timeline : [];
 
         if (title) title.textContent = `${identity.entityName || identity.entityId || 'Lobster'} Wiki`;
@@ -2534,6 +2549,24 @@ class OpenBotWorld {
                     ${relationshipItems}
                 </ul>
                 <div style="height:10px"></div>
+                <div>
+                    <strong>Suggested connections</strong>
+                    <ul class="wiki-relationship-list">
+                        ${suggestedConnections.map((c) => {
+                            const cId = this.escapeHtml(c.entityId || 'unknown');
+                            const cScore = Number(c.score || 0).toFixed(3);
+                            const reasons = c.reasons && typeof c.reasons === 'object'
+                                ? `interest ${Number(c.reasons.interestComplement || 0).toFixed(2)} • recency ${Number(c.reasons.lowRecencyPotential || 0).toFixed(2)} • centrality ${Number(c.reasons.mentionCentrality || 0).toFixed(2)}`
+                                : 'No reason metadata';
+                            return `<li>
+                                <div><strong>${cId}</strong> <span class="wiki-band">score ${cScore}</span></div>
+                                <div class="wiki-band">${this.escapeHtml(reasons)}</div>
+                                <button class="wiki-nav-btn wiki-reco-inspect-btn" data-candidate-entity-id="${cId}">Inspect</button>
+                            </li>`;
+                        }).join('') || '<li class="wiki-empty">No suggestions yet.</li>'}
+                    </ul>
+                </div>
+                <div style="height:10px"></div>
                 <div class="wiki-graph-wrap">
                     ${this.renderRelationshipGraph(social.relationshipGraph, identity.entityId)}
                 </div>
@@ -2563,6 +2596,17 @@ class OpenBotWorld {
 
         this.bindTimelineFilters();
         this.bindRelationshipGraphInteractions();
+
+        body.querySelectorAll('.wiki-reco-inspect-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const candidateEntityId = btn.getAttribute('data-candidate-entity-id');
+                const sourceEntityId = this.currentWikiEntityId || identity.entityId;
+                if (!candidateEntityId || !sourceEntityId) return;
+                await this.trackRecommendationEvent(sourceEntityId, candidateEntityId, 'accepted', recommendationType);
+                await this.trackRecommendationEvent(sourceEntityId, candidateEntityId, 'follow_through', recommendationType);
+                this.openWikiForEntity(candidateEntityId);
+            });
+        });
 
         const backBtn = document.getElementById('wiki-back-directory');
         if (backBtn) backBtn.addEventListener('click', () => this.openWikiDirectory());

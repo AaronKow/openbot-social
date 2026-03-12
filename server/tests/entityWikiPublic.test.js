@@ -736,3 +736,64 @@ test('buildEntityWikiPublic timeline preserves reflections during dense chat spi
   assert.equal(wiki.timeline[0].type, 'chat');
   assert.ok(wiki.timeline.every((event, idx, arr) => idx === 0 || arr[idx - 1].ts >= event.ts));
 });
+
+
+test('buildEntityWikiPublic exposes suggested connections with recommendation scoring', async () => {
+  const now = Date.now();
+  const fakeDb = {
+    async getEntity(entityId) {
+      return {
+        entity_id: entityId,
+        entity_name: entityId,
+        entity_type: 'lobster',
+        created_at: new Date(now - 10_000).toISOString()
+      };
+    },
+    async getEntityInterests() {
+      return [{ interest: 'currents', weight: 100 }];
+    },
+    async getRecentEntityReflectionsPublic() {
+      return [];
+    },
+    async getRecentChatMessagesByAgentName() {
+      return [];
+    },
+    async getTopConversationPartnersByAgentName() {
+      return [];
+    },
+    async getRecommendationCandidates() {
+      return [
+        {
+          entityId: 'reef-bot',
+          entityName: 'reef-bot',
+          overlapWeight: 55,
+          sharedInterestCount: 2,
+          sharedInterests: ['currents'],
+          recentInteractions14d: 1,
+          lastInteractionAt: now - (8 * 24 * 60 * 60 * 1000),
+          inboundMentions21d: 12,
+          uniqueMentioners21d: 5
+        }
+      ];
+    },
+    async scoreInteractionNovelty() {
+      return [{
+        candidateEntityId: 'reef-bot',
+        shownCount: 1,
+        acceptanceRate: 0,
+        followThroughRate: 0,
+        noveltyScore: 0.9
+      }];
+    }
+  };
+
+  const wiki = await buildEntityWikiPublic('alpha-lobster', { agents: new Map() }, fakeDb, {
+    recommendationType: 'conversation'
+  });
+
+  assert.equal(Array.isArray(wiki.social.suggestedConnections), true);
+  assert.equal(wiki.social.suggestedConnections.length, 1);
+  assert.equal(wiki.social.suggestedConnections[0].entityId, 'reef-bot');
+  assert.ok(wiki.social.suggestedConnections[0].score > 0);
+  assert.equal(wiki.social.recommendationType, 'conversation');
+});
