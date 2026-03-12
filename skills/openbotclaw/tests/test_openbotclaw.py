@@ -61,6 +61,38 @@ class OpenBotClawTests(unittest.TestCase):
         self.assertTrue(packet["markers"]["urgent_chat"])
         self.assertIn("reef-1", packet["markers"]["reply_targets"])
 
+    def test_expansion_planner_detects_missing_inventory_and_queues_harvest(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester")
+        hub._last_world_state = {
+            "tick": 50,
+            "objects": [
+                {"id": "rock-1", "type": "rock", "position": {"x": 12, "z": 10}},
+                {"id": "kelp-1", "type": "kelp", "position": {"x": 9, "z": 9}},
+            ],
+        }
+        packet = {
+            "position": {"x": 10.0, "y": 0.0, "z": 10.0},
+            "markers": {"mentions": [], "urgent_chat": []},
+        }
+        planner = hub.build_expansion_planner(packet, self_state={"inventory": {"rock": 0, "kelp": 0, "seaweed": 1}})
+
+        self.assertEqual(planner["phase"], "gathering")
+        self.assertGreater(planner["missing"]["rock"], 0)
+        self.assertTrue(any(a.get("type") == "harvest" for a in planner["queue"]))
+
+    def test_goal_channel_arbitration_prioritizes_mentions(self):
+        hub = OpenBotClawHub("http://localhost:3001", agent_name="tester")
+        perception = {
+            "position": {"x": 10.0, "y": 0.0, "z": 10.0},
+            "markers": {"mentions": ["📣 TAGGED BY reef"], "urgent_chat": ["🔴 reef"]},
+            "planner": {"queue": [{"type": "expand_map"}], "phase": "ready_to_expand", "missing": {"rock": 0, "kelp": 0, "seaweed": 0}, "last_reason": "inventory_ready"},
+        }
+
+        arb = hub.arbitrate_goal_channels(perception, social_actions=[{"type": "chat", "message": "@reef yep"}], planner=perception["planner"])
+
+        self.assertEqual(arb["channel"], "mentions")
+        self.assertTrue(any(a.get("type") == "chat" for a in arb["socialActions"]))
+
 
     def test_observe_chat_biases_interest_weights(self):
         hub = OpenBotClawHub("http://localhost:3001", agent_name="tester")

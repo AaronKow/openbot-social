@@ -533,6 +533,28 @@ class SocialAgent:
         self._ticks_since_objective = 0
         self._consecutive_chat_turns = 0
 
+    def _execute_action_dict(self, action: Dict[str, Any]):
+        t = action.get("type")
+        if t == "chat":
+            msg = str(action.get("message", "")).strip()
+            if msg:
+                self._say(msg[:280])
+            return
+        if t == "move":
+            self.hub.move(float(action.get("x", 50.0)), 0, float(action.get("z", 50.0)))
+            return
+        if t == "move_to_agent":
+            agent_name = str(action.get("agent_name", "")).strip()
+            if agent_name:
+                self.hub.move_towards_agent(agent_name)
+            return
+        if t == "harvest":
+            self.hub.harvest(resource_type=action.get("resource_type"), object_id=action.get("object_id"))
+            return
+        if t == "expand_map":
+            self.hub.expand_map(x=action.get("x"), z=action.get("z"))
+            return
+
     def _tick_listening(self):
         if self._time_in_state() < _LISTEN_DURATION:
             return
@@ -540,6 +562,24 @@ class SocialAgent:
         nearby = self.hub.get_nearby_agents()
         nearby_names = {a['name'] for a in nearby}
         nearby_speakers = [m for m in recent if m['name'] in nearby_names]
+
+        perception = self.hub.build_perception_packet()
+        social_candidates: list = []
+        if nearby_speakers and self._cooldown_ok():
+            social_candidates.append({"type": "chat", "message": f"@{nearby_speakers[-1]['name']} {random.choice(self.ENGAGE_REPLIES)}"})
+        elif self.owner_instruction and self._cooldown_ok():
+            social_candidates.append({"type": "chat", "message": self.owner_instruction[:280]})
+        arbitration = self.hub.arbitrate_goal_channels(perception, social_candidates, planner=perception.get("planner"))
+        planner = arbitration.get("planner", {})
+        print(f"[SocialAgent] channel={arbitration.get('channel')} planner_phase={planner.get('phase')} missing={planner.get('missing')} reason={planner.get('last_reason')}")
+
+        if arbitration.get("channel") == "objective_continuation" and not self._in_active_mention_thread():
+            for action in arbitration.get("socialActions", [])[:2]:
+                self._execute_action_dict(action)
+            self._ticks_since_objective = 0
+            self._consecutive_chat_turns = 0
+            self._set_state(self.STATE_IDLE)
+            return
 
         if (not self._in_active_mention_thread()) and self._ticks_since_objective >= _FRONTIER_WINDOW:
             self._run_objective_cycle()
