@@ -37,7 +37,7 @@ import random
 import threading
 import logging
 import queue
-from typing import Callable, Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List, Tuple
 from enum import Enum
 import requests
 from requests.adapters import HTTPAdapter
@@ -205,7 +205,7 @@ Pivot boring chats toward these. Use news from 📰 lines in observations.
 
 World: 100×100 ocean floor, max 5 units/step, chat heard by all. Other lobsters are real agents.
 
-Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), wait(rarely).
+Actions (1–3 per turn): chat(msg), move(x,z), move_to_agent(name), emote(wave), harvest(resource_type, object_id), expand_map(x,z), wait(rarely).
 The 📰 lines in observations contain real current news — reference them in conversation.
 
 Observation markers:
@@ -226,7 +226,114 @@ Rules: chat ≤280 chars. When replying, start with @TheirEntityID. If someone a
 SYSTEM_PROMPT = AGENT_PERSONALITY
 
 # Action types available in the world (reference data for AI agents)
-ACTION_TYPES = ["chat", "move", "move_to_agent", "emote", "wait"]
+ACTION_TYPES = ["chat", "move", "move_to_agent", "emote", "harvest", "expand_map", "wait"]
+
+# JSON schema for tool/action generation payloads used by LLM-driven loops.
+ACTION_GENERATION_SCHEMA = {
+    "type": "object",
+    "required": ["type"],
+    "properties": {
+        "type": {"type": "string", "enum": ACTION_TYPES},
+        "message": {"type": "string"},
+        "x": {"type": "number"},
+        "z": {"type": "number"},
+        "agent_name": {"type": "string"},
+        "name": {"type": "string"},
+        "emote": {"type": "string"},
+        "resource_type": {"type": "string", "enum": ["rock", "kelp", "seaweed"]},
+        "object_id": {"type": "string"},
+    },
+    "additionalProperties": True,
+}
+
+
+def _normalize_action_payload(raw_action: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Validate and normalize an LLM-generated action payload.
+
+    Returns:
+        (normalized_action, reason)
+        normalized_action is None when validation fails.
+    """
+    if not isinstance(raw_action, dict):
+        return None, "action must be an object"
+
+    action_type = str(raw_action.get("type", "")).strip()
+    if action_type not in ACTION_TYPES:
+        return None, f"unsupported action type '{action_type}'"
+
+    normalized: Dict[str, Any] = {"type": action_type}
+
+    if action_type == "chat":
+        message = str(raw_action.get("message", "")).strip()
+        if not message:
+            return None, "chat action requires non-empty message"
+        normalized["message"] = message
+        return normalized, "ok"
+
+    if action_type == "move":
+        try:
+            normalized["x"] = float(raw_action["x"])
+            normalized["z"] = float(raw_action["z"])
+        except (TypeError, ValueError, KeyError):
+            return None, "move action requires numeric x and z"
+        normalized["y"] = float(raw_action.get("y", 0.0) or 0.0)
+        if raw_action.get("rotation") is not None:
+            try:
+                normalized["rotation"] = float(raw_action.get("rotation"))
+            except (TypeError, ValueError):
+                return None, "move action rotation must be numeric"
+        return normalized, "ok"
+
+    if action_type == "move_to_agent":
+        agent_name = str(raw_action.get("agent_name") or raw_action.get("name") or "").strip()
+        if not agent_name:
+            return None, "move_to_agent requires agent_name"
+        normalized["agent_name"] = agent_name
+        normalized["stop_distance"] = float(raw_action.get("stop_distance", 3.0) or 3.0)
+        normalized["step"] = float(raw_action.get("step", 5.0) or 5.0)
+        return normalized, "ok"
+
+    if action_type == "emote":
+        emote = str(raw_action.get("emote", "wave")).strip() or "wave"
+        normalized["emote"] = emote
+        return normalized, "ok"
+
+    if action_type == "harvest":
+        resource_type = raw_action.get("resource_type") or raw_action.get("resourceType")
+        object_id = raw_action.get("object_id") or raw_action.get("objectId")
+        if resource_type is not None:
+            resource_type = str(resource_type).strip().lower()
+            if resource_type not in {"rock", "kelp", "seaweed"}:
+                return None, "harvest resource_type must be one of: rock, kelp, seaweed"
+            normalized["resource_type"] = resource_type
+        if object_id is not None:
+            object_id = str(object_id).strip()
+            if object_id:
+                normalized["object_id"] = object_id
+        return normalized, "ok"
+
+    if action_type == "expand_map":
+        if raw_action.get("x") is not None:
+            try:
+                normalized["x"] = float(raw_action.get("x"))
+            except (TypeError, ValueError):
+                return None, "expand_map x must be numeric"
+        if raw_action.get("z") is not None:
+            try:
+                normalized["z"] = float(raw_action.get("z"))
+            except (TypeError, ValueError):
+                return None, "expand_map z must be numeric"
+        return normalized, "ok"
+
+    if action_type == "wait":
+        try:
+            normalized["seconds"] = max(0.0, float(raw_action.get("seconds", 1.0) or 1.0))
+        except (TypeError, ValueError):
+            return None, "wait seconds must be numeric"
+        return normalized, "ok"
+
+    return normalized, "ok"
 
 
 class ConnectionState(Enum):
@@ -852,6 +959,109 @@ class OpenBotClawHub:
                 **kwargs
             }
         })
+
+    def harvest(self, resource_type: Optional[str] = None, object_id: Optional[str] = None) -> bool:
+        """Queue a harvest action with optional resource/object targeting."""
+        payload: Dict[str, Any] = {}
+        if resource_type:
+            payload["resourceType"] = str(resource_type).strip().lower()
+        if object_id:
+            payload["objectId"] = str(object_id).strip()
+        return self.action("harvest", **payload)
+
+    def expand_map(self, x: Optional[float] = None, z: Optional[float] = None) -> bool:
+        """Queue an expand_map action with optional tile coordinate hints."""
+        payload: Dict[str, Any] = {}
+        if x is not None:
+            payload["x"] = float(x)
+        if z is not None:
+            payload["z"] = float(z)
+        return self.action("expand_map", **payload)
+
+    def execute_generated_action(self, raw_action: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute an LLM-generated action and return structured status for learning loops.
+
+        Returns a dict with:
+            ok (bool), type (str), reason (str), normalized_action (optional dict)
+        """
+        normalized, reason = _normalize_action_payload(raw_action)
+        if not normalized:
+            action_type = str(raw_action.get("type", "unknown")) if isinstance(raw_action, dict) else "unknown"
+            self.logger.warning(f"Action failed [{action_type}]: {reason}")
+            return {"ok": False, "type": action_type, "reason": reason}
+
+        action_type = normalized["type"]
+        ok = False
+        fail_reason = "unknown failure"
+
+        try:
+            if action_type == "chat":
+                ok = self.chat(normalized["message"])
+                if ok:
+                    self.track_own_message(normalized["message"])
+                else:
+                    fail_reason = "chat send failed"
+            elif action_type == "move":
+                ok = self.move(
+                    normalized["x"],
+                    normalized.get("y", 0.0),
+                    normalized["z"],
+                    normalized.get("rotation"),
+                )
+                if not ok:
+                    fail_reason = "move send failed"
+            elif action_type == "move_to_agent":
+                ok = self.move_towards_agent(
+                    normalized["agent_name"],
+                    stop_distance=normalized.get("stop_distance", 3.0),
+                    step=normalized.get("step", 5.0),
+                )
+                if not ok:
+                    fail_reason = "target not found or already in range"
+            elif action_type == "emote":
+                ok = self.action("emote", emote=normalized.get("emote", "wave"))
+                if not ok:
+                    fail_reason = "emote send failed"
+            elif action_type == "harvest":
+                ok = self.harvest(
+                    resource_type=normalized.get("resource_type"),
+                    object_id=normalized.get("object_id"),
+                )
+                if not ok:
+                    fail_reason = "harvest rejected by server/state"
+            elif action_type == "expand_map":
+                ok = self.expand_map(x=normalized.get("x"), z=normalized.get("z"))
+                if not ok:
+                    fail_reason = "expand_map rejected by server/state"
+            elif action_type == "wait":
+                ok = True
+                fail_reason = ""
+            else:
+                fail_reason = f"unsupported action type '{action_type}'"
+        except Exception as exc:
+            fail_reason = f"exception during action execution: {exc}"
+            ok = False
+
+        if ok:
+            reason = "executed"
+            if action_type == "wait":
+                reason = f"waited {normalized.get('seconds', 1.0):.1f}s"
+            self.logger.info(f"Action success [{action_type}]: {reason}")
+            return {
+                "ok": True,
+                "type": action_type,
+                "reason": reason,
+                "normalized_action": normalized,
+            }
+
+        self.logger.warning(f"Action failed [{action_type}]: {fail_reason}")
+        return {
+            "ok": False,
+            "type": action_type,
+            "reason": fail_reason,
+            "normalized_action": normalized,
+        }
     
     def get_position(self) -> Dict[str, float]:
         """
