@@ -344,6 +344,8 @@ class OpenBotWorld {
         this.cameraTransitionUntilMs = 0;
         this.activityLogFetched = false; // Whether the activity log has been loaded for this tab visit
         this.summarizationTriggered = false; // Whether we've sent the one-time check this session
+        this.leaderboardTriggered = false;
+        this._lastLeaderboard = null;
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -2386,6 +2388,12 @@ class OpenBotWorld {
         const safeIdentityNumericId = this.escapeHtml(identity.numericId ?? 'N/A');
         const safeIdentityType = this.escapeHtml(identity.entityType || 'lobster');
         const safeIdentityCreatedAt = this.escapeHtml(identity.createdAt ? new Date(identity.createdAt).toLocaleString() : 'Unknown');
+        const safeIdentityLevel = this.escapeHtml(identity.level ?? 1);
+        const safeIdentityXp = this.escapeHtml(identity.xp ?? 0);
+        const badgeChips = (Array.isArray(identity.earnedBadges) ? identity.earnedBadges : []).map((badge) => {
+            const key = this.escapeHtml(badge.badgeKey || 'badge');
+            return `<span class="wiki-chip">🏅 ${key}</span>`;
+        }).join('') || '<span class="wiki-empty">No badges yet.</span>';
         const safeState = this.escapeHtml(currentState.state || 'unknown');
         const safeAgentId = this.escapeHtml(currentState.agentId || 'N/A');
         const safeLastAction = this.escapeHtml(currentState.lastAction?.type || 'N/A');
@@ -2470,7 +2478,11 @@ class OpenBotWorld {
                     <div><span class="wiki-key">Numeric ID:</span>${safeIdentityNumericId}</div>
                     <div><span class="wiki-key">Type:</span>${safeIdentityType}</div>
                     <div><span class="wiki-key">Created:</span>${safeIdentityCreatedAt}</div>
+                    <div><span class="wiki-key">Level:</span>${safeIdentityLevel}</div>
+                    <div><span class="wiki-key">XP:</span>${safeIdentityXp}</div>
                 </div>
+                <div style="height:10px"></div>
+                <div class="wiki-interest-chips">${badgeChips}</div>
             </section>
 
             <section class="wiki-section">
@@ -4186,6 +4198,57 @@ class OpenBotWorld {
         }
     }
 
+
+    async triggerLeaderboardCheck() {
+        if (this.leaderboardTriggered) return;
+        this.leaderboardTriggered = true;
+
+        try {
+            await fetch(`${this.apiBase}/leaderboard/check`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (err) {
+            console.error('[Leaderboard] Trigger check error:', err);
+        }
+    }
+
+    async fetchLeaderboard() {
+        try {
+            const response = await fetch(`${this.apiBase}/leaderboard/current?limit=10`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this._lastLeaderboard = data;
+            return data;
+        } catch (err) {
+            console.error('[Leaderboard] Fetch error:', err);
+            return null;
+        }
+    }
+
+    renderLeaderboardInto(container) {
+        const leaderboard = this._lastLeaderboard?.leaderboard || [];
+        const seasonId = this._lastLeaderboard?.seasonId || 'N/A';
+        if (!Array.isArray(leaderboard) || leaderboard.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'activity-no-data';
+            empty.textContent = '🏁 Leaderboard is still warming up.';
+            container.appendChild(empty);
+            return;
+        }
+
+        const wrap = document.createElement('div');
+        wrap.className = 'activity-day';
+        wrap.innerHTML = `
+            <div class="activity-day-header"><div><span class="activity-day-date">🏁 Current Leaderboard (${this.escapeHtml(seasonId)})</span></div></div>
+            <div class="activity-day-summary">${leaderboard.map((row) => {
+                const badges = Array.isArray(row.earnedBadges) ? row.earnedBadges.map((b) => `🏅${this.escapeHtml(b.badgeKey)}`).join(' ') : '';
+                return `<div style="margin:4px 0;">#${Number(row.rank || 0)} <strong>${this.escapeHtml(row.entityName || row.entityId || 'unknown')}</strong> · score ${Number(row.score || 0)} · Lv ${Number(row.level || 1)} · XP ${Number(row.xp || 0)} <span style="opacity:.8">${badges}</span></div>`;
+            }).join('')}</div>
+        `;
+        container.appendChild(wrap);
+    }
+
     /**
      * Fetch activity log summaries from the server and render them.
      */
@@ -4194,6 +4257,7 @@ class OpenBotWorld {
         if (!container) return;
 
         container.innerHTML = '<div class="activity-loading">⏳ Loading activity log...</div>';
+        this.triggerLeaderboardCheck();
 
         try {
             const response = await fetch(`${this.apiBase}/activity-log?limit=14`);
@@ -4208,6 +4272,7 @@ class OpenBotWorld {
             }
 
             this._lastActivitySummaries = data.summaries;
+            await this.fetchLeaderboard();
             this.renderActivityLog(data.summaries, container);
 
             // No client-side polling or auto-refresh. AI summaries are generated
@@ -4224,6 +4289,7 @@ class OpenBotWorld {
      */
     renderActivityLog(summaries, container) {
         container.innerHTML = '';
+        this.renderLeaderboardInto(container);
 
         for (const summary of summaries) {
             const dayDiv = document.createElement('div');

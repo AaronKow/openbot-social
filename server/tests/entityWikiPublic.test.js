@@ -65,6 +65,12 @@ test('buildEntityWikiPublic returns complete bounded wiki payload', async () => 
           lastInteractionAt: now - 120_000
         }
       ];
+    },
+    async getEntityAchievements() {
+      return { level: 4, xp: 390 };
+    },
+    async getEntityBadges() {
+      return [{ badgeKey: 'social-breadth', awardedAt: new Date(now).toISOString(), metadata: {} }];
     }
   };
 
@@ -90,6 +96,9 @@ test('buildEntityWikiPublic returns complete bounded wiki payload', async () => 
 
   const wiki = await buildEntityWikiPublic('alpha-lobster', worldState, fakeDb);
   assert.equal(wiki.identity.entityId, 'alpha-lobster');
+  assert.equal(wiki.identity.level, 4);
+  assert.equal(wiki.identity.xp, 390);
+  assert.equal(Array.isArray(wiki.identity.earnedBadges), true);
   assert.equal(wiki.currentState.online, true);
   assert.equal(wiki.currentState.runtime.energy, 78.5);
   assert.equal(wiki.currentState.runtime.sleeping, false);

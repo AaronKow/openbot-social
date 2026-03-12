@@ -2745,6 +2745,7 @@ const PERSIST_AGENT_SAVE_INTERVAL_MS = getPositiveIntervalMs('PERSIST_AGENT_SAVE
 const PERSIST_CHAT_CLEANUP_INTERVAL_MS = getPositiveIntervalMs('PERSIST_CHAT_CLEANUP_INTERVAL_MS', 60000, 10000);
 const PERSIST_SESSION_CLEANUP_INTERVAL_MS = getPositiveIntervalMs('PERSIST_SESSION_CLEANUP_INTERVAL_MS', 300000, 60000);
 const ENTITY_REFLECTION_CHECK_INTERVAL_MS = getPositiveIntervalMs('ENTITY_REFLECTION_CHECK_INTERVAL_MS', 10 * 60 * 1000, 60 * 1000);
+const LEADERBOARD_CHECK_INTERVAL_MS = getPositiveIntervalMs('LEADERBOARD_CHECK_INTERVAL_MS', 10 * 60 * 1000, 60 * 1000);
 const AGENT_MAINTENANCE_INTERVAL_MS = getPositiveIntervalMs('AGENT_MAINTENANCE_INTERVAL_MS', 1000, 250);
 
 const tickSchedulerMetrics = {
@@ -2772,6 +2773,61 @@ let persistTimer = null;
 let agentMaintenanceTimer = null;
 let entityReflectionCheckTimer = null;
 let isEntityReflectionCheckRunning = false;
+let leaderboardCheckTimer = null;
+let isLeaderboardCheckRunning = false;
+
+function getCurrentSeasonId(date = new Date()) {
+  const month = date.getUTCMonth();
+  const quarter = Math.floor(month / 3) + 1;
+  return `${date.getUTCFullYear()}-Q${quarter}`;
+}
+
+const LEADERBOARD_CACHE_TTL_MS = 60_000;
+let _leaderboardCache = null;
+let _leaderboardCacheTime = 0;
+let _lastLeaderboardCheckTriggerTime = 0;
+
+async function runLeaderboardCheckCycle() {
+  if (!process.env.DATABASE_URL) return { skipped: true, reason: 'database_disabled' };
+  if (isLeaderboardCheckRunning) return { skipped: true, reason: 'in_flight' };
+
+  isLeaderboardCheckRunning = true;
+  const startedAt = Date.now();
+
+  try {
+    const gotLock = await db.acquireLeaderboardLock();
+    if (!gotLock) {
+      return { skipped: true, reason: 'lock_busy' };
+    }
+
+    const seasonId = getCurrentSeasonId();
+    const leaderboard = await db.getCurrentLeaderboard(25);
+    const snapshotCount = await db.saveSeasonalLeaderboardSnapshot(seasonId, leaderboard, new Date());
+    _leaderboardCache = {
+      seasonId,
+      policy: {
+        reset: 'Season resets every UTC quarter (Q1/Q2/Q3/Q4) and archives current standings into snapshots.'
+      },
+      leaderboard
+    };
+    _leaderboardCacheTime = Date.now();
+    return { triggered: true, seasonId, snapshotCount, durationMs: Date.now() - startedAt };
+  } catch (error) {
+    return { triggered: false, error: error.message, durationMs: Date.now() - startedAt };
+  } finally {
+    await db.releaseLeaderboardLock().catch(() => {});
+    isLeaderboardCheckRunning = false;
+  }
+}
+
+function scheduleLeaderboardChecks() {
+  if (!process.env.DATABASE_URL) return null;
+  leaderboardCheckTimer = setInterval(() => {
+    runLeaderboardCheckCycle();
+  }, LEADERBOARD_CHECK_INTERVAL_MS);
+  if (typeof leaderboardCheckTimer.unref === 'function') leaderboardCheckTimer.unref();
+  return leaderboardCheckTimer;
+}
 
 function scheduleAgentMaintenance() {
   agentMaintenanceTimer = setInterval(runAgentMaintenance, AGENT_MAINTENANCE_INTERVAL_MS);
@@ -3003,6 +3059,7 @@ if (process.env.NODE_ENV !== 'test') {
   scheduleMapRefill();
   scheduleAlgaePalletRefill();
   scheduleEntityReflectionChecks();
+  scheduleLeaderboardChecks();
 }
 
 // Status API endpoint
@@ -3160,6 +3217,81 @@ app.post('/activity-log/check', rateLimiters.summaryCheck, async (req, res) => {
   } catch (error) {
     console.error('Error checking activity log:', error);
     res.status(500).json({ triggered: false, message: 'Internal server error' });
+  }
+});
+
+app.post('/leaderboard/check', rateLimiters.summaryCheck, async (req, res) => {
+  try {
+    const now = Date.now();
+    if (now - _lastLeaderboardCheckTriggerTime < CHECK_THROTTLE_MS) {
+      return res.json({ triggered: false, message: 'Leaderboard check was performed recently' });
+    }
+    _lastLeaderboardCheckTriggerTime = now;
+    const result = await runLeaderboardCheckCycle();
+    res.json(result);
+  } catch (error) {
+    console.error('Error checking leaderboard:', error);
+    res.status(500).json({ triggered: false, message: 'Internal server error' });
+  }
+});
+
+app.get('/leaderboard/current', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 25, 100));
+    if (_leaderboardCache && (Date.now() - _leaderboardCacheTime) < LEADERBOARD_CACHE_TTL_MS) {
+      return res.json({ success: true, ..._leaderboardCache, cache: 'hit' });
+    }
+
+    const seasonId = getCurrentSeasonId();
+    const leaderboard = process.env.DATABASE_URL ? await db.getCurrentLeaderboard(limit) : [];
+    const payload = {
+      seasonId,
+      policy: {
+        reset: 'Season resets every UTC quarter (Q1/Q2/Q3/Q4), with archival snapshots captured by periodic leaderboard checks.'
+      },
+      leaderboard
+    };
+
+    _leaderboardCache = payload;
+    _leaderboardCacheTime = Date.now();
+    res.json({ success: true, ...payload, cache: 'miss' });
+  } catch (error) {
+    console.error('Error loading current leaderboard:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/entity/:entityId/achievements', async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (!entityId) return res.status(400).json({ success: false, error: 'entityId is required' });
+    if (!process.env.DATABASE_URL) {
+      return res.json({ success: true, entityId, level: 1, xp: 0, earnedBadges: [], telemetry: {} });
+    }
+
+    const achievements = await db.evaluateAndAwardEntityBadges(entityId);
+    if (!achievements) {
+      return res.status(404).json({ success: false, error: 'Entity not found' });
+    }
+
+    res.json({
+      success: true,
+      entityId,
+      level: achievements.level,
+      xp: achievements.xp,
+      earnedBadges: achievements.earnedBadges || [],
+      telemetry: {
+        responseConsistency: achievements.responseConsistency,
+        mentionsReplied: achievements.mentionsReplied,
+        mentionsReceived: achievements.mentionsReceived,
+        socialBreadth: achievements.uniqueRelationships,
+        activeDays: achievements.activeDays,
+        activeStreakDays: achievements.activeStreakDays
+      }
+    });
+  } catch (error) {
+    console.error('Error loading entity achievements:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 

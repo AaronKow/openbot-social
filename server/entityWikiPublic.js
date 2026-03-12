@@ -425,6 +425,19 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
       return null;
     })
     : Promise.resolve(options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object' ? options.memoryGoalSnapshot : null);
+
+  const achievementsPromise = db && typeof db.getEntityAchievements === 'function'
+    ? db.getEntityAchievements(entityId).catch(error => {
+      console.warn(`[wiki-public] failed to read achievements for ${entityId}:`, error.message);
+      return null;
+    })
+    : Promise.resolve(null);
+  const earnedBadgesPromise = db && typeof db.getEntityBadges === 'function'
+    ? db.getEntityBadges(entityId).catch(error => {
+      console.warn(`[wiki-public] failed to read badges for ${entityId}:`, error.message);
+      return [];
+    })
+    : Promise.resolve([]);
   const actionSequencePromise = runtimeActionSequence
     ? Promise.resolve(runtimeActionSequence)
     : (db && typeof db.getRecentEntityActionQueues === 'function'
@@ -443,13 +456,15 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
         })
       : Promise.resolve(null));
 
-  let [interests, reflections, recentOwnChats, rawPartners, goalsSnapshot, actionSequence] = await Promise.all([
+  let [interests, reflections, recentOwnChats, rawPartners, goalsSnapshot, actionSequence, achievements, earnedBadges] = await Promise.all([
     interestsPromise,
     reflectionsPromise,
     recentOwnChatsPromise,
     rawPartnersPromise,
     goalsSnapshotPromise,
-    actionSequencePromise
+    actionSequencePromise,
+    achievementsPromise,
+    earnedBadgesPromise
   ]);
 
   if (!Array.isArray(rawPartners)) {
@@ -495,7 +510,9 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     recentOwnChats,
     rawPartners,
     goalsSnapshot,
-    actionSequence
+    actionSequence,
+    achievements,
+    earnedBadges
   });
 }
 
@@ -508,7 +525,9 @@ function composeEntityWikiPublic({
   recentOwnChats,
   rawPartners,
   goalsSnapshot,
-  actionSequence
+  actionSequence,
+  achievements,
+  earnedBadges
 }) {
   const relationships = deriveRelationships(rawPartners);
 
@@ -532,7 +551,10 @@ function composeEntityWikiPublic({
       entityName: entity.entity_name || entity.entity_id || entityId,
       numericId: entity.numeric_id || null,
       entityType: entity.entity_type || 'lobster',
-      createdAt: entity.created_at || null
+      createdAt: entity.created_at || null,
+      level: Number(achievements?.level || 1),
+      xp: Number(achievements?.xp || 0),
+      earnedBadges: Array.isArray(earnedBadges) ? earnedBadges : []
     },
     currentState,
     cognition: {
