@@ -114,6 +114,46 @@ test('GET /world-state no longer keeps stale agents alive', async () => {
 });
 
 
+
+test('POST /move allows movement onto expansion tile beyond base bounds', async () => {
+  worldState.agents.clear();
+  worldState.expansionTiles = [{ id: 'expansion-move', x: 101, z: 50 }];
+  const sessions = getMemorySessions();
+  sessions.clear();
+
+  const entityId = 'entity-expanded-move';
+  const agentId = 'agent-expanded-move';
+  seedAgent(agentId, entityId, Date.now());
+  const agent = worldState.agents.get(agentId);
+  agent.position = { x: 99.5, y: 0, z: 50 };
+
+  const token = seedSession(entityId);
+
+  await withServer(async (baseUrl) => {
+    const moveRes = await fetch(`${baseUrl}/move`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        agentId,
+        position: { x: 101.3, y: 0, z: 50 }
+      })
+    });
+
+    assert.equal(moveRes.status, 200);
+    const payload = await moveRes.json();
+    assert.equal(payload.success, true);
+    assert.ok(worldState.agents.get(agentId).position.x > 100);
+    assert.ok(worldState.agents.get(agentId).position.x <= 101.5);
+  });
+
+  worldState.expansionTiles = [];
+  worldState.agents.clear();
+  sessions.clear();
+});
+
 test('GET /world-state delta clamps limit to server max', async () => {
   worldState.agents.clear();
   worldState.agentChangeHistory.clear();
@@ -182,6 +222,26 @@ test('GET /world-state delta without limit keeps existing behavior', async () =>
   worldState.agentChangeHistory.clear();
 });
 
+
+
+test('GET /world-state includes traversable bounds metadata including expansion tiles', async () => {
+  worldState.agents.clear();
+  worldState.expansionTiles = [{ id: 'expansion-world-state', x: 104, z: -2 }];
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/world-state`);
+    assert.equal(res.status, 200);
+
+    const payload = await res.json();
+    assert.equal(typeof payload.traversableBounds, 'object');
+    assert.equal(payload.traversableBounds.maxX, 104.5);
+    assert.equal(payload.traversableBounds.minZ, -2.5);
+    assert.equal(payload.traversableBounds.baseMaxX, 100);
+    assert.equal(payload.traversableBounds.expansionTilesCount, 1);
+  });
+
+  worldState.expansionTiles = [];
+});
 
 test('GET /world-state and /status expose worldTime day/night metadata', async () => {
   worldState.agents.clear();

@@ -361,7 +361,8 @@ function getWorldStateMeta() {
     threats: Array.from(worldState.threats.values()),
     combatEvents: worldState.combatEvents.slice(-COMBAT_EVENTS_WORLD_PAYLOAD_MAX),
     expansionTiles: worldState.expansionTiles,
-    mapExpansionLevel: worldState.mapExpansionLevel
+    mapExpansionLevel: worldState.mapExpansionLevel,
+    traversableBounds: getTraversableBoundaryMetadata()
   };
 }
 
@@ -442,12 +443,43 @@ function distance2D(a, b) {
   return Math.sqrt((dx * dx) + (dz * dz));
 }
 
+function getTraversableBoundaryMetadata() {
+  let minX = 0;
+  let maxX = WORLD_SIZE.x;
+  let minZ = 0;
+  let maxZ = WORLD_SIZE.y;
+
+  for (const tile of worldState.expansionTiles) {
+    const tileX = Number(tile?.x);
+    const tileZ = Number(tile?.z);
+    if (!Number.isFinite(tileX) || !Number.isFinite(tileZ)) continue;
+    minX = Math.min(minX, tileX - 0.5);
+    maxX = Math.max(maxX, tileX + 0.5);
+    minZ = Math.min(minZ, tileZ - 0.5);
+    maxZ = Math.max(maxZ, tileZ + 0.5);
+  }
+
+  return {
+    minX,
+    maxX,
+    minZ,
+    maxZ,
+    baseMinX: 0,
+    baseMaxX: WORLD_SIZE.x,
+    baseMinZ: 0,
+    baseMaxZ: WORLD_SIZE.y,
+    expansionTilesCount: worldState.expansionTiles.length
+  };
+}
+
 function clampWorldCoordX(x) {
-  return Math.max(MAP_EDGE_BUFFER, Math.min(WORLD_SIZE.x - MAP_EDGE_BUFFER, Number(x) || 0));
+  const { minX, maxX } = getTraversableBoundaryMetadata();
+  return Math.max(minX, Math.min(maxX, Number(x) || 0));
 }
 
 function clampWorldCoordZ(z) {
-  return Math.max(MAP_EDGE_BUFFER, Math.min(WORLD_SIZE.y - MAP_EDGE_BUFFER, Number(z) || 0));
+  const { minZ, maxZ } = getTraversableBoundaryMetadata();
+  return Math.max(minZ, Math.min(maxZ, Number(z) || 0));
 }
 
 function isAgentCombatTargetable(agent) {
@@ -511,8 +543,13 @@ function movePointTowards(point, target, maxStep) {
   const dist = Math.sqrt((dx * dx) + (dz * dz));
   if (dist <= 0.0001) return;
   const step = Math.min(dist, maxStep);
-  point.x = clampWorldCoordX(Number(point.x || 0) + ((dx / dist) * step));
-  point.z = clampWorldCoordZ(Number(point.z || 0) + ((dz / dist) * step));
+  const next = validatePosition({
+    x: Number(point.x || 0) + ((dx / dist) * step),
+    y: Number(point.y || 0),
+    z: Number(point.z || 0) + ((dz / dist) * step)
+  });
+  point.x = next.x;
+  point.z = next.z;
 }
 
 function applyCombatDamageToAgent(agent, amount, sourceType = 'impact') {
@@ -1067,19 +1104,31 @@ function decayAgentSkillCooldowns(agent, dtSec) {
 
 // Validate movement position (clamp to world bounds)
 function validatePosition(pos) {
+  const numericX = Number(pos?.x);
+  const numericY = Number(pos?.y);
+  const numericZ = Number(pos?.z);
+  const rawX = Number.isFinite(numericX) ? numericX : 0;
+  const rawZ = Number.isFinite(numericZ) ? numericZ : 0;
+  const clampedX = clampWorldCoordX(rawX);
+  const clampedZ = clampWorldCoordZ(rawZ);
+  const traversable = hasGroundTileAt(clampedX, clampedZ)
+    ? { x: clampedX, z: clampedZ }
+    : findNearestTraversablePoint(clampedX, clampedZ);
+
   return {
-    x: Math.max(0, Math.min(WORLD_SIZE.x, Number(pos.x) || 0)),
-    y: Math.max(0, Math.min(5, Number(pos.y) || 0)),
-    z: Math.max(0, Math.min(WORLD_SIZE.y, Number(pos.z) || 0))
+    x: traversable.x,
+    y: Math.max(0, Math.min(5, Number.isFinite(numericY) ? numericY : 0)),
+    z: traversable.z
   };
 }
 
 // Clamp movement to realistic distance from current position
 function clampMovement(currentPos, targetPos) {
+  const normalizedCurrent = validatePosition(currentPos || {});
   const validated = validatePosition(targetPos);
-  const dx = validated.x - currentPos.x;
-  const dy = validated.y - currentPos.y;
-  const dz = validated.z - currentPos.z;
+  const dx = validated.x - normalizedCurrent.x;
+  const dy = validated.y - normalizedCurrent.y;
+  const dz = validated.z - normalizedCurrent.z;
   const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
   if (distance <= MAX_MOVE_DISTANCE) {
@@ -1089,9 +1138,9 @@ function clampMovement(currentPos, targetPos) {
   // Scale down to max distance
   const scale = MAX_MOVE_DISTANCE / distance;
   return validatePosition({
-    x: currentPos.x + dx * scale,
-    y: currentPos.y + dy * scale,
-    z: currentPos.z + dz * scale
+    x: normalizedCurrent.x + dx * scale,
+    y: normalizedCurrent.y + dy * scale,
+    z: normalizedCurrent.z + dz * scale
   });
 }
 
@@ -1349,7 +1398,7 @@ app.post('/spawn', requireAuth, async (req, res) => {
       agent.numericId = entity.numeric_id || null;
       worldState.agents.set(agentId, agent);
       markAgentUpdated(agent);
-      
+
       console.log(`Entity spawned: ${entityId} as agent ${agentId}`);
     } else {
       // Update existing agent
@@ -1358,6 +1407,8 @@ app.post('/spawn', requireAuth, async (req, res) => {
       markAgentUpdated(agent);
       console.log(`Entity reconnected: ${entityId}`);
     }
+
+    agent.position = validatePosition(agent.position || {});
     
     res.json({
       success: true,
@@ -1652,7 +1703,9 @@ function tileKey(x, z) {
 }
 
 function hasExpansionTileAt(x, z) {
-  return worldState.expansionTiles.some((tile) => tile.x === x && tile.z === z);
+  const tileX = Math.round(Number(x));
+  const tileZ = Math.round(Number(z));
+  return worldState.expansionTiles.some((tile) => tile.x === tileX && tile.z === tileZ);
 }
 
 function isBaseWorldTile(x, z) {
@@ -1660,7 +1713,34 @@ function isBaseWorldTile(x, z) {
 }
 
 function hasGroundTileAt(x, z) {
-  return isBaseWorldTile(x, z) || hasExpansionTileAt(x, z);
+  if (isBaseWorldTile(x, z)) return true;
+  return hasExpansionTileAt(x, z);
+}
+
+function findNearestTraversablePoint(x, z) {
+  const fromX = Number.isFinite(Number(x)) ? Number(x) : 0;
+  const fromZ = Number.isFinite(Number(z)) ? Number(z) : 0;
+
+  let best = {
+    x: Math.max(0, Math.min(WORLD_SIZE.x, fromX)),
+    z: Math.max(0, Math.min(WORLD_SIZE.y, fromZ))
+  };
+  let bestDistanceSq = ((best.x - fromX) ** 2) + ((best.z - fromZ) ** 2);
+
+  for (const tile of worldState.expansionTiles) {
+    const tileX = Number(tile?.x);
+    const tileZ = Number(tile?.z);
+    if (!Number.isFinite(tileX) || !Number.isFinite(tileZ)) continue;
+    const candidateX = Math.max(tileX - 0.5, Math.min(tileX + 0.5, fromX));
+    const candidateZ = Math.max(tileZ - 0.5, Math.min(tileZ + 0.5, fromZ));
+    const distanceSq = ((candidateX - fromX) ** 2) + ((candidateZ - fromZ) ** 2);
+    if (distanceSq < bestDistanceSq) {
+      best = { x: candidateX, z: candidateZ };
+      bestDistanceSq = distanceSq;
+    }
+  }
+
+  return best;
 }
 
 function hasAdjacentGroundTile(x, z) {
