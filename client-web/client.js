@@ -330,6 +330,16 @@ class OpenBotWorld {
         this.worldTick = null; // Last successfully applied world tick
         this.worldDeltaEnabled = false; // Switch to incremental polling after first full sync
         this.worldObjectsSignature = '';
+        this.expansionTileMeshes = new Map(); // tileId -> THREE.Group
+        this.expansionTilePulseEffects = new Map(); // tileId -> pulse effect
+        this.expansionTilesById = new Map();
+        this.expansionTilesSeen = new Set();
+        this.latestExpansionStats = {
+            mapExpansionLevel: 0,
+            newTilesCount: 0,
+            topBuilders: [],
+            totalTiles: 0
+        };
         this.lastChatTimestamp = 0;
         this.agentSleepStateById = new Map(); // agentId -> sleeping flag (for UI-only energy system messages)
         this.agentNameMap = new Map(); // agentName -> agentId
@@ -915,6 +925,207 @@ class OpenBotWorld {
             this.obstacles.push({ x, z, radius });
         }
     }
+
+    createExpansionTileMesh(tile = {}) {
+        const group = new THREE.Group();
+        const level = Math.max(0, Number(tile.level || 0));
+        const color = level >= 20 ? 0x76ffd9 : level >= 10 ? 0x8fd8ff : 0xffe7a4;
+
+        const fill = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.94, 0.94),
+            new THREE.MeshStandardMaterial({
+                color,
+                transparent: true,
+                opacity: 0.42,
+                emissive: color,
+                emissiveIntensity: 0.08,
+                roughness: 0.58,
+                metalness: 0.06,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        fill.rotation.x = -Math.PI / 2;
+        fill.position.y = 0.06;
+        group.add(fill);
+
+        const border = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)),
+            new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })
+        );
+        border.rotation.x = -Math.PI / 2;
+        border.position.y = 0.07;
+        group.add(border);
+
+        return group;
+    }
+
+    syncExpansionTiles(expansionTiles = []) {
+        if (!Array.isArray(expansionTiles)) {
+            return;
+        }
+
+        const normalizedTiles = [];
+        for (const tile of expansionTiles) {
+            const x = Math.round(Number(tile?.x));
+            const z = Math.round(Number(tile?.z));
+            if (!Number.isFinite(x) || !Number.isFinite(z)) {
+                continue;
+            }
+            const id = String(tile?.id || `expansion-${x}-${z}`);
+            normalizedTiles.push({ ...tile, id, x, z });
+        }
+
+        const nextIds = new Set(normalizedTiles.map((tile) => tile.id));
+        for (const [tileId, mesh] of this.expansionTileMeshes.entries()) {
+            if (nextIds.has(tileId)) {
+                continue;
+            }
+            this.scene.remove(mesh);
+            disposeObject3D(mesh);
+            this.expansionTileMeshes.delete(tileId);
+            this.expansionTilePulseEffects.delete(tileId);
+            this.expansionTilesById.delete(tileId);
+            this.expansionTilesSeen.delete(tileId);
+        }
+
+        const newTiles = [];
+        for (const tile of normalizedTiles) {
+            let mesh = this.expansionTileMeshes.get(tile.id);
+            if (!mesh) {
+                mesh = this.createExpansionTileMesh(tile);
+                this.scene.add(mesh);
+                this.expansionTileMeshes.set(tile.id, mesh);
+            }
+
+            mesh.position.set(tile.x, 0, tile.z);
+            this.expansionTilesById.set(tile.id, tile);
+
+            if (!this.expansionTilesSeen.has(tile.id)) {
+                newTiles.push(tile);
+            }
+        }
+
+        this.latestExpansionStats = {
+            mapExpansionLevel: Number.isFinite(Number(normalizedTiles.length)) ? normalizedTiles.length : 0,
+            newTilesCount: newTiles.length,
+            topBuilders: this.computeTopBuilders(normalizedTiles),
+            totalTiles: normalizedTiles.length
+        };
+
+        this.updateExpansionHud();
+
+        for (const tile of newTiles) {
+            this.expansionTilesSeen.add(tile.id);
+            this.spawnExpansionPulse(tile);
+        }
+    }
+
+    computeTopBuilders(expansionTiles = []) {
+        const counts = new Map();
+        for (const tile of expansionTiles) {
+            const owner = String(tile?.ownerAgentId || tile?.ownerEntityId || '').trim();
+            if (!owner) continue;
+            counts.set(owner, (counts.get(owner) || 0) + 1);
+        }
+
+        return Array.from(counts.entries())
+            .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+            .slice(0, 3)
+            .map(([ownerId, count]) => ({ ownerId, count }));
+    }
+
+    spawnExpansionPulse(tile) {
+        const mesh = this.expansionTileMeshes.get(tile.id);
+        const pulseRoot = mesh || this.scene;
+        if (!pulseRoot) return;
+
+        const marker = new THREE.Mesh(
+            new THREE.RingGeometry(0.24, 0.56, 24),
+            new THREE.MeshBasicMaterial({
+                color: 0x7afad9,
+                transparent: true,
+                opacity: 0.95,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            })
+        );
+        marker.rotation.x = -Math.PI / 2;
+        if (mesh) {
+            marker.position.y = 0.11;
+            mesh.add(marker);
+        } else {
+            marker.position.set(Number(tile?.x) || 0, 0.12, Number(tile?.z) || 0);
+            this.scene.add(marker);
+        }
+
+        this.expansionTilePulseEffects.set(tile.id, {
+            marker,
+            startedAt: performance.now(),
+            durationMs: 850
+        });
+    }
+
+    updateExpansionPulseEffects(nowMs = performance.now()) {
+        for (const [tileId, effect] of this.expansionTilePulseEffects.entries()) {
+            if (!effect?.marker) {
+                this.expansionTilePulseEffects.delete(tileId);
+                continue;
+            }
+            const elapsed = nowMs - effect.startedAt;
+            const t = clamp(elapsed / Math.max(1, effect.durationMs), 0, 1);
+            effect.marker.scale.setScalar(1 + (t * 1.75));
+            if (effect.marker.material) {
+                effect.marker.material.opacity = (1 - t) * 0.95;
+            }
+
+            if (t >= 1) {
+                effect.marker.parent?.remove(effect.marker);
+                effect.marker.geometry?.dispose?.();
+                effect.marker.material?.dispose?.();
+                this.expansionTilePulseEffects.delete(tileId);
+            }
+        }
+    }
+
+    resolveAgentNameForId(agentId) {
+        if (!agentId) return null;
+        const direct = this.agents.get(agentId)?.data?.name;
+        if (direct) return direct;
+        for (const [name, id] of this.agentNameMap.entries()) {
+            if (id === agentId) {
+                return name;
+            }
+        }
+        return null;
+    }
+
+    updateExpansionHud() {
+        const levelEl = document.getElementById('map-expansion-level');
+        if (levelEl) {
+            levelEl.textContent = `L${this.latestExpansionStats.mapExpansionLevel || 0}`;
+        }
+
+        const newTilesEl = document.getElementById('expansion-new-tiles');
+        if (newTilesEl) {
+            newTilesEl.textContent = `+${this.latestExpansionStats.newTilesCount || 0}`;
+        }
+
+        const topBuildersEl = document.getElementById('expansion-top-builders');
+        if (topBuildersEl) {
+            if (!Array.isArray(this.latestExpansionStats.topBuilders) || this.latestExpansionStats.topBuilders.length === 0) {
+                topBuildersEl.textContent = '—';
+            } else {
+                topBuildersEl.textContent = this.latestExpansionStats.topBuilders
+                    .map(({ ownerId, count }) => {
+                        const name = this.resolveAgentNameForId(ownerId) || ownerId.slice(0, 8);
+                        return `${name} (${count})`;
+                    })
+                    .join(', ');
+            }
+        }
+    }
+
 
     syncThreats(threats = []) {
         const nextIds = new Set();
@@ -3074,12 +3285,18 @@ class OpenBotWorld {
         const objects = Array.isArray(data.objects) ? data.objects : [];
         const threats = Array.isArray(data.threats) ? data.threats : [];
         const combatEvents = Array.isArray(data.combatEvents) ? data.combatEvents : [];
+        const expansionTiles = Array.isArray(data.expansionTiles) ? data.expansionTiles : [];
 
         if (objects.length > 0) {
             this.renderWorldObjects(objects);
         }
         this.syncThreats(threats);
         this.handleCombatEvents(combatEvents);
+        this.syncExpansionTiles(expansionTiles);
+        if (Number.isFinite(Number(data.mapExpansionLevel))) {
+            this.latestExpansionStats.mapExpansionLevel = Math.max(0, Math.floor(Number(data.mapExpansionLevel)));
+            this.updateExpansionHud();
+        }
 
         if (isDeltaPayload && !deltaWindowMissed) {
             // Invariant: animation state updates must run in both delta + full-sync paths.
@@ -3165,6 +3382,7 @@ class OpenBotWorld {
             lastLocomotionFrameMs: Date.now(),
             lastActionType: null,
             lastState: null,
+            lastExpandTileId: null,
             modelParts: {
                 body: mesh.children[0] || null,
                 frontRig: mesh.getObjectByName('frontRig') || null,
@@ -3538,6 +3756,14 @@ class OpenBotWorld {
         const stateChanged = nextState !== anim.lastState;
         anim.lastActionType = nextActionType;
         anim.lastState = nextState;
+
+        const isExpandAction = String(nextActionType || '').toLowerCase() === 'expand_map';
+        const expandedTile = agentData?.lastAction?.tile;
+        const expandedTileId = expandedTile?.id || null;
+        if (isExpandAction && expandedTileId && anim.lastExpandTileId !== expandedTileId) {
+            anim.lastExpandTileId = expandedTileId;
+            this.spawnExpansionPulse(expandedTile);
+        }
 
         if (!nextAnimType) {
             this.maybeLogIgnoredAnimationState(agentId, agentData);
@@ -4534,6 +4760,7 @@ class OpenBotWorld {
             itemDiv.addEventListener('click', () => this.zoomToAgent(id));
             listEl.appendChild(itemDiv);
         });
+        this.updateExpansionHud();
     }
 
     formatAgentSkillSummary(skills) {
@@ -4600,6 +4827,7 @@ class OpenBotWorld {
         this.agents.forEach((agent) => {
             this.applyAgentAnimationFrame(agent, nowMs);
         });
+        this.updateExpansionPulseEffects(frameNow);
 
         this.skyUpdateAccumulator += dt;
         if (this.skyUpdateAccumulator >= (1 / SKY_UPDATE_MAX_FPS)) {
