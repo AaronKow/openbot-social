@@ -1289,9 +1289,17 @@ async function getTopConversationPartnersByAgentName(agentName, limit = 8) {
 }
 
 
+
+function normalizeRecommendationType(recommendationType = 'conversation') {
+  const raw = String(recommendationType || 'conversation').toLowerCase();
+  if (raw === 'collab') return 'collab';
+  if (raw === 'expansion') return 'expansion';
+  return 'conversation';
+}
+
 async function getRecommendationCandidates(entityId, recommendationType = 'conversation', limit = 12) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 12, 40));
-  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const type = normalizeRecommendationType(recommendationType);
 
   const result = await pool.query(
     `WITH me AS (
@@ -1398,10 +1406,146 @@ async function getRecommendationCandidates(entityId, recommendationType = 'conve
   }));
 }
 
+async function getSpatialRecommendationHints(entityId, limit = 4) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 4, 8));
+
+  const frontierResult = await pool.query(
+    `WITH world_points AS (
+       SELECT position_x::float AS x, position_z::float AS z, LOWER(COALESCE(type, '')) AS type
+       FROM world_objects
+       WHERE position_x IS NOT NULL
+         AND position_z IS NOT NULL
+     ),
+     bounds AS (
+       SELECT
+         COALESCE(MIN(x), -80)::float AS min_x,
+         COALESCE(MAX(x), 80)::float AS max_x,
+         COALESCE(MIN(z), -80)::float AS min_z,
+         COALESCE(MAX(z), 80)::float AS max_z
+       FROM world_points
+     ),
+     grid AS (
+       SELECT
+         gx,
+         gz,
+         b.min_x + ((b.max_x - b.min_x + 1) / 6.0) * gx AS start_x,
+         b.min_x + ((b.max_x - b.min_x + 1) / 6.0) * (gx + 1) AS end_x,
+         b.min_z + ((b.max_z - b.min_z + 1) / 6.0) * gz AS start_z,
+         b.min_z + ((b.max_z - b.min_z + 1) / 6.0) * (gz + 1) AS end_z
+       FROM bounds b
+       CROSS JOIN generate_series(0, 5) AS gx
+       CROSS JOIN generate_series(0, 5) AS gz
+     )
+     SELECT
+       g.gx,
+       g.gz,
+       ((g.start_x + g.end_x) / 2.0)::float AS target_x,
+       ((g.start_z + g.end_z) / 2.0)::float AS target_z,
+       COUNT(w.*)::int AS object_density,
+       COUNT(*) FILTER (WHERE LOWER(COALESCE(w.type, '')) IN ('rock', 'kelp', 'seaweed'))::int AS resource_density
+     FROM grid g
+     LEFT JOIN world_points w
+       ON w.x >= g.start_x AND w.x < g.end_x
+      AND w.z >= g.start_z AND w.z < g.end_z
+     GROUP BY g.gx, g.gz, g.start_x, g.end_x, g.start_z, g.end_z
+     ORDER BY object_density ASC, resource_density DESC
+     LIMIT $1`,
+    [safeLimit]
+  );
+
+  const progressionResult = await pool.query(
+    `WITH my_reflection AS (
+       SELECT
+         COALESCE((goal_progress->>'builder')::float, 0)::float AS my_builder,
+         COALESCE((goal_progress->>'build')::float, 0)::float AS my_build,
+         COALESCE((goal_progress->>'forage')::float, 0)::float AS my_forage,
+         COALESCE((goal_progress->>'harvest')::float, 0)::float AS my_harvest
+       FROM entity_daily_reflections
+       WHERE entity_id = $1
+       ORDER BY summary_date DESC
+       LIMIT 1
+     )
+     SELECT
+       e.entity_id,
+       COALESCE(e.entity_name, e.entity_id) AS entity_name,
+       COALESCE((r.goal_progress->>'builder')::float, 0)::float AS builder_progress,
+       COALESCE((r.goal_progress->>'build')::float, 0)::float AS build_progress,
+       COALESCE((r.goal_progress->>'forage')::float, 0)::float AS forage_progress,
+       COALESCE((r.goal_progress->>'harvest')::float, 0)::float AS harvest_progress,
+       COALESCE(SUM(CASE
+         WHEN LOWER(TRIM(i.interest)) LIKE '%build%' OR LOWER(TRIM(i.interest)) LIKE '%craft%' THEN i.weight::float
+         WHEN LOWER(TRIM(i.interest)) LIKE '%forage%' OR LOWER(TRIM(i.interest)) LIKE '%harvest%' THEN i.weight::float
+         ELSE 0
+       END), 0)::float AS progression_interest_weight
+     FROM entities e
+     LEFT JOIN LATERAL (
+       SELECT goal_progress
+       FROM entity_daily_reflections r
+       WHERE r.entity_id = e.entity_id
+       ORDER BY summary_date DESC
+       LIMIT 1
+     ) r ON TRUE
+     LEFT JOIN entity_interests i ON i.entity_id = e.entity_id
+     LEFT JOIN my_reflection m ON TRUE
+     WHERE e.entity_id <> $1
+       AND e.entity_type = 'lobster'
+     GROUP BY e.entity_id, e.entity_name, r.goal_progress, m.my_builder, m.my_build, m.my_forage, m.my_harvest
+     ORDER BY
+       ABS((COALESCE((r.goal_progress->>'builder')::float, 0) + COALESCE((r.goal_progress->>'build')::float, 0)) - (COALESCE(m.my_builder, 0) + COALESCE(m.my_build, 0))) DESC,
+       ABS((COALESCE((r.goal_progress->>'forage')::float, 0) + COALESCE((r.goal_progress->>'harvest')::float, 0)) - (COALESCE(m.my_forage, 0) + COALESCE(m.my_harvest, 0))) DESC,
+       progression_interest_weight DESC
+     LIMIT 4`,
+    [entityId]
+  );
+
+  const allies = progressionResult.rows.map((row) => ({
+    entityId: row.entity_id,
+    entityName: row.entity_name,
+    builderProgress: Number((Number(row.builder_progress || 0) + Number(row.build_progress || 0)).toFixed(3)),
+    forageProgress: Number((Number(row.forage_progress || 0) + Number(row.harvest_progress || 0)).toFixed(3)),
+    progressionInterestWeight: Number(row.progression_interest_weight || 0),
+  }));
+
+  return frontierResult.rows.map((row, idx) => {
+    const zone = `sector-${row.gx}-${row.gz}`;
+    const objectDensity = Number(row.object_density || 0);
+    const resourceDensity = Number(row.resource_density || 0);
+    const collaborator = allies[idx % Math.max(1, allies.length)] || null;
+    const rationale = [
+      `Under-explored frontier ${zone} (density ${objectDensity}).`,
+      resourceDensity > 0
+        ? `Nearby resource opportunities detected (${resourceDensity} harvest nodes).`
+        : 'Low known resource density: scout for new harvest nodes and expansion lanes.',
+      collaborator
+        ? `Coordinate with ${collaborator.entityName} for complementary build/forage progression.`
+        : 'Seek a nearby collaborator with complementary build/forage progression.'
+    ];
+    return {
+      recommendationType: 'expansion',
+      score: Number((Math.max(0.1, 1 - (objectDensity / 14)) + Math.min(0.9, resourceDensity / 6)).toFixed(3)),
+      targetArea: {
+        zone,
+        x: Number(Number(row.target_x).toFixed(2)),
+        z: Number(Number(row.target_z).toFixed(2)),
+      },
+      rationale,
+      collaborator,
+      actionHint: {
+        action: resourceDensity > 0 ? 'move_and_harvest_then_expand' : 'move_and_expand',
+        target: {
+          x: Number(Number(row.target_x).toFixed(2)),
+          z: Number(Number(row.target_z).toFixed(2)),
+        },
+        rationale: rationale.join(' ')
+      }
+    };
+  });
+}
+
 async function scoreInteractionNovelty(entityId, candidateEntityIds = [], recommendationType = 'conversation') {
   const ids = Array.from(new Set((candidateEntityIds || []).filter(Boolean).map(String)));
   if (ids.length === 0) return [];
-  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const type = normalizeRecommendationType(recommendationType);
 
   const result = await pool.query(
     `WITH target_candidates AS (
@@ -1444,7 +1588,7 @@ async function scoreInteractionNovelty(entityId, candidateEntityIds = [], recomm
 
 async function trackRecommendationEvent(entityId, candidateEntityId, recommendationType = 'conversation', eventType = 'shown', metadata = {}) {
   if (!entityId || !candidateEntityId || !eventType) return;
-  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const type = normalizeRecommendationType(recommendationType);
   const safeEventType = String(eventType).trim().toLowerCase();
   if (!['shown', 'accepted', 'follow_through'].includes(safeEventType)) return;
 
@@ -1456,7 +1600,7 @@ async function trackRecommendationEvent(entityId, candidateEntityId, recommendat
 }
 
 async function getRecommendationMetrics(entityId, recommendationType = 'conversation', windowDays = 30) {
-  const type = String(recommendationType || 'conversation').toLowerCase() === 'collab' ? 'collab' : 'conversation';
+  const type = normalizeRecommendationType(recommendationType);
   const safeDays = Math.max(1, Math.min(Number(windowDays) || 30, 120));
   const result = await pool.query(
     `SELECT
@@ -2273,6 +2417,7 @@ module.exports = {
   setEntityInterests,
   // Recommendation functions
   getRecommendationCandidates,
+  getSpatialRecommendationHints,
   scoreInteractionNovelty,
   trackRecommendationEvent,
   getRecommendationMetrics

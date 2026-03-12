@@ -817,7 +817,7 @@ class AIAgent:
         self._load_news_file_cache()
         # Compressed summary of older conversation history (saves tokens)
         self._context_summary: str = ""
-        self._recommendations_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
+        self._recommendations_cache: Dict[str, Any] = {}
         self._quest_snapshot_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         self._quest_planning_context_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         # Cached system prompt — rebuilt when interests evolve
@@ -973,6 +973,15 @@ class AIAgent:
         centroid = frontier.get("centroid") if isinstance(frontier.get("centroid"), dict) else {}
         cx = float(centroid.get("x", perception.get("position", {}).get("x", 50.0)))
         cz = float(centroid.get("z", perception.get("position", {}).get("z", 50.0)))
+        expansion_guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
+        hint_target = expansion_guidance.get("target") if isinstance(expansion_guidance.get("target"), dict) else {}
+        try:
+            hint_x = float(hint_target.get("x"))
+            hint_z = float(hint_target.get("z"))
+            if prefer_expand:
+                cx, cz = hint_x, hint_z
+        except Exception:
+            pass
 
         nearest = perception.get("nearHarvestObject") if isinstance(perception.get("nearHarvestObject"), dict) else {}
         blocked = bool(perception.get("markers", {}).get("blocked_resource"))
@@ -1837,8 +1846,9 @@ class AIAgent:
     def _fetch_recommendations(self, rec_type: str = "conversation") -> List[Dict[str, Any]]:
         """Fetch recommendation candidates for targeted outreach, with lightweight cache."""
         now = time.time()
-        if (now - float(self._recommendations_cache.get("ts", 0.0))) < 25.0:
-            return list(self._recommendations_cache.get("data") or [])
+        cache = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
+        if isinstance(cache, dict) and (now - float(cache.get("ts", 0.0))) < 25.0:
+            return list(cache.get("data") or [])
         if not self.client or not self.entity_id:
             return []
 
@@ -1853,12 +1863,37 @@ class AIAgent:
             if resp.status_code == 200:
                 rows = resp.json().get("recommendations", [])
                 safe_rows = rows if isinstance(rows, list) else []
-                self._recommendations_cache = {"ts": now, "data": safe_rows[:6]}
-                return list(self._recommendations_cache["data"])
+                if not isinstance(self._recommendations_cache, dict):
+                    self._recommendations_cache = {}
+                self._recommendations_cache[rec_type] = {"ts": now, "data": safe_rows[:6]}
+                return list(self._recommendations_cache[rec_type]["data"])
         except Exception as exc:
             if self.debug:
                 print(f"[{self.entity_id}] recommendations fetch error: {exc}")
-        return list(self._recommendations_cache.get("data") or [])
+        fallback = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
+        return list((fallback or {}).get("data") or [])
+
+    def _derive_expansion_guidance(self, expansion_recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        hints = expansion_recommendations if isinstance(expansion_recommendations, list) else []
+        top = hints[0] if hints else {}
+        action_hint = top.get("actionHint") if isinstance(top.get("actionHint"), dict) else {}
+        target_area = top.get("targetArea") if isinstance(top.get("targetArea"), dict) else {}
+        target = action_hint.get("target") if isinstance(action_hint.get("target"), dict) else {}
+        x = target.get("x", target_area.get("x"))
+        z = target.get("z", target_area.get("z"))
+        try:
+            tx = float(x)
+            tz = float(z)
+        except Exception:
+            tx, tz = None, None
+        rationale = top.get("rationale") if isinstance(top.get("rationale"), list) else []
+        return {
+            "target": ({"x": tx, "z": tz} if tx is not None and tz is not None else None),
+            "zone": target_area.get("zone"),
+            "rationale": rationale[:3],
+            "action": action_hint.get("action"),
+            "score": float(top.get("score", 0.0) or 0.0),
+        }
 
     def perceive(self) -> Dict[str, Any]:
         self._maybe_fetch_news()
@@ -1887,6 +1922,8 @@ class AIAgent:
         frontier["current_sector"] = current_sector
         frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
         recommendations = self._fetch_recommendations("conversation")
+        expansion_recommendations = self._fetch_recommendations("expansion")
+        expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
         threat_items = []
         if nearest:
             threat_items.append(nearest)
@@ -1906,6 +1943,8 @@ class AIAgent:
             "progressionSignals": progression_signals,
             "frontier": frontier,
             "recommendations": recommendations,
+            "expansionRecommendations": expansion_recommendations,
+            "expansionGuidance": expansion_guidance,
         }
 
     def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
@@ -1929,6 +1968,14 @@ class AIAgent:
                     }
                     for rec in (perception.get("recommendations") or [])[:4]
                 ],
+                "expansion_hints": [
+                    {
+                        "target_area": rec.get("targetArea"),
+                        "action_hint": rec.get("actionHint"),
+                        "score": rec.get("score"),
+                    }
+                    for rec in (perception.get("expansionRecommendations") or [])[:3]
+                ],
             },
             "situational": {
                 "threats": perception.get("threats", []),
@@ -1936,6 +1983,7 @@ class AIAgent:
                 "world_tick": perception.get("worldTick"),
                 "progression_signals": perception.get("progressionSignals", {}),
                 "frontier": perception.get("frontier", {}),
+                "expansion_guidance": perception.get("expansionGuidance", {}),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),

@@ -3266,7 +3266,9 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
   try {
     const { entityId } = req.params;
     const typeRaw = String(req.query.type || 'conversation').toLowerCase();
-    const type = typeRaw === 'collab' ? 'collab' : 'conversation';
+    const type = typeRaw === 'collab'
+      ? 'collab'
+      : (typeRaw === 'expansion' ? 'expansion' : 'conversation');
 
     if (!entityId) {
       return res.status(400).json({ success: false, error: 'entityId is required' });
@@ -3280,17 +3282,23 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
       return res.json({ success: true, entityId, type, recommendations: [], metrics: {} });
     }
 
-    const wiki = await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
-      memoryEntity: getMemoryEntities()?.get(entityId) || null,
-      memoryInterests: app._memoryInterests?.get(entityId) || [],
-      memoryGoalSnapshot: app._memoryGoalSnapshots?.get(entityId) || null,
-      runtimeActionQueue: actionQueues.get(entityId) || null,
-      recommendationType: type,
-    });
+    const wiki = type !== 'expansion'
+      ? await buildEntityWikiPublic(entityId, worldState, dbAdapter, {
+        memoryEntity: getMemoryEntities()?.get(entityId) || null,
+        memoryInterests: app._memoryInterests?.get(entityId) || [],
+        memoryGoalSnapshot: app._memoryGoalSnapshots?.get(entityId) || null,
+        runtimeActionQueue: actionQueues.get(entityId) || null,
+        recommendationType: type,
+      })
+      : null;
 
-    const recommendations = Array.isArray(wiki?.social?.suggestedConnections)
-      ? wiki.social.suggestedConnections
-      : [];
+    const recommendations = type === 'expansion'
+      ? await (typeof db.getSpatialRecommendationHints === 'function'
+        ? db.getSpatialRecommendationHints(entityId, 6)
+        : Promise.resolve([]))
+      : (Array.isArray(wiki?.social?.suggestedConnections)
+        ? wiki.social.suggestedConnections
+        : []);
 
     await Promise.all(
       recommendations.slice(0, 6).map((candidate) => (
@@ -3324,7 +3332,9 @@ app.post('/entity/:entityId/recommendations/events', requireAuth, async (req, re
     const { entityId } = req.params;
     const candidateEntityId = String(req.body?.candidateEntityId || '').trim();
     const typeRaw = String(req.body?.type || 'conversation').toLowerCase();
-    const type = typeRaw === 'collab' ? 'collab' : 'conversation';
+    const type = typeRaw === 'collab'
+      ? 'collab'
+      : (typeRaw === 'expansion' ? 'expansion' : 'conversation');
     const eventType = String(req.body?.eventType || '').trim().toLowerCase();
 
     if (!entityId) return res.status(400).json({ success: false, error: 'entityId is required' });
