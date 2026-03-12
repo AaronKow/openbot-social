@@ -242,6 +242,31 @@
             font-size: 12px;
         }
 
+        #progress-panel {
+            position: absolute;
+            top: 250px;
+            right: 20px;
+            width: 320px;
+            max-height: 42vh;
+            overflow-y: auto;
+            background: rgba(0, 20, 40, 0.85);
+            color: #c7ffed;
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: auto;
+            border: 2px solid #2dc6ff;
+            z-index: 1300;
+            display: block;
+        }
+
+        .progress-quest-item {
+            margin-top: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 12px;
+        }
+
 
         #controls-content p {
             margin: 5px 0;
@@ -1559,12 +1584,23 @@
             <p class="hint-mobile">Two-finger drag: Pan view</p>
         </div>
     </div>
+
+    <div id="progress-panel" role="region" aria-label="Quest Progress">
+        <div class="panel-header">
+            <h2>📈 Progress</h2>
+            <button id="progress-close" class="panel-icon-btn" title="Close progress panel" aria-label="Close progress panel">×</button>
+        </div>
+        <div id="progress-content">
+            <p>Select a lobster and open <strong>Details</strong> to load active quests.</p>
+        </div>
+    </div>
     
     <nav id="sidebar" role="navigation" aria-label="Quick Actions">
         <button id="clawhub-btn" class="sidebar-btn" title="OpenClaw Integration Info" aria-label="OpenClaw Integration">🔧</button>
         <button id="sidebar-status-btn" class="sidebar-btn" title="Toggle Status Panel" aria-label="Toggle Status">📊</button>
         <button id="sidebar-chat-btn" class="sidebar-btn" title="Toggle Chat Panel" aria-label="Toggle Chat">💬</button>
         <button id="sidebar-controls-btn" class="sidebar-btn" title="Toggle Controls Panel" aria-label="Toggle Controls">🎮</button>
+        <button id="sidebar-progress-btn" class="sidebar-btn" title="Toggle Progress Panel" aria-label="Toggle Progress">📈</button>
     </nav>
     
     <footer id="github-footer">
