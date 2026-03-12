@@ -298,6 +298,46 @@ async function initDatabase() {
       )
     `);
 
+    // Earned badges derived from telemetry and seasonal systems
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_badges (
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        badge_key VARCHAR(128) NOT NULL,
+        awarded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        PRIMARY KEY (entity_id, badge_key)
+      )
+    `);
+
+    // Archived leaderboard snapshots by season
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS seasonal_leaderboard_snapshots (
+        season_id VARCHAR(32) NOT NULL,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        score INTEGER NOT NULL DEFAULT 0,
+        rank INTEGER NOT NULL,
+        computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (season_id, entity_id)
+      )
+    `);
+
+    // Single-row lock/state table for leaderboard check trigger
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS leaderboard_trigger_lock (
+        id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        is_running BOOLEAN DEFAULT FALSE,
+        last_computed_at TIMESTAMP,
+        last_season_id VARCHAR(32),
+        last_snapshot_at TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      INSERT INTO leaderboard_trigger_lock (id, is_running)
+      VALUES (1, FALSE)
+      ON CONFLICT (id) DO NOTHING
+    `);
+
     await client.query('COMMIT');
     console.log('Database bootstrap transaction completed');
 
@@ -382,6 +422,14 @@ const indexMigrations = [
   {
     name: 'idx_entity_quests_entity_status',
     query: 'CREATE INDEX IF NOT EXISTS idx_entity_quests_entity_status ON entity_quests(entity_id, status, started_at DESC)'
+  },
+  {
+    name: 'idx_entity_badges_awarded_at',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_badges_awarded_at ON entity_badges(awarded_at DESC)'
+  },
+  {
+    name: 'idx_seasonal_leaderboard_snapshots_lookup',
+    query: 'CREATE INDEX IF NOT EXISTS idx_seasonal_leaderboard_snapshots_lookup ON seasonal_leaderboard_snapshots(season_id, rank ASC, score DESC)'
   }
 ];
 
@@ -1640,6 +1688,299 @@ async function setEntityInterests(entityId, interests) {
   }
 }
 
+
+function computeUtcDateKeyFromMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  try {
+    return new Date(ms).toISOString().slice(0, 10);
+  } catch {
+    return null;
+  }
+}
+
+function computeActiveDayStreak(dayKeys) {
+  const keys = Array.isArray(dayKeys) ? dayKeys.filter(Boolean) : [];
+  if (!keys.length) return 0;
+  const unique = [...new Set(keys)].sort().reverse();
+  let streak = 0;
+  let prev = null;
+  for (const key of unique) {
+    const ts = Date.parse(`${key}T00:00:00.000Z`);
+    if (!Number.isFinite(ts)) continue;
+    if (prev === null) {
+      streak = 1;
+      prev = ts;
+      continue;
+    }
+    const diffDays = Math.round((prev - ts) / (24 * 60 * 60 * 1000));
+    if (diffDays === 1) {
+      streak += 1;
+      prev = ts;
+      continue;
+    }
+    break;
+  }
+  return streak;
+}
+
+async function getEntityAchievements(entityId) {
+  const entity = await getEntity(entityId);
+  if (!entity) return null;
+
+  const entityName = entity.entity_name || entity.entity_id;
+  const scanWindow = 2400;
+  const result = await pool.query(
+    `SELECT agent_name, message, timestamp
+     FROM chat_messages
+     ORDER BY timestamp DESC
+     LIMIT $1`,
+    [scanWindow]
+  );
+
+  let mentionsReceived = 0;
+  let mentionsSent = 0;
+  const relationshipSet = new Set();
+  const activeDayKeys = [];
+
+  for (const row of result.rows) {
+    const speaker = row.agent_name;
+    const message = row.message || '';
+    const ts = parseInt(row.timestamp, 10);
+
+    if (speaker === entityName) {
+      const mentions = parseMentionTargets(message);
+      if (mentions.length > 0) {
+        mentionsSent += mentions.length;
+        for (const target of mentions) {
+          if (target !== entityName) relationshipSet.add(target);
+        }
+      }
+      const dayKey = computeUtcDateKeyFromMs(ts);
+      if (dayKey) activeDayKeys.push(dayKey);
+    } else if (mentionMatchesName(message, entityName)) {
+      mentionsReceived += 1;
+      if (speaker && speaker !== entityName) relationshipSet.add(speaker);
+    }
+  }
+
+  const uniqueRelationships = relationshipSet.size;
+  const activeDays = new Set(activeDayKeys).size;
+  const activeStreakDays = computeActiveDayStreak(activeDayKeys);
+  const responseConsistency = mentionsReceived > 0
+    ? Math.min(1, mentionsSent / mentionsReceived)
+    : (mentionsSent > 0 ? 1 : 0);
+
+  const xp = Math.round(
+    responseConsistency * 120
+    + uniqueRelationships * 25
+    + activeDays * 14
+    + activeStreakDays * 30
+  );
+  const level = Math.max(1, Math.floor(xp / 120) + 1);
+
+  return {
+    entityId,
+    entityName,
+    level,
+    xp,
+    responseConsistency: Number(responseConsistency.toFixed(3)),
+    mentionsReplied: mentionsSent,
+    mentionsReceived,
+    uniqueRelationships,
+    activeDays,
+    activeStreakDays
+  };
+}
+
+async function awardEntityBadge(entityId, badgeKey, metadata = {}) {
+  const result = await pool.query(
+    `INSERT INTO entity_badges (entity_id, badge_key, metadata_json)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (entity_id, badge_key) DO UPDATE SET
+       metadata_json = EXCLUDED.metadata_json,
+       awarded_at = entity_badges.awarded_at
+     RETURNING entity_id, badge_key, awarded_at, metadata_json`,
+    [entityId, badgeKey, JSON.stringify(metadata || {})]
+  );
+  const row = result.rows[0];
+  return {
+    entityId: row.entity_id,
+    badgeKey: row.badge_key,
+    awardedAt: row.awarded_at,
+    metadata: row.metadata_json || {}
+  };
+}
+
+async function getEntityBadges(entityId) {
+  const result = await pool.query(
+    `SELECT badge_key, awarded_at, metadata_json
+     FROM entity_badges
+     WHERE entity_id = $1
+     ORDER BY awarded_at DESC, badge_key ASC`,
+    [entityId]
+  );
+  return result.rows.map(row => ({
+    badgeKey: row.badge_key,
+    awardedAt: row.awarded_at,
+    metadata: row.metadata_json || {}
+  }));
+}
+
+function deriveBadgeAwardsFromTelemetry(metrics) {
+  const awards = [];
+  if (!metrics || typeof metrics !== 'object') return awards;
+
+  if (metrics.mentionsReceived >= 5 && metrics.responseConsistency >= 0.8) {
+    awards.push({
+      badgeKey: 'response-consistency',
+      reason: 'Maintained strong mention reply consistency',
+      threshold: { mentionsReceivedMin: 5, responseConsistencyMin: 0.8 }
+    });
+  }
+
+  if (metrics.uniqueRelationships >= 8) {
+    awards.push({
+      badgeKey: 'social-breadth',
+      reason: 'Built a broad social graph with unique relationships',
+      threshold: { uniqueRelationshipsMin: 8 }
+    });
+  }
+
+  if (metrics.activeStreakDays >= 5) {
+    awards.push({
+      badgeKey: 'activity-streak',
+      reason: 'Maintained a multi-day activity streak',
+      threshold: { activeStreakDaysMin: 5 }
+    });
+  }
+
+  return awards;
+}
+
+async function evaluateAndAwardEntityBadges(entityId) {
+  const metrics = await getEntityAchievements(entityId);
+  if (!metrics) return null;
+  const derivedAwards = deriveBadgeAwardsFromTelemetry(metrics);
+
+  for (const award of derivedAwards) {
+    await awardEntityBadge(entityId, award.badgeKey, {
+      reason: award.reason,
+      threshold: award.threshold,
+      telemetry: {
+        responseConsistency: metrics.responseConsistency,
+        mentionsReceived: metrics.mentionsReceived,
+        uniqueRelationships: metrics.uniqueRelationships,
+        activeStreakDays: metrics.activeStreakDays,
+        evaluatedAt: new Date().toISOString()
+      }
+    });
+  }
+
+  const earnedBadges = await getEntityBadges(entityId);
+  return {
+    ...metrics,
+    earnedBadges,
+    derivedBadgeAwards: derivedAwards
+  };
+}
+
+async function getCurrentLeaderboard(limit = 25) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 25, 100));
+  const entities = await listEntities('lobster');
+  const rows = [];
+
+  for (const entity of entities) {
+    const metrics = await evaluateAndAwardEntityBadges(entity.entity_id);
+    if (!metrics) continue;
+    const score = Math.round(
+      metrics.xp
+      + (metrics.uniqueRelationships * 8)
+      + (metrics.activeStreakDays * 20)
+      + (metrics.responseConsistency * 60)
+    );
+
+    rows.push({
+      entityId: entity.entity_id,
+      entityName: entity.entity_name || entity.entity_id,
+      level: metrics.level,
+      xp: metrics.xp,
+      score,
+      activeStreakDays: metrics.activeStreakDays,
+      uniqueRelationships: metrics.uniqueRelationships,
+      responseConsistency: metrics.responseConsistency,
+      earnedBadges: metrics.earnedBadges
+    });
+  }
+
+  rows.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.level !== a.level) return b.level - a.level;
+    return String(a.entityName).localeCompare(String(b.entityName));
+  });
+
+  return rows.slice(0, safeLimit).map((row, idx) => ({
+    ...row,
+    rank: idx + 1
+  }));
+}
+
+async function saveSeasonalLeaderboardSnapshot(seasonId, leaderboard, computedAt = new Date()) {
+  if (!seasonId || !Array.isArray(leaderboard) || leaderboard.length === 0) {
+    return 0;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const row of leaderboard) {
+      await client.query(
+        `INSERT INTO seasonal_leaderboard_snapshots (season_id, entity_id, score, rank, computed_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (season_id, entity_id) DO UPDATE SET
+           score = EXCLUDED.score,
+           rank = EXCLUDED.rank,
+           computed_at = EXCLUDED.computed_at`,
+        [seasonId, row.entityId, Number(row.score) || 0, Number(row.rank) || 0, computedAt]
+      );
+    }
+    await client.query(
+      `UPDATE leaderboard_trigger_lock
+       SET last_snapshot_at = $1,
+           last_season_id = $2
+       WHERE id = 1`,
+      [computedAt, seasonId]
+    );
+    await client.query('COMMIT');
+    return leaderboard.length;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function acquireLeaderboardLock() {
+  const result = await pool.query(
+    `UPDATE leaderboard_trigger_lock
+     SET is_running = TRUE,
+         last_computed_at = NOW()
+     WHERE id = 1 AND is_running = FALSE
+     RETURNING id`
+  );
+  return result.rows.length > 0;
+}
+
+async function releaseLeaderboardLock() {
+  await pool.query(
+    `UPDATE leaderboard_trigger_lock
+     SET is_running = FALSE,
+         last_computed_at = NOW()
+     WHERE id = 1`
+  );
+}
+
+
 module.exports = {
   initDatabase,
   saveAgent,
@@ -1684,6 +2025,13 @@ module.exports = {
   getRecentChatMessagesByAgentName,
   getRecentEntityReflectionsPublic,
   getTopConversationPartnersByAgentName,
+  getEntityAchievements,
+  getEntityBadges,
+  evaluateAndAwardEntityBadges,
+  getCurrentLeaderboard,
+  saveSeasonalLeaderboardSnapshot,
+  acquireLeaderboardLock,
+  releaseLeaderboardLock,
   saveDailySummary,
   getActivitySummaries,
   hasSummaryForDate,
