@@ -98,6 +98,7 @@ Observation markers:
 🟡 … move closer → move_to_agent toward them so you can chat
 🔵 alone → explore + monologue about news/interests
 ⚠️ your recent msgs → say something COMPLETELY different than those
+🪨 BLOCKED BY RESOURCE … → if movement loops near rock/kelp/seaweed, prefer harvest to clear path
 ⬅ NEW <sender>: msg → they just said something, reply to them. Start with @TheirEntityID
 📣 TAGGED BY <sender> → they @mentioned you directly. You MUST reply with substantive content. Start with @TheirEntityID and answer their question or engage their point.
 REPLY TO: name → address them directly by name
@@ -884,7 +885,6 @@ class AIAgent:
         world_tick = int(perception.get("worldTick") or 0)
         position = perception.get("position") or {"x": 50.0, "z": 50.0}
         threats = perception.get("threats") or []
-        nearest_harvest = perception.get("nearHarvestObject")
         runtime = perception.get("survival") or self._shelter_runtime
         nearest = self._get_nearest_threat(position, threats)
         nearest_distance = nearest["distance"] if nearest else None
@@ -897,22 +897,6 @@ class AIAgent:
             explode_msg = "shelter collapsed - forced to fight!"
             if not any(a.get("type") == "chat" for a in sanitized):
                 sanitized.insert(0, {"type": "chat", "message": explode_msg})
-
-        has_move_intent = any(a.get("type") in ("move", "move_to_agent") for a in sanitized)
-        has_harvest_intent = any(a.get("type") == "harvest" for a in sanitized)
-        stuck_ticks = int(self._stuck_runtime.get("stuck_ticks", 0))
-        if (
-            has_move_intent
-            and not has_harvest_intent
-            and isinstance(nearest_harvest, dict)
-            and float(nearest_harvest.get("distance", 999.0)) <= 3.2
-            and stuck_ticks >= 2
-        ):
-            return [{
-                "type": "harvest",
-                "resource_type": str(nearest_harvest.get("type", "rock")),
-                "object_id": str(nearest_harvest.get("id", "")),
-            }] + sanitized
 
         if nearest and world_tick < int(runtime.get("forced_fight_until_tick") or 0):
             return [{"type": "move", "x": nearest["x"], "z": nearest["z"]}] + [a for a in sanitized if a.get("type") != "wait"]
@@ -1183,6 +1167,11 @@ class AIAgent:
             lines.append("🐙 no threat nearby")
         if nearest_object:
             lines.append(f"🪨 resource {nearest_object['type']} {nearest_object['distance']:.1f}u")
+            stuck_ticks = int(self._stuck_runtime.get("stuck_ticks", 0))
+            if nearest_object["distance"] <= 3.2 and stuck_ticks >= 2:
+                lines.append(
+                    f"🪨 BLOCKED BY RESOURCE {nearest_object['type']} id={nearest_object['id']} d={nearest_object['distance']:.1f} stuck={stuck_ticks}"
+                )
 
         rt = self._shelter_runtime
         if rt.get("has_shelter"):
@@ -1400,6 +1389,7 @@ class AIAgent:
             "interest_match": [],
             "mentions": [],
             "new_messages": [],
+            "blocked_resource": [],
         }
         for raw in observation.splitlines():
             line = raw.strip()
@@ -1413,6 +1403,8 @@ class AIAgent:
                 markers["mentions"].append(line)
             elif line.startswith("⬅ NEW"):
                 markers["new_messages"].append(line)
+            elif line.startswith("🪨 BLOCKED BY RESOURCE"):
+                markers["blocked_resource"].append(line)
         return markers
 
     def perceive(self) -> Dict[str, Any]:
@@ -1459,6 +1451,7 @@ class AIAgent:
             "episodic": {
                 "new_senders": perception.get("newSenders", [])[-4:],
                 "tagged_by": perception.get("taggedBy", [])[-4:],
+                "blocked_resource": perception.get("markers", {}).get("blocked_resource", [])[-2:],
                 "recent_reflections": recent_reflections,
             },
             "semantic": {
