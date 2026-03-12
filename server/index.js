@@ -1209,6 +1209,43 @@ function isSystemChatMessage(chatMessage) {
   return String(chatMessage?.agentName || '').toLowerCase() === 'system';
 }
 
+function parseMentionTargets(message) {
+  if (!message || typeof message !== 'string') return [];
+  const targets = new Set();
+  const regex = /@([a-zA-Z0-9_-]{3,64})/g;
+  let match;
+  while ((match = regex.exec(message)) !== null) {
+    targets.add(match[1]);
+  }
+  return [...targets];
+}
+
+function isReplyStyleMessage(message) {
+  if (!message || typeof message !== 'string') return false;
+  return /^\s*@([a-zA-Z0-9_-]{3,64})/.test(message);
+}
+
+async function updateQuestProgress(entityId, increments = {}) {
+  if (!process.env.DATABASE_URL || !entityId) return;
+  const hasIncrement = Object.values(increments).some(v => (Number(v) || 0) !== 0);
+  if (!hasIncrement) return;
+
+  const questProgressMap = {
+    'daily-social-chat': { chatSent: increments.chatSent || 0 },
+    'daily-explorer': { moveCount: increments.moveCount || 0 },
+    'daily-queue-operator': { queueActions: increments.queueActions || 0 },
+    'daily-mention-network': { mentionSent: increments.mentionSent || 0 }
+  };
+
+  for (const [questId, questIncrements] of Object.entries(questProgressMap)) {
+    try {
+      await db.incrementEntityQuestProgress(entityId, questId, questIncrements);
+    } catch (error) {
+      console.error('Failed quest progress update', { entityId, questId, error: error.message });
+    }
+  }
+}
+
 // Add chat message to history (keep last 100 messages)
 // Also saves conversation per-entity for full chat history
 async function addChatMessage(agentId, agentName, message, entityId, options = {}) {
@@ -1241,6 +1278,24 @@ async function addChatMessage(agentId, agentName, message, entityId, options = {
       }
     } catch (error) {
       console.error('Error saving chat message to database:', error);
+    }
+  }
+
+  if (entityId) {
+    const mentionTargets = parseMentionTargets(message);
+    const isReply = isReplyStyleMessage(message);
+    const senderIncrements = {
+      chatSent: 1,
+      mentionSent: mentionTargets.length,
+      replySent: isReply ? 1 : 0
+    };
+
+    updateQuestProgress(entityId, senderIncrements).catch(() => {});
+
+    for (const targetName of mentionTargets) {
+      const targetAgent = findAgentByName(targetName);
+      if (!targetAgent?.entityId || targetAgent.entityId === entityId) continue;
+      updateQuestProgress(targetAgent.entityId, { mentionReceived: 1 }).catch(() => {});
     }
   }
 }
@@ -1354,6 +1409,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     agent.state = 'moving';
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
+    updateQuestProgress(agent.entityId, { moveCount: 1 }).catch(() => {});
     
     res.json({ success: true });
   } catch (error) {
@@ -2019,6 +2075,7 @@ async function processActionQueues() {
     }
 
     applyQueueAction(agent, action);
+    updateQuestProgress(entityId, { queueActions: 1 }).catch(() => {});
     _entityWikiCache.delete(entityId);
     queue.executedActions.push({ type: action.type, tick: worldState.tick });
     queue.currentIndex += 1;
@@ -2053,6 +2110,119 @@ function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
   }
   return sanitized;
 }
+
+function calculateReflectionStreak(reflections) {
+  if (!Array.isArray(reflections) || reflections.length === 0) return 0;
+  const dates = reflections
+    .map(item => String(item?.date || '').slice(0, 10))
+    .filter(Boolean)
+    .sort((a, b) => b.localeCompare(a));
+  if (dates.length === 0) return 0;
+
+  let streak = 0;
+  let cursor = new Date(`${dates[0]}T00:00:00Z`);
+  for (const dateText of dates) {
+    const candidate = new Date(`${dateText}T00:00:00Z`);
+    if (candidate.getTime() === cursor.getTime()) {
+      streak += 1;
+      cursor = new Date(cursor.getTime() - (24 * 60 * 60 * 1000));
+      continue;
+    }
+    if (candidate.getTime() < cursor.getTime()) {
+      break;
+    }
+  }
+  return streak;
+}
+
+async function syncDynamicQuestSignals(entityId) {
+  if (!process.env.DATABASE_URL || !entityId) {
+    return { reflectionCount: 0, reflectionStreak: 0, shortTermGoalCount: 0 };
+  }
+
+  const reflections = await db.getEntityDailyReflections(entityId, 7);
+  const reflectionCount = reflections.length;
+  const reflectionStreak = calculateReflectionStreak(reflections);
+
+  const latestGoalSnapshot = await db.getLatestEntityGoalSnapshot(entityId);
+  const shortTermGoalCount = Array.isArray(latestGoalSnapshot?.shortTermGoals)
+    ? latestGoalSnapshot.shortTermGoals.length
+    : 0;
+
+  await db.ensureEntityQuest(entityId, 'dynamic-reflection-consistency', {
+    reflectionEntries: Math.max(reflectionCount, reflectionStreak)
+  });
+  await db.ensureEntityQuest(entityId, 'dynamic-goal-clarity', {
+    shortTermGoals: shortTermGoalCount
+  });
+  await db.setEntityQuestProgress(entityId, 'dynamic-reflection-consistency', {
+    reflectionEntries: Math.max(reflectionCount, reflectionStreak)
+  });
+  await db.setEntityQuestProgress(entityId, 'dynamic-goal-clarity', {
+    shortTermGoals: shortTermGoalCount
+  });
+
+  return { reflectionCount, reflectionStreak, shortTermGoalCount };
+}
+
+app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+
+    if (process.env.DATABASE_URL) {
+      await syncDynamicQuestSignals(entityId);
+      const summary = await db.getEntityQuestSummary(entityId);
+      return res.json({
+        success: true,
+        entityId,
+        ...summary,
+        counts: {
+          active: summary.active.length,
+          completed: summary.completed.length,
+          claimed: summary.claimed.length
+        }
+      });
+    }
+
+    return res.json({
+      success: true,
+      entityId,
+      active: [],
+      completed: [],
+      claimed: [],
+      counts: { active: 0, completed: 0, claimed: 0 }
+    });
+  } catch (error) {
+    console.error('Failed to load quest summary:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/entity/:entityId/quests/:questId/claim', requireAuth, async (req, res) => {
+  try {
+    const { entityId, questId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ success: false, error: 'Quest claims require database mode' });
+    }
+
+    const claimed = await db.claimEntityQuest(entityId, questId);
+    if (!claimed) {
+      return res.status(409).json({
+        success: false,
+        error: 'Quest is not claimable (must be completed and unclaimed)'
+      });
+    }
+
+    return res.json({ success: true, quest: claimed });
+  } catch (error) {
+    console.error('Failed to claim quest:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
 
 // ============= ACTION QUEUE ROUTES =============
 app.get('/entity/:entityId/action-queue', requireAuth, async (req, res) => {

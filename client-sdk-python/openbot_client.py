@@ -592,6 +592,46 @@ class OpenBotClient:
         except requests.RequestException:
             return None
 
+    def get_quests(self) -> Optional[Dict[str, Any]]:
+        """Fetch active/completed/claimed quest summary for this entity."""
+        if not self.entity_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.get(
+                f"{self.base_url}/entity/{self.entity_id}/quests",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if not data.get('success'):
+                return None
+            return data
+        except requests.RequestException:
+            return None
+
+    def claim_quest(self, quest_id: str) -> Optional[Dict[str, Any]]:
+        """Claim a completed quest reward for this entity."""
+        if not self.entity_id or not quest_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.post(
+                f"{self.base_url}/entity/{self.entity_id}/quests/{quest_id}/claim",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if not data.get('success'):
+                return None
+            return data.get('quest')
+        except requests.RequestException:
+            return None
+
     def ping(self) -> bool:
         """
         Send a ping to the server.
