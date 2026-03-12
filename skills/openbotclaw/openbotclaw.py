@@ -521,6 +521,13 @@ class OpenBotClawHub:
         self._seen_msg_keys: set = set()
         self._new_senders: List[str] = []
         self._tagged_by: List[str] = []
+        self._planner_state: Dict[str, Any] = {
+            "phase": "idle",
+            "missing": {"rock": 0, "kelp": 0, "seaweed": 0},
+            "queue": [],
+            "last_reason": "init",
+            "last_channel": "idle_fallback",
+        }
 
         # Entity authentication
         self.entity_id: Optional[str] = entity_id
@@ -1300,6 +1307,11 @@ class OpenBotClawHub:
         # Anti-repetition: show last 2 things WE said
         if self._recent_own_messages:
             lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
+        planner_phase = str(self._planner_state.get("phase", "idle"))
+        planner_reason = str(self._planner_state.get("last_reason", ""))
+        planner_missing = self._planner_state.get("missing") if isinstance(self._planner_state.get("missing"), dict) else {}
+        missing_summary = ",".join(f"{k}:{int(planner_missing.get(k, 0) or 0)}" for k in ("rock", "kelp", "seaweed"))
+        lines.append(f"🧠 planner phase={planner_phase} missing[{missing_summary}] {planner_reason}".strip())
 
         # Recent conversation (last 6 messages)
         recent = self.get_recent_conversation(60.0)
@@ -1360,6 +1372,120 @@ class OpenBotClawHub:
 
         return "\n".join(lines)
 
+    def build_expansion_planner(
+        self,
+        perception_packet: Dict[str, Any],
+        self_state: Optional[Dict[str, Any]] = None,
+        world_objects: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Build targeted expansion actions:
+        detect missing rock/kelp/seaweed -> queue move+harvest -> expand_map.
+        """
+        resources = ["rock", "kelp", "seaweed"]
+        state = self_state if isinstance(self_state, dict) else {}
+        inventory = state.get("inventory") if isinstance(state.get("inventory"), dict) else {}
+        packet_pos = perception_packet.get("position") if isinstance(perception_packet.get("position"), dict) else self.get_position()
+        world_tick = int((self._last_world_state or {}).get("tick", 0) or 0)
+        objects = world_objects if isinstance(world_objects, list) else list((self._last_world_state or {}).get("objects") or [])
+
+        required = {"rock": 1, "kelp": 1, "seaweed": 1}
+        missing = {r: max(0, required[r] - int(float(inventory.get(r, 0) or 0))) for r in resources}
+        queue: List[Dict[str, Any]] = []
+
+        cooldown_ticks = 0
+        cooldown_until = int(state.get("expandCooldownUntilTick", 0) or 0)
+        if cooldown_until > world_tick:
+            cooldown_ticks = cooldown_until - world_tick
+
+        phase = "ready_to_expand"
+        reason = "inventory_ready"
+        if sum(missing.values()) > 0:
+            phase = "gathering"
+            reason = "missing_inventory"
+            need_types = [r for r, miss in missing.items() if miss > 0]
+            px = float(packet_pos.get("x", 0.0))
+            pz = float(packet_pos.get("z", 0.0))
+            candidates: List[Tuple[float, Dict[str, Any]]] = []
+            for obj in objects:
+                otype = str(obj.get("type", "")).lower()
+                if otype not in need_types:
+                    continue
+                opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+                ox = float(opos.get("x", 0.0))
+                oz = float(opos.get("z", 0.0))
+                dist = math.sqrt((ox - px) ** 2 + (oz - pz) ** 2)
+                candidates.append((dist, obj))
+            candidates.sort(key=lambda row: row[0])
+            for _, obj in candidates[:2]:
+                otype = str(obj.get("type", "")).lower()
+                opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+                queue.append({"type": "move", "x": float(opos.get("x", px)), "z": float(opos.get("z", pz))})
+                harvest = {"type": "harvest", "resource_type": otype}
+                if obj.get("id"):
+                    harvest["object_id"] = str(obj.get("id"))
+                queue.append(harvest)
+        elif cooldown_ticks > 0:
+            phase = "cooldown"
+            reason = f"expand_cooldown_{cooldown_ticks}t"
+        else:
+            queue.append({"type": "expand_map", "x": float(packet_pos.get("x", 50.0)), "z": float(packet_pos.get("z", 50.0))})
+
+        planner = {
+            "phase": phase,
+            "missing": missing,
+            "queue": queue[:6],
+            "cooldownTicks": cooldown_ticks,
+            "last_reason": reason,
+            "ready": sum(missing.values()) == 0 and cooldown_ticks <= 0,
+        }
+        self._planner_state = planner
+        return planner
+
+    def arbitrate_goal_channels(
+        self,
+        perception_packet: Dict[str, Any],
+        social_actions: List[Dict[str, Any]],
+        planner: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Weighted arbitration channel: mentions > urgent chat > objective continuation > idle fallback.
+        """
+        plan_state = planner if isinstance(planner, dict) else self.build_expansion_planner(perception_packet)
+        markers = perception_packet.get("markers") if isinstance(perception_packet.get("markers"), dict) else {}
+        weights = {
+            "mentions": 4,
+            "urgent_chat": 3,
+            "objective_continuation": 2,
+            "idle_fallback": 1,
+        }
+        if markers.get("mentions"):
+            channel = "mentions"
+        elif markers.get("urgent_chat"):
+            channel = "urgent_chat"
+        elif plan_state.get("queue"):
+            channel = "objective_continuation"
+        else:
+            channel = "idle_fallback"
+
+        merged = [a for a in (social_actions or []) if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        planner_queue = [a for a in (plan_state.get("queue") or []) if isinstance(a, dict)]
+        if channel in {"mentions", "urgent_chat"}:
+            merged.extend(planner_queue[:1])
+        elif channel == "objective_continuation":
+            merged = planner_queue + merged[:2]
+        elif not merged:
+            merged = [{"type": "wait"}]
+
+        self._planner_state["last_channel"] = channel
+        self._planner_state["weights"] = weights
+        return {
+            "channel": channel,
+            "weights": weights,
+            "socialActions": merged[:16],
+            "planner": dict(self._planner_state),
+        }
+
     def _extract_observation_markers(self, observation: str) -> Dict[str, List[str]]:
         """
         Parse observation markers into structured buckets.
@@ -1397,7 +1523,7 @@ class OpenBotClawHub:
         """
         observation = self.build_observation(cached_news=cached_news)
         pos = self.get_position()
-        return {
+        packet = {
             "tick": self._tick_count,
             "timestamp": int(time.time() * 1000),
             "position": {"x": pos["x"], "y": pos.get("y", 0.0), "z": pos["z"]},
@@ -1407,6 +1533,8 @@ class OpenBotClawHub:
             "tagged_by": list(self._tagged_by),
             "interests": list(self._interests),
         }
+        packet["planner"] = self.build_expansion_planner(packet)
+        return packet
 
     def track_own_message(self, message: str) -> None:
         """
@@ -1926,6 +2054,10 @@ class OpenBotClawHub:
         agents = message.get("agents", [])
         
         with self._lock:
+            self._last_world_state = {
+                "tick": int(message.get("tick", 0) or 0),
+                "objects": list(message.get("objects", []) or []),
+            }
             self.registered_agents.clear()
             for agent in agents:
                 if agent.get("id") != self.agent_id:

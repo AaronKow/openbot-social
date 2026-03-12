@@ -865,6 +865,13 @@ class AIAgent:
             "stuck_ticks": 0,
         }
         self._sector_memory = SectorMemory(world_size=100, sector_size=10, recent_window=48)
+        self._planner_state: Dict[str, Any] = {
+            "phase": "idle",
+            "missing": {"rock": 0, "kelp": 0, "seaweed": 0},
+            "queue": [],
+            "last_reason": "init",
+            "last_channel": "idle_fallback",
+        }
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -1510,6 +1517,11 @@ class AIAgent:
         # Anti-repetition: show last 2 things WE said (compact)
         if self._recent_own_messages:
             lines.append("⚠️ " + " | ".join(self._recent_own_messages[-2:]))
+        planner_phase = str(self._planner_state.get("phase", "idle"))
+        planner_reason = str(self._planner_state.get("last_reason", ""))
+        planner_missing = self._planner_state.get("missing") if isinstance(self._planner_state.get("missing"), dict) else {}
+        missing_summary = ",".join(f"{k}:{int(planner_missing.get(k, 0) or 0)}" for k in ("rock", "kelp", "seaweed"))
+        lines.append(f"🧠 planner phase={planner_phase} missing[{missing_summary}] {planner_reason}".strip())
 
         # Recent conversation (last 6 messages so we catch new ones reliably)
         recent_window_secs = self._conversation_window_seconds()
@@ -1895,6 +1907,126 @@ class AIAgent:
             "score": float(top.get("score", 0.0) or 0.0),
         }
 
+    def _build_expansion_planner(self, perception: Dict[str, Any]) -> Dict[str, Any]:
+        resources = ["rock", "kelp", "seaweed"]
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        world_tick = int(perception.get("worldTick", 0) or 0)
+        objects_raw = self.client.get_world_objects() if self.client else []
+        objects = objects_raw if isinstance(objects_raw, list) else []
+        position = perception.get("position") if isinstance(perception.get("position"), dict) else {"x": 50.0, "z": 50.0}
+        guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
+        frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+
+        required = dict(MAP_EXPANSION_COST)
+        missing = {
+            r: max(0, int(required.get(r, 0) - int(float(inventory.get(r, 0) or 0))))
+            for r in resources
+        }
+        queue: List[Dict[str, Any]] = []
+
+        cooldown_ticks = 0
+        for key in ("expand_map", "expandMap", "mapExpand"):
+            value = self_state.get(key)
+            if isinstance(value, dict):
+                cooldown_ticks = max(cooldown_ticks, int(value.get("remainingTicks", 0) or 0))
+            elif isinstance(value, (int, float)):
+                cooldown_ticks = max(cooldown_ticks, int(value))
+        cooldown_until = int(self_state.get("expandCooldownUntilTick", 0) or 0)
+        if cooldown_until > world_tick:
+            cooldown_ticks = max(cooldown_ticks, cooldown_until - world_tick)
+
+        reason = "inventory_ready"
+        phase = "ready_to_expand"
+        if sum(missing.values()) > 0:
+            phase = "gathering"
+            reason = "missing_inventory"
+            need_types = [k for k, v in missing.items() if v > 0]
+            target_obj = None
+            best_dist = float("inf")
+            for obj in objects:
+                otype = str(obj.get("type", "")).lower()
+                if otype not in need_types:
+                    continue
+                opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+                dist = math.sqrt((float(opos.get("x", 0.0)) - float(position.get("x", 0.0))) ** 2 + (float(opos.get("z", 0.0)) - float(position.get("z", 0.0))) ** 2)
+                if dist < best_dist:
+                    best_dist = dist
+                    target_obj = obj
+            if target_obj:
+                tobj_pos = target_obj.get("position") if isinstance(target_obj.get("position"), dict) else {}
+                rtype = str(target_obj.get("type", "")).lower()
+                obj_id = str(target_obj.get("id", ""))
+                repeats = max(1, min(3, missing.get(rtype, 1)))
+                for _ in range(repeats):
+                    queue.append({
+                        "type": "move",
+                        "x": float(tobj_pos.get("x", position.get("x", 50.0))),
+                        "z": float(tobj_pos.get("z", position.get("z", 50.0))),
+                    })
+                    harvest = {"type": "harvest", "resource_type": rtype}
+                    if obj_id:
+                        harvest["object_id"] = obj_id
+                    queue.append(harvest)
+            else:
+                reason = "missing_inventory_no_target"
+                queue.extend(self._frontier_movement_action(perception, prefer_expand=True)[:1])
+        elif cooldown_ticks > 0:
+            phase = "cooldown"
+            reason = f"expand_cooldown_{cooldown_ticks}t"
+            queue.extend(self._frontier_movement_action(perception, prefer_expand=False)[:1])
+        else:
+            target = guidance.get("target") if isinstance(guidance.get("target"), dict) else None
+            if not target:
+                target = frontier.get("target_centroid") if isinstance(frontier.get("target_centroid"), dict) else None
+            if isinstance(target, dict) and target.get("x") is not None and target.get("z") is not None:
+                queue.append({"type": "move", "x": float(target.get("x")), "z": float(target.get("z"))})
+                queue.append({"type": "expand_map", "x": float(target.get("x")), "z": float(target.get("z"))})
+            else:
+                queue.append({"type": "expand_map"})
+
+        planner = {
+            "phase": phase,
+            "missing": missing,
+            "queue": queue[:6],
+            "last_reason": reason,
+            "cooldownTicks": cooldown_ticks,
+            "ready": sum(missing.values()) == 0 and cooldown_ticks <= 0,
+        }
+        self._planner_state = planner
+        return planner
+
+    def _arbitrate_goal_channels(self, perception: Dict[str, Any], social_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        planner = self._build_expansion_planner(perception)
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        weights = {
+            "mentions": 4,
+            "urgent_chat": 3,
+            "objective_continuation": 2,
+            "idle_fallback": 1,
+        }
+        channel = "idle_fallback"
+        if markers.get("mentions"):
+            channel = "mentions"
+        elif markers.get("urgent_chat"):
+            channel = "urgent_chat"
+        elif planner.get("queue"):
+            channel = "objective_continuation"
+
+        merged = [a for a in social_actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        planner_queue = [a for a in (planner.get("queue") or []) if isinstance(a, dict)]
+        if channel in {"mentions", "urgent_chat"}:
+            merged.extend(planner_queue[:1])
+        elif channel == "objective_continuation":
+            merged = planner_queue + merged[:2]
+        elif not merged:
+            merged = planner_queue[:1] if planner_queue else [{"type": "wait"}]
+
+        self._planner_state["last_channel"] = channel
+        self._planner_state["weights"] = weights
+        print(f"  🧠 planner channel={channel} reason={planner.get('last_reason')} missing={planner.get('missing')}")
+        return merged[:16]
+
     def perceive(self) -> Dict[str, Any]:
         self._maybe_fetch_news()
         observation = self._build_observation()
@@ -1945,6 +2077,7 @@ class AIAgent:
             "recommendations": recommendations,
             "expansionRecommendations": expansion_recommendations,
             "expansionGuidance": expansion_guidance,
+            "plannerState": dict(self._planner_state),
         }
 
     def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
@@ -2108,6 +2241,7 @@ class AIAgent:
         quest_priority = self._quest_priority_templates(perception, quest_context)
         actions = self._merge_quest_priorities(actions, quest_priority)
         actions = self._apply_survival_reflex(actions, perception)
+        actions = self._arbitrate_goal_channels(perception, actions)
 
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
         if perception.get("markers", {}).get("mentions"):
