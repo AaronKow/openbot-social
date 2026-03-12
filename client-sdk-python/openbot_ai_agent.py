@@ -193,6 +193,7 @@ INTEREST_EVOLVE_EVERY_N_TICKS = 50  # LLM evolution check interval
 
 # ── Shelter-survival runtime model (production agent side) ───────
 SHELTER_BUILD_COST = {"rock": 5, "kelp": 3, "seaweed": 4}
+MAP_EXPANSION_COST = {"rock": 1, "kelp": 1, "seaweed": 1}
 SHELTER_MAX_HP = 120.0
 SHELTER_PASSIVE_DECAY_PER_TICK = 0.06
 SHELTER_THREAT_DAMAGE_PER_TICK = 9.0
@@ -699,6 +700,7 @@ class AIAgent:
         # Compressed summary of older conversation history (saves tokens)
         self._context_summary: str = ""
         self._recommendations_cache: Dict[str, Any] = {"ts": 0.0, "data": []}
+        self._quest_snapshot_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         # Cached system prompt — rebuilt when interests evolve
         self._cached_system_prompt: Optional[str] = None
         self._cached_interests_key: Optional[str] = None  # hash of interests for cache invalidation
@@ -805,6 +807,143 @@ class AIAgent:
                     "distance": dist,
                 }
         return nearest
+
+    def _get_nearest_harvestable_resources(
+        self,
+        position: Dict[str, float],
+        objects: List[Dict[str, Any]],
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        px = float(position.get("x", 0.0))
+        pz = float(position.get("z", 0.0))
+        ranked: List[Dict[str, Any]] = []
+        for obj in objects:
+            obj_type = str(obj.get("type", "")).lower()
+            if obj_type not in {"rock", "kelp", "seaweed"}:
+                continue
+            opos = obj.get("position") or {}
+            ox = float(opos.get("x", 0.0))
+            oz = float(opos.get("z", 0.0))
+            ranked.append(
+                {
+                    "id": obj.get("id"),
+                    "type": obj_type,
+                    "x": ox,
+                    "z": oz,
+                    "distance": math.hypot(px - ox, pz - oz),
+                }
+            )
+        ranked.sort(key=lambda item: item["distance"])
+        return ranked[:max(1, limit)]
+
+    def _get_quest_progress_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        if (now - float(self._quest_snapshot_cache.get("ts", 0.0))) < 20.0:
+            return dict(self._quest_snapshot_cache.get("data") or {})
+        if not self.client:
+            return dict(self._quest_snapshot_cache.get("data") or {})
+
+        summary = self.client.get_quests()
+        if not isinstance(summary, dict):
+            return dict(self._quest_snapshot_cache.get("data") or {})
+
+        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+        active = summary.get("active") if isinstance(summary.get("active"), list) else []
+        active_items = []
+        for item in active[:3]:
+            if not isinstance(item, dict):
+                continue
+            target = item.get("target") if isinstance(item.get("target"), dict) else {}
+            progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+            metric_states = []
+            for key, raw_target in target.items():
+                if not isinstance(raw_target, (int, float)):
+                    continue
+                want = max(1.0, float(raw_target))
+                have = max(0.0, float(progress.get(key, 0) or 0))
+                metric_states.append(
+                    {
+                        "metric": key,
+                        "progress": round(have, 2),
+                        "target": round(want, 2),
+                        "ratio": round(min(1.0, have / want), 3),
+                    }
+                )
+            active_items.append(
+                {
+                    "questId": item.get("questId"),
+                    "title": item.get("title"),
+                    "category": item.get("category"),
+                    "status": item.get("status", "active"),
+                    "metrics": metric_states,
+                }
+            )
+
+        snapshot = {
+            "counts": {
+                "active": int(counts.get("active", len(active)) or 0),
+                "completed": int(counts.get("completed", len(summary.get("completed") or [])) or 0),
+                "claimed": int(counts.get("claimed", len(summary.get("claimed") or [])) or 0),
+            },
+            "active": active_items,
+        }
+        self._quest_snapshot_cache = {"ts": now, "data": snapshot}
+        return dict(snapshot)
+
+    def _build_progression_signals(
+        self,
+        position: Dict[str, float],
+        world_snapshot: Dict[str, Any],
+        objects: List[Dict[str, Any]],
+        self_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        inventory_toward_expansion = {}
+        met_count = 0
+        for key, needed in MAP_EXPANSION_COST.items():
+            have = max(0.0, float(inventory.get(key, 0) or 0))
+            target = max(1.0, float(needed))
+            met = have >= target
+            if met:
+                met_count += 1
+            inventory_toward_expansion[key] = {
+                "current": round(have, 2),
+                "required": round(target, 2),
+                "missing": round(max(0.0, target - have), 2),
+                "met": met,
+            }
+
+        expansion_tiles = world_snapshot.get("expansionTiles") if isinstance(world_snapshot.get("expansionTiles"), list) else []
+        recent_tiles = []
+        for tile in expansion_tiles[-5:]:
+            if not isinstance(tile, dict):
+                continue
+            recent_tiles.append(
+                {
+                    "id": tile.get("id"),
+                    "x": tile.get("x"),
+                    "z": tile.get("z"),
+                    "tick": tile.get("tick"),
+                    "ownerEntityId": tile.get("ownerEntityId"),
+                }
+            )
+
+        return {
+            "nearestHarvestableResources": self._get_nearest_harvestable_resources(position, objects, limit=3),
+            "inventoryTowardsExpansionCost": {
+                "required": dict(MAP_EXPANSION_COST),
+                "current": {k: int(float(inventory.get(k, 0) or 0)) for k in MAP_EXPANSION_COST.keys()},
+                "resourceStatus": inventory_toward_expansion,
+                "completionRatio": round(met_count / max(1, len(MAP_EXPANSION_COST)), 3),
+                "ready": met_count == len(MAP_EXPANSION_COST),
+            },
+            "mapExpansionProgress": {
+                "level": int(world_snapshot.get("mapExpansionLevel", 0) or 0),
+                "totalTiles": len(expansion_tiles),
+                "recentTilePlacements": recent_tiles,
+            },
+            "questProgressSnapshot": self._get_quest_progress_snapshot(),
+        }
 
     def _update_stuck_runtime(self, position: Dict[str, float]):
         sx = float(position.get("x", 0.0))
@@ -1456,7 +1595,9 @@ class AIAgent:
             threats=threats_raw if isinstance(threats_raw, list) else [],
         )
         nearest = self._get_nearest_threat(position, threats_raw if isinstance(threats_raw, list) else [])
-        nearest_harvest = self._get_nearest_harvestable_object(position, objects_raw if isinstance(objects_raw, list) else [])
+        objects = objects_raw if isinstance(objects_raw, list) else []
+        nearest_harvest = self._get_nearest_harvestable_object(position, objects)
+        progression_signals = self._build_progression_signals(position, world_snapshot, objects, self_state)
         recommendations = self._fetch_recommendations("conversation")
         threat_items = []
         if nearest:
@@ -1474,6 +1615,7 @@ class AIAgent:
             "nearHarvestObject": nearest_harvest,
             "selfState": self_state,
             "survival": survival,
+            "progressionSignals": progression_signals,
             "recommendations": recommendations,
         }
 
@@ -1503,6 +1645,7 @@ class AIAgent:
                 "threats": perception.get("threats", []),
                 "survival": perception.get("survival", {}),
                 "world_tick": perception.get("worldTick"),
+                "progression_signals": perception.get("progressionSignals", {}),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),
@@ -1521,6 +1664,10 @@ class AIAgent:
                 "stay responsive to mentions",
                 "adapt interests from social feedback",
                 "prioritize high-potential outreach candidates when initiating conversations",
+                "maintain harvest stock so expansion costs are reliably covered",
+                "expand the map consistently each day to increase frontier coverage",
+                "discover and claim new frontier tiles instead of idling in explored areas",
+                "progress and complete exploration-oriented quests with measurable milestones",
             ],
             "user_prompt": self.user_prompt or "",
         }
@@ -1617,12 +1764,54 @@ class AIAgent:
                 actions.append(act)
         if not actions:
             actions = [{"type": "wait"}]
+        actions = self._apply_progression_policy(actions, perception)
         actions = self._apply_survival_reflex(actions, perception)
 
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
         if perception.get("markers", {}).get("mentions"):
             confidence = max(confidence, 0.7)
         return {"actions": actions, "confidence": round(confidence, 2), "fallback": {"type": "wait"}}
+
+    def _apply_progression_policy(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        sanitized = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        if not sanitized:
+            sanitized = [{"type": "wait"}]
+
+        signals = perception.get("progressionSignals") if isinstance(perception.get("progressionSignals"), dict) else {}
+        inventory_state = signals.get("inventoryTowardsExpansionCost") if isinstance(signals.get("inventoryTowardsExpansionCost"), dict) else {}
+        quest_state = signals.get("questProgressSnapshot") if isinstance(signals.get("questProgressSnapshot"), dict) else {}
+        nearest_resources = signals.get("nearestHarvestableResources") if isinstance(signals.get("nearestHarvestableResources"), list) else []
+
+        expansion_ready = bool(inventory_state.get("ready"))
+        has_expand_action = any(a.get("type") == "expand_map" for a in sanitized)
+        has_harvest_action = any(a.get("type") == "harvest" for a in sanitized)
+
+        active_quests = quest_state.get("active") if isinstance(quest_state.get("active"), list) else []
+        has_unmet_quest_metric = any(
+            isinstance(item, dict)
+            and any((isinstance(metric, dict) and float(metric.get("ratio", 0.0) or 0.0) < 1.0) for metric in (item.get("metrics") or []))
+            for item in active_quests
+        )
+
+        force_expand = expansion_ready and has_unmet_quest_metric
+        if force_expand and not has_expand_action:
+            sanitized.insert(0, {"type": "expand_map"})
+        elif force_expand and has_expand_action:
+            sanitized.sort(key=lambda a: 0 if a.get("type") == "expand_map" else 1)
+
+        needs_harvest = (not expansion_ready) and bool(nearest_resources)
+        if needs_harvest and not has_harvest_action:
+            best = nearest_resources[0] if nearest_resources else {}
+            injected = {"type": "harvest"}
+            if isinstance(best, dict) and best.get("type"):
+                injected["resource_type"] = best.get("type")
+            if isinstance(best, dict) and best.get("id"):
+                injected["object_id"] = best.get("id")
+            sanitized.insert(0, injected)
+        elif needs_harvest and has_harvest_action:
+            sanitized.sort(key=lambda a: 0 if a.get("type") == "harvest" else 1)
+
+        return sanitized[:16]
 
     def _expand_actions_for_interval(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not actions:
