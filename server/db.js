@@ -264,6 +264,19 @@ async function initDatabase() {
       )
     `);
 
+    // Create entity_wishlists table for per-entity wishes and fulfillment tracking
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_wishlists (
+        id SERIAL PRIMARY KEY,
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        wish_text TEXT NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'current',
+        dream_context TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        fulfilled_at TIMESTAMP NULL
+      )
+    `);
+
     // Create entity_action_queues table for durable queued action execution
     await client.query(`
       CREATE TABLE IF NOT EXISTS entity_action_queues (
@@ -478,6 +491,10 @@ const indexMigrations = [
   {
     name: 'idx_entity_goal_snapshots_entity_generated',
     query: 'CREATE INDEX IF NOT EXISTS idx_entity_goal_snapshots_entity_generated ON entity_goal_snapshots(entity_id, generated_at DESC)'
+  },
+  {
+    name: 'idx_entity_wishlists_entity_status_created',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_wishlists_entity_status_created ON entity_wishlists(entity_id, status, created_at DESC)'
   },
   {
     name: 'idx_entity_action_queues_entity_created',
@@ -1981,6 +1998,115 @@ async function saveEntityGoalSnapshot(entityId, payload = {}) {
   );
 }
 
+async function saveEntityWishlist(entityId, payload = {}) {
+  const wishText = typeof payload.wishText === 'string' ? payload.wishText.trim() : '';
+  const status = typeof payload.status === 'string' && payload.status.trim()
+    ? payload.status.trim().slice(0, 24)
+    : 'current';
+  const dreamContext = typeof payload.dreamContext === 'string' ? payload.dreamContext.trim() : '';
+
+  const result = await pool.query(
+    `INSERT INTO entity_wishlists (entity_id, wish_text, status, dream_context)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, entity_id, wish_text, status, dream_context, created_at, fulfilled_at`,
+    [entityId, wishText, status, dreamContext]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    entityId: row.entity_id,
+    wishText: row.wish_text,
+    status: row.status,
+    dreamContext: row.dream_context || '',
+    createdAt: row.created_at,
+    fulfilledAt: row.fulfilled_at
+  };
+}
+
+async function getEntityWishlists({ entityId = null, status = null, limit = 50 } = {}) {
+  const clauses = [];
+  const values = [];
+
+  if (entityId) {
+    values.push(entityId);
+    clauses.push(`entity_id = $${values.length}`);
+  }
+
+  if (status) {
+    values.push(status);
+    clauses.push(`status = $${values.length}`);
+  }
+
+  values.push(limit);
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const result = await pool.query(
+    `SELECT id, entity_id, wish_text, status, dream_context, created_at, fulfilled_at
+     FROM entity_wishlists
+     ${whereSql}
+     ORDER BY created_at DESC
+     LIMIT $${values.length}`,
+    values
+  );
+
+  return result.rows.map(row => ({
+    id: row.id,
+    entityId: row.entity_id,
+    wishText: row.wish_text,
+    status: row.status,
+    dreamContext: row.dream_context || '',
+    createdAt: row.created_at,
+    fulfilledAt: row.fulfilled_at
+  }));
+}
+
+async function getEntityWishlistById(id) {
+  const result = await pool.query(
+    `SELECT id, entity_id, wish_text, status, dream_context, created_at, fulfilled_at
+     FROM entity_wishlists
+     WHERE id = $1
+     LIMIT 1`,
+    [id]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    entityId: row.entity_id,
+    wishText: row.wish_text,
+    status: row.status,
+    dreamContext: row.dream_context || '',
+    createdAt: row.created_at,
+    fulfilledAt: row.fulfilled_at
+  };
+}
+
+async function setEntityWishlistFulfilled(id, fulfilled) {
+  const safeFulfilled = !!fulfilled;
+  const result = await pool.query(
+    `UPDATE entity_wishlists
+     SET status = CASE WHEN $2 THEN 'fulfilled' ELSE 'current' END,
+         fulfilled_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE NULL END
+     WHERE id = $1
+     RETURNING id, entity_id, wish_text, status, dream_context, created_at, fulfilled_at`,
+    [id, safeFulfilled]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    entityId: row.entity_id,
+    wishText: row.wish_text,
+    status: row.status,
+    dreamContext: row.dream_context || '',
+    createdAt: row.created_at,
+    fulfilledAt: row.fulfilled_at
+  };
+}
+
 // Health check
 async function healthCheck() {
   try {
@@ -2769,6 +2895,10 @@ module.exports = {
   isSummaryLockActive,
   getLatestEntityGoalSnapshot,
   saveEntityGoalSnapshot,
+  saveEntityWishlist,
+  getEntityWishlists,
+  setEntityWishlistFulfilled,
+  getEntityWishlistById,
   // Action queue functions
   saveEntityActionQueue,
   getRecentEntityActionQueues,

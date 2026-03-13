@@ -84,7 +84,7 @@ function isNonPublicCorsPath(req) {
     if (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action') return true;
     if (/^\/agent\/[^/]+\/heartbeat$/.test(reqPath)) return true;
     if (reqPath.startsWith('/disconnect/')) return true;
-    if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|missions)(?:\/.*)?$/.test(reqPath)) return true;
+    if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|wishlists|missions)(?:\/.*)?$/.test(reqPath)) return true;
     return false;
   }
 
@@ -93,7 +93,7 @@ function isNonPublicCorsPath(req) {
   if (normalizedMethod === 'DELETE' && reqPath.startsWith('/disconnect/')) return true;
 
   if (
-    /^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|missions)(?:\/.*)?$/.test(reqPath)
+    /^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|wishlists|missions)(?:\/.*)?$/.test(reqPath)
   ) {
     return true;
   }
@@ -3639,6 +3639,22 @@ function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
   return sanitized;
 }
 
+function sanitizeWishlistPayload(payload = {}) {
+  const wishText = typeof payload.wishText === 'string' ? payload.wishText.trim().slice(0, 1200) : '';
+  const dreamContext = typeof payload.dreamContext === 'string' ? payload.dreamContext.trim().slice(0, 4000) : '';
+  const status = typeof payload.status === 'string' ? payload.status.trim().slice(0, 24) : 'current';
+
+  if (!wishText) {
+    return { error: 'wishText is required' };
+  }
+
+  return {
+    wishText,
+    dreamContext,
+    status: status || 'current'
+  };
+}
+
 function calculateReflectionStreak(reflections) {
   if (!Array.isArray(reflections) || reflections.length === 0) return 0;
   const dates = reflections
@@ -5621,6 +5637,133 @@ app.post('/entity/:entityId/goal-snapshots', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error saving entity goals snapshot:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+app.post('/entity/:entityId/wishlists', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only write your own wishlist items' });
+    }
+
+    const sanitized = sanitizeWishlistPayload(req.body || {});
+    if (sanitized.error) {
+      return res.status(400).json({ success: false, error: sanitized.error });
+    }
+
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ success: false, error: 'Wishlists require database mode' });
+    }
+
+    const item = await db.saveEntityWishlist(entityId, sanitized);
+    return res.json({ success: true, item });
+  } catch (error) {
+    console.error('Error creating entity wishlist item:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/entity/:entityId/wishlists', requireAuth, async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only read your own wishlist items' });
+    }
+
+    if (!process.env.DATABASE_URL) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const status = typeof req.query.status === 'string' && req.query.status.trim()
+      ? req.query.status.trim().slice(0, 24)
+      : null;
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 50;
+
+    const items = await db.getEntityWishlists({ entityId, status, limit });
+    return res.json({ success: true, items });
+  } catch (error) {
+    console.error('Error fetching entity wishlist items:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/wishlists', async (req, res) => {
+  try {
+    if (!process.env.DATABASE_URL) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const entityId = typeof req.query.entityId === 'string' && req.query.entityId.trim()
+      ? req.query.entityId.trim().slice(0, 255)
+      : null;
+    const status = typeof req.query.status === 'string' && req.query.status.trim()
+      ? req.query.status.trim().slice(0, 24)
+      : null;
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 100;
+
+    const items = await db.getEntityWishlists({ entityId, status, limit });
+    return res.json({ success: true, items });
+  } catch (error) {
+    console.error('Error fetching wishlists:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/wishlists/:id/fulfill', requireAuth, async (req, res) => {
+  try {
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ success: false, error: 'Wishlists require database mode' });
+    }
+
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid wishlist id' });
+    }
+
+    const existing = await db.getEntityWishlistById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Wishlist item not found' });
+    }
+    if (req.entityId !== existing.entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only fulfill your own wishlist items' });
+    }
+
+    const updated = await db.setEntityWishlistFulfilled(id, true);
+    return res.json({ success: true, item: updated });
+  } catch (error) {
+    console.error('Error fulfilling wishlist item:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/wishlists/:id/revert', requireAuth, async (req, res) => {
+  try {
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ success: false, error: 'Wishlists require database mode' });
+    }
+
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid wishlist id' });
+    }
+
+    const existing = await db.getEntityWishlistById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Wishlist item not found' });
+    }
+    if (req.entityId !== existing.entityId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: can only revert your own wishlist items' });
+    }
+
+    const updated = await db.setEntityWishlistFulfilled(id, false);
+    return res.json({ success: true, item: updated });
+  } catch (error) {
+    console.error('Error reverting wishlist item:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
