@@ -860,6 +860,9 @@ class AIAgent:
         # Compatibility guard: if production server does not expose goal-snapshots yet,
         # disable further attempts after the first 404/405 to avoid noisy logs.
         self._goal_snapshot_sync_supported: bool = True
+        # Compatibility guard: if production server does not expose wishlists yet,
+        # disable further attempts after the first 404/405 to avoid noisy logs.
+        self._wishlist_sync_supported: bool = True
         self._cognitive_loop = CognitiveLoop(self)
         self._pending_plan_actions: List[Dict[str, Any]] = []
         self._next_action_step_at = 0.0
@@ -3516,6 +3519,7 @@ class AIAgent:
             f"Latest learning: {note}."
         )
         goals_payload = self._build_goal_snapshot_payload(prev_day, rollup)
+        wishlist_payload = self._build_wishlist_payload(prev_day, rollup)
 
         try:
             auth_h = self.entity_manager.get_auth_header(self.entity_id)
@@ -3544,8 +3548,21 @@ class AIAgent:
                     print(f"[{self.entity_id}] ℹ️ goal snapshot endpoint unavailable ({goal_resp.status_code}); disabling future sync attempts")
                 elif goal_resp.status_code != 200:
                     print(f"[{self.entity_id}] ⚠️ goal snapshot sync failed: {goal_resp.status_code} {goal_resp.text[:200]}")
+
+            if self._wishlist_sync_supported:
+                wishlist_resp = self.client.session.post(
+                    f"{self.server_url}/entity/{self.entity_id}/wishlists",
+                    headers={**auth_h, "Content-Type": "application/json"},
+                    json=wishlist_payload,
+                    timeout=10,
+                )
+                if wishlist_resp.status_code in (404, 405):
+                    self._wishlist_sync_supported = False
+                    print(f"[{self.entity_id}] ℹ️ wishlist endpoint unavailable ({wishlist_resp.status_code}); disabling future sync attempts")
+                elif wishlist_resp.status_code != 200:
+                    print(f"[{self.entity_id}] ⚠️ wishlist sync failed: {wishlist_resp.status_code} {wishlist_resp.text[:200]}")
         except Exception as exc:
-            print(f"[{self.entity_id}] ⚠️ reflection/goal sync error: {exc}")
+            print(f"[{self.entity_id}] ⚠️ reflection/goal/wishlist sync error: {exc}")
 
     def _build_goal_snapshot_payload(self, day_str: str, rollup: Dict[str, Any]) -> Dict[str, Any]:
         profile = self.identity_profile()
@@ -3599,6 +3616,48 @@ class AIAgent:
         return {
             "longTermGoals": long_term_goals[:4],
             "shortTermGoals": short_term_goals[:4],
+            "source": "entity-agent-v1",
+            "model": self.model,
+        }
+
+    def _build_wishlist_payload(self, day_str: str, rollup: Dict[str, Any]) -> Dict[str, Any]:
+        interests = [i.strip() for i in (self._interests or []) if isinstance(i, str) and i.strip()]
+        latest_note = str((rollup.get("notes") or ["steady activity"])[-1]).strip()
+        mission_id = self._mission_membership.get("missionId")
+        mission_phrase = (
+            f"support mission {str(mission_id)[:40]}"
+            if mission_id
+            else "help the crew make steady progress"
+        )
+
+        wishes: List[str] = []
+        if interests:
+            wishes.append(f"I wish to spark one lively chat about {interests[0][:60]}.")
+        wishes.append(f"I wish to {mission_phrase} today.")
+        if latest_note:
+            wishes.append(f"I wish to apply this lesson: {latest_note[:90]}.")
+
+        bounded_wishes: List[str] = []
+        for wish in wishes:
+            cleaned = " ".join(str(wish).split()).strip()
+            if cleaned:
+                bounded_wishes.append(cleaned[:220])
+            if len(bounded_wishes) >= 3:
+                break
+        if not bounded_wishes:
+            bounded_wishes = ["I wish to keep the social energy positive and useful."]
+
+        dream_context_parts = [f"Date: {day_str}"]
+        if interests:
+            dream_context_parts.append(f"Interests: {', '.join(interests[:3])[:140]}")
+        if mission_id:
+            dream_context_parts.append(f"Mission: {str(mission_id)[:60]}")
+        if latest_note:
+            dream_context_parts.append(f"Latest note: {latest_note[:140]}")
+
+        return {
+            "wishes": bounded_wishes[:3],
+            "dreamContext": " | ".join(dream_context_parts)[:500],
             "source": "entity-agent-v1",
             "model": self.model,
         }
