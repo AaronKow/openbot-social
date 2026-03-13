@@ -296,10 +296,30 @@ async function initDatabase() {
         queue_failed INTEGER NOT NULL DEFAULT 0,
         queue_expired INTEGER NOT NULL DEFAULT 0,
         queue_cancelled INTEGER NOT NULL DEFAULT 0,
+        unique_grid_cells_visited INTEGER NOT NULL DEFAULT 0,
+        distance_traveled NUMERIC(12,3) NOT NULL DEFAULT 0,
+        harvest_count INTEGER NOT NULL DEFAULT 0,
+        expansion_count INTEGER NOT NULL DEFAULT 0,
+        threat_interactions INTEGER NOT NULL DEFAULT 0,
+        social_only_actions INTEGER NOT NULL DEFAULT 0,
+        chat_without_displacement INTEGER NOT NULL DEFAULT 0,
         queue_failure_reasons JSONB NOT NULL DEFAULT '{}'::jsonb,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (entity_id, stat_date)
       )
+    `);
+
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS unique_grid_cells_visited INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS distance_traveled NUMERIC(12,3) NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS harvest_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS expansion_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS threat_interactions INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS social_only_actions INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE entity_runtime_daily_stats ADD COLUMN IF NOT EXISTS chat_without_displacement INTEGER NOT NULL DEFAULT 0;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$
     `);
 
     // Quest catalog (global quest definitions)
@@ -2044,9 +2064,11 @@ async function upsertEntityRuntimeDailyStats(entityId, statDate, metrics = {}) {
     `INSERT INTO entity_runtime_daily_stats (
        entity_id, stat_date, ticks_total, idle_ticks, social_actions, objective_actions,
        unique_sectors, expansion_tiles_placed, queue_completed, queue_failed, queue_expired,
-       queue_cancelled, queue_failure_reasons, updated_at
+       queue_cancelled, unique_grid_cells_visited, distance_traveled, harvest_count,
+       expansion_count, threat_interactions, social_only_actions, chat_without_displacement,
+       queue_failure_reasons, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
      ON CONFLICT (entity_id, stat_date) DO UPDATE SET
        ticks_total = GREATEST(entity_runtime_daily_stats.ticks_total, EXCLUDED.ticks_total),
        idle_ticks = GREATEST(entity_runtime_daily_stats.idle_ticks, EXCLUDED.idle_ticks),
@@ -2058,6 +2080,13 @@ async function upsertEntityRuntimeDailyStats(entityId, statDate, metrics = {}) {
        queue_failed = GREATEST(entity_runtime_daily_stats.queue_failed, EXCLUDED.queue_failed),
        queue_expired = GREATEST(entity_runtime_daily_stats.queue_expired, EXCLUDED.queue_expired),
        queue_cancelled = GREATEST(entity_runtime_daily_stats.queue_cancelled, EXCLUDED.queue_cancelled),
+       unique_grid_cells_visited = GREATEST(entity_runtime_daily_stats.unique_grid_cells_visited, EXCLUDED.unique_grid_cells_visited),
+       distance_traveled = GREATEST(entity_runtime_daily_stats.distance_traveled, EXCLUDED.distance_traveled),
+       harvest_count = GREATEST(entity_runtime_daily_stats.harvest_count, EXCLUDED.harvest_count),
+       expansion_count = GREATEST(entity_runtime_daily_stats.expansion_count, EXCLUDED.expansion_count),
+       threat_interactions = GREATEST(entity_runtime_daily_stats.threat_interactions, EXCLUDED.threat_interactions),
+       social_only_actions = GREATEST(entity_runtime_daily_stats.social_only_actions, EXCLUDED.social_only_actions),
+       chat_without_displacement = GREATEST(entity_runtime_daily_stats.chat_without_displacement, EXCLUDED.chat_without_displacement),
        queue_failure_reasons = (
          SELECT jsonb_object_agg(key, value)
          FROM (
@@ -2084,6 +2113,13 @@ async function upsertEntityRuntimeDailyStats(entityId, statDate, metrics = {}) {
       Number(metrics.queueFailed || 0),
       Number(metrics.queueExpired || 0),
       Number(metrics.queueCancelled || 0),
+      Number(metrics.uniqueGridCellsVisited || 0),
+      Number(metrics.distanceTraveled || 0),
+      Number(metrics.harvestCount || 0),
+      Number(metrics.expansionCount || 0),
+      Number(metrics.threatInteractions || 0),
+      Number(metrics.socialOnlyActions || 0),
+      Number(metrics.chatWithoutDisplacement || 0),
       JSON.stringify(failureReasons)
     ]
   );
@@ -2103,7 +2139,14 @@ async function getEntityRuntimeDailyStat(entityId, days = 1) {
          SUM(queue_completed)::int AS queue_completed,
          SUM(queue_failed)::int AS queue_failed,
          SUM(queue_expired)::int AS queue_expired,
-         SUM(queue_cancelled)::int AS queue_cancelled
+         SUM(queue_cancelled)::int AS queue_cancelled,
+         SUM(unique_grid_cells_visited)::int AS unique_grid_cells_visited,
+         SUM(distance_traveled)::float AS distance_traveled,
+         SUM(harvest_count)::int AS harvest_count,
+         SUM(expansion_count)::int AS expansion_count,
+         SUM(threat_interactions)::int AS threat_interactions,
+         SUM(social_only_actions)::int AS social_only_actions,
+         SUM(chat_without_displacement)::int AS chat_without_displacement
        FROM entity_runtime_daily_stats
        WHERE entity_id = $1
          AND stat_date >= (CURRENT_DATE - ($2::int - 1))
@@ -2134,6 +2177,13 @@ async function getEntityRuntimeDailyStat(entityId, days = 1) {
     queueFailed: Number(row.queue_failed || 0),
     queueExpired: Number(row.queue_expired || 0),
     queueCancelled: Number(row.queue_cancelled || 0),
+    uniqueGridCellsVisited: Number(row.unique_grid_cells_visited || 0),
+    distanceTraveled: Number(row.distance_traveled || 0),
+    harvestCount: Number(row.harvest_count || 0),
+    expansionCount: Number(row.expansion_count || 0),
+    threatInteractions: Number(row.threat_interactions || 0),
+    socialOnlyActions: Number(row.social_only_actions || 0),
+    chatWithoutDisplacement: Number(row.chat_without_displacement || 0),
     queueFailureReasons: row.queue_failure_reasons || {}
   };
 }
@@ -2154,7 +2204,14 @@ async function getEntityTelemetryAggregate(days = 7, limit = 100) {
               SUM(queue_completed)::int AS queue_completed,
               SUM(queue_failed)::int AS queue_failed,
               SUM(queue_expired)::int AS queue_expired,
-              SUM(queue_cancelled)::int AS queue_cancelled
+              SUM(queue_cancelled)::int AS queue_cancelled,
+              SUM(unique_grid_cells_visited)::int AS unique_grid_cells_visited,
+              SUM(distance_traveled)::float AS distance_traveled,
+              SUM(harvest_count)::int AS harvest_count,
+              SUM(expansion_count)::int AS expansion_count,
+              SUM(threat_interactions)::int AS threat_interactions,
+              SUM(social_only_actions)::int AS social_only_actions,
+              SUM(chat_without_displacement)::int AS chat_without_displacement
        FROM entity_runtime_daily_stats
        WHERE stat_date >= (CURRENT_DATE - ($1::int - 1))
        GROUP BY entity_id
@@ -2182,6 +2239,13 @@ async function getEntityTelemetryAggregate(days = 7, limit = 100) {
             b.queue_failed,
             b.queue_expired,
             b.queue_cancelled,
+            b.unique_grid_cells_visited,
+            b.distance_traveled,
+            b.harvest_count,
+            b.expansion_count,
+            b.threat_interactions,
+            b.social_only_actions,
+            b.chat_without_displacement,
             COALESCE(rj.queue_failure_reasons, '{}'::jsonb) AS queue_failure_reasons
      FROM base b
      LEFT JOIN reason_json rj ON rj.entity_id = b.entity_id
@@ -2202,10 +2266,83 @@ async function getEntityTelemetryAggregate(days = 7, limit = 100) {
     queueFailed: Number(row.queue_failed || 0),
     queueExpired: Number(row.queue_expired || 0),
     queueCancelled: Number(row.queue_cancelled || 0),
+    uniqueGridCellsVisited: Number(row.unique_grid_cells_visited || 0),
+    distanceTraveled: Number(row.distance_traveled || 0),
+    harvestCount: Number(row.harvest_count || 0),
+    expansionCount: Number(row.expansion_count || 0),
+    threatInteractions: Number(row.threat_interactions || 0),
+    socialOnlyActions: Number(row.social_only_actions || 0),
+    chatWithoutDisplacement: Number(row.chat_without_displacement || 0),
     queueFailureReasons: row.queue_failure_reasons || {}
   }));
 }
 
+async function getEntityBehaviorMetricsByDay(entityId, days = 7) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const result = await pool.query(
+    `SELECT
+       stat_date,
+       unique_grid_cells_visited,
+       distance_traveled::float AS distance_traveled,
+       harvest_count,
+       expansion_count,
+       threat_interactions,
+       social_actions,
+       objective_actions,
+       social_only_actions,
+       chat_without_displacement
+     FROM entity_runtime_daily_stats
+     WHERE entity_id = $1
+       AND stat_date >= (CURRENT_DATE - ($2::int - 1))
+     ORDER BY stat_date ASC`,
+    [entityId, safeDays]
+  );
+
+  return result.rows.map((row) => ({
+    date: row.stat_date,
+    uniqueGridCellsVisited: Number(row.unique_grid_cells_visited || 0),
+    distanceTraveled: Number(row.distance_traveled || 0),
+    harvestCount: Number(row.harvest_count || 0),
+    expansionCount: Number(row.expansion_count || 0),
+    threatInteractions: Number(row.threat_interactions || 0),
+    socialOnlyActionRatio: Number((Number(row.social_only_actions || 0) / Math.max(1, Number(row.social_actions || 0) + Number(row.objective_actions || 0))).toFixed(4)),
+    idleChatRatio: Number((Number(row.chat_without_displacement || 0) / Math.max(1, Number(row.social_actions || 0))).toFixed(4))
+  }));
+}
+
+
+async function getWorldBehaviorMetricsByDay(days = 7) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const result = await pool.query(
+    `SELECT
+       stat_date,
+       SUM(unique_grid_cells_visited)::int AS unique_grid_cells_visited,
+       SUM(distance_traveled)::float AS distance_traveled,
+       SUM(harvest_count)::int AS harvest_count,
+       SUM(expansion_count)::int AS expansion_count,
+       SUM(threat_interactions)::int AS threat_interactions,
+       SUM(social_actions)::int AS social_actions,
+       SUM(objective_actions)::int AS objective_actions,
+       SUM(social_only_actions)::int AS social_only_actions,
+       SUM(chat_without_displacement)::int AS chat_without_displacement
+     FROM entity_runtime_daily_stats
+     WHERE stat_date >= (CURRENT_DATE - ($1::int - 1))
+     GROUP BY stat_date
+     ORDER BY stat_date ASC`,
+    [safeDays]
+  );
+
+  return result.rows.map((row) => ({
+    date: row.stat_date,
+    uniqueGridCellsVisited: Number(row.unique_grid_cells_visited || 0),
+    distanceTraveled: Number(row.distance_traveled || 0),
+    harvestCount: Number(row.harvest_count || 0),
+    expansionCount: Number(row.expansion_count || 0),
+    threatInteractions: Number(row.threat_interactions || 0),
+    socialOnlyActionRatio: Number((Number(row.social_only_actions || 0) / Math.max(1, Number(row.social_actions || 0) + Number(row.objective_actions || 0))).toFixed(4)),
+    idleChatRatio: Number((Number(row.chat_without_displacement || 0) / Math.max(1, Number(row.social_actions || 0))).toFixed(4))
+  }));
+}
 async function getEntityInterests(entityId) {
   const result = await pool.query(
     `SELECT interest, weight::float FROM entity_interests
@@ -2638,6 +2775,8 @@ module.exports = {
   upsertEntityRuntimeDailyStats,
   getEntityRuntimeDailyStat,
   getEntityTelemetryAggregate,
+  getEntityBehaviorMetricsByDay,
+  getWorldBehaviorMetricsByDay,
   ensureEntityQuest,
   incrementEntityQuestProgress,
   setEntityQuestProgress,

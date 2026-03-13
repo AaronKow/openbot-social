@@ -1088,6 +1088,7 @@ function processLobsterCombatAgainstThreats(dtSeconds) {
     };
     trainAgentSkill(agent, 'defend');
     noteRuntimeAction(agent.entityId, 'combat');
+    noteRuntimeCounter(agent.entityId, 'threatInteractions', 1);
     markAgentUpdated(agent);
 
     pushCombatEvent({
@@ -1871,6 +1872,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
       agent.position = clampMovement(agent.position, position);
       updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
       pushEntityRecentPosition(agent.entityId, agent.position);
+      noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
     }
     if (rotation !== undefined) {
       agent.rotation = Number(rotation) || 0;
@@ -1945,6 +1947,9 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
     noteRuntimeAction(agent.entityId, 'chat');
+    if (getRecentDisplacement(agent.entityId, 3) < 0.05) {
+      noteRuntimeCounter(agent.entityId, 'chatWithoutDisplacement', 1);
+    }
     
     res.json({ success: true });
   } catch (error) {
@@ -2031,6 +2036,13 @@ function ensureRuntimeTelemetryRecord(entityId, dateKey = getUtcDateKey()) {
       queueFailed: 0,
       queueExpired: 0,
       queueCancelled: 0,
+      uniqueGridCellsVisited: 0,
+      distanceTraveled: 0,
+      harvestCount: 0,
+      expansionCount: 0,
+      threatInteractions: 0,
+      socialOnlyActions: 0,
+      chatWithoutDisplacement: 0,
       queueFailureReasons: {}
     });
   }
@@ -2045,6 +2057,37 @@ function markRuntimeTelemetryDirty(record) {
   });
 }
 
+function noteRuntimeDistance(entityId, previousPosition = {}, nextPosition = {}) {
+  if (!entityId) return;
+  const dx = (Number(nextPosition?.x) || 0) - (Number(previousPosition?.x) || 0);
+  const dz = (Number(nextPosition?.z) || 0) - (Number(previousPosition?.z) || 0);
+  const distance = Math.sqrt((dx * dx) + (dz * dz));
+  if (!Number.isFinite(distance) || distance <= 0) return;
+  const record = ensureRuntimeTelemetryRecord(entityId);
+  record.distanceTraveled = Number((Number(record.distanceTraveled || 0) + distance).toFixed(3));
+  markRuntimeTelemetryDirty(record);
+}
+
+function noteRuntimeCounter(entityId, field, increment = 1) {
+  if (!entityId || !field) return;
+  const amount = Math.max(0, Number(increment) || 0);
+  if (amount <= 0) return;
+  const record = ensureRuntimeTelemetryRecord(entityId);
+  record[field] = Math.max(0, Number(record[field] || 0) + amount);
+  markRuntimeTelemetryDirty(record);
+}
+
+function getRecentDisplacement(entityId, lookback = 3) {
+  const points = entityRecentPositions.get(String(entityId || '')) || [];
+  if (points.length < 2) return 0;
+  const window = points.slice(-Math.max(2, lookback));
+  let total = 0;
+  for (let i = 1; i < window.length; i += 1) {
+    total += distance2D(window[i - 1], window[i]);
+  }
+  return total;
+}
+
 function noteRuntimeTick(agent) {
   if (!agent?.entityId) return;
   const record = ensureRuntimeTelemetryRecord(agent.entityId);
@@ -2054,6 +2097,7 @@ function noteRuntimeTick(agent) {
   }
   const visitedSectors = getAgentVisitedSectors(agent);
   record.uniqueSectors = Math.max(record.uniqueSectors, visitedSectors.size);
+  record.uniqueGridCellsVisited = Math.max(record.uniqueGridCellsVisited, visitedSectors.size);
   markRuntimeTelemetryDirty(record);
 }
 
@@ -2065,6 +2109,9 @@ function noteRuntimeAction(entityId, actionType) {
   const record = ensureRuntimeTelemetryRecord(entityId);
   if (SOCIAL_ACTION_TYPES.has(normalized)) {
     record.socialActions += 1;
+    if (!OBJECTIVE_ACTION_TYPES.has(normalized)) {
+      record.socialOnlyActions += 1;
+    }
   }
   if (OBJECTIVE_ACTION_TYPES.has(normalized)) {
     record.objectiveActions += 1;
@@ -2114,6 +2161,13 @@ function getRuntimeTelemetrySnapshotForEntity(entityId, days = 1) {
     queueFailed: 0,
     queueExpired: 0,
     queueCancelled: 0,
+    uniqueGridCellsVisited: 0,
+    distanceTraveled: 0,
+    harvestCount: 0,
+    expansionCount: 0,
+    threatInteractions: 0,
+    socialOnlyActions: 0,
+    chatWithoutDisplacement: 0,
     queueFailureReasons: {}
   };
   return summarizeTelemetryEntityRow(row);
@@ -2136,7 +2190,14 @@ function summarizeTelemetryEntityRow(row) {
     socialActionRatio: toRatio(socialActions, totalActions),
     objectiveActionRatio: toRatio(objectiveActions, totalActions),
     uniqueSectorCoveragePerDay: Number(row.uniqueSectors || 0),
+    uniqueGridCellsVisited: Number(row.uniqueGridCellsVisited || 0),
+    distanceTraveled: Number(row.distanceTraveled || 0),
+    harvestCount: Number(row.harvestCount || 0),
+    expansionCount: Number(row.expansionCount || 0),
+    threatInteractions: Number(row.threatInteractions || 0),
     expansionTilesPlacedPerDay: Number(row.expansionTilesPlaced || 0),
+    socialOnlyActionRatio: toRatio(Number(row.socialOnlyActions || 0), totalActions),
+    idleChatRatio: toRatio(Number(row.chatWithoutDisplacement || 0), Math.max(1, socialActions)),
     queue: {
       completed: Number(row.queueCompleted || 0),
       failed: Number(row.queueFailed || 0),
@@ -2168,6 +2229,13 @@ function getInMemoryTelemetryAggregate(days = 7) {
         queueFailed: 0,
         queueExpired: 0,
         queueCancelled: 0,
+        uniqueGridCellsVisited: 0,
+        distanceTraveled: 0,
+        harvestCount: 0,
+        expansionCount: 0,
+        threatInteractions: 0,
+        socialOnlyActions: 0,
+        chatWithoutDisplacement: 0,
         queueFailureReasons: {}
       });
     }
@@ -2183,6 +2251,13 @@ function getInMemoryTelemetryAggregate(days = 7) {
     target.queueFailed += Number(record.queueFailed || 0);
     target.queueExpired += Number(record.queueExpired || 0);
     target.queueCancelled += Number(record.queueCancelled || 0);
+    target.uniqueGridCellsVisited += Number(record.uniqueGridCellsVisited || 0);
+    target.distanceTraveled += Number(record.distanceTraveled || 0);
+    target.harvestCount += Number(record.harvestCount || 0);
+    target.expansionCount += Number(record.expansionCount || 0);
+    target.threatInteractions += Number(record.threatInteractions || 0);
+    target.socialOnlyActions += Number(record.socialOnlyActions || 0);
+    target.chatWithoutDisplacement += Number(record.chatWithoutDisplacement || 0);
     const reasons = record.queueFailureReasons || {};
     for (const [reasonKey, count] of Object.entries(reasons)) {
       target.queueFailureReasons[reasonKey] = (Number(target.queueFailureReasons[reasonKey]) || 0) + (Number(count) || 0);
@@ -2576,6 +2651,7 @@ function applyQueueAction(agent, action) {
     });
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     pushEntityRecentPosition(agent.entityId, agent.position);
+    noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
     if (action.rotation !== undefined) {
       agent.rotation = Number(action.rotation) || 0;
     }
@@ -2600,6 +2676,9 @@ function applyQueueAction(agent, action) {
     }
 
     addChatMessage(agent.id, agent.name, normalizedMessage, agent.entityId);
+    if (getRecentDisplacement(agent.entityId, 3) < 0.05) {
+      noteRuntimeCounter(agent.entityId, 'chatWithoutDisplacement', 1);
+    }
     agent.state = 'chatting';
     agent.lastAction = { type: 'talk', message: normalizedMessage };
     finishAction('talk');
@@ -2718,6 +2797,7 @@ function applyQueueAction(agent, action) {
       });
     }
     agent.state = 'acting';
+    noteRuntimeCounter(agent.entityId, 'harvestCount', 1);
     agent.lastAction = {
       type: 'harvest',
       resourceType: harvestedType,
@@ -2768,6 +2848,7 @@ function applyQueueAction(agent, action) {
     deductExpandCost(agent.inventory);
     updateExpansionExplorationQuestProgress(agent, placement);
     noteExpansionTilePlaced(agent.entityId, 1);
+    noteRuntimeCounter(agent.entityId, 'expansionCount', 1);
     agent.expansionCooldownUntilTick = worldState.tick + MAP_EXPANSION_COOLDOWN_TICKS;
     agent.state = 'acting';
     agent.lastAction = {
@@ -4446,6 +4527,49 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
   }
 });
 
+app.get('/entity/:entityId/behavior-metrics', async (req, res) => {
+  try {
+    const { entityId } = req.params;
+    const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+    if (!entityId) {
+      return res.status(400).json({ success: false, error: 'entityId is required' });
+    }
+
+    const snapshots = process.env.DATABASE_URL
+      ? await db.getEntityBehaviorMetricsByDay(entityId, days)
+      : Array.from(runtimeDailyTelemetry.values())
+        .filter((row) => row.entityId === entityId)
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+        .slice(-days)
+        .map((row) => {
+          const socialActions = Number(row.socialActions || 0);
+          const objectiveActions = Number(row.objectiveActions || 0);
+          const totalActions = socialActions + objectiveActions;
+          return {
+            date: row.date,
+            uniqueGridCellsVisited: Number(row.uniqueGridCellsVisited || 0),
+            distanceTraveled: Number(row.distanceTraveled || 0),
+            harvestCount: Number(row.harvestCount || 0),
+            expansionCount: Number(row.expansionCount || 0),
+            threatInteractions: Number(row.threatInteractions || 0),
+            socialOnlyActionRatio: toRatio(Number(row.socialOnlyActions || 0), totalActions),
+            idleChatRatio: toRatio(Number(row.chatWithoutDisplacement || 0), Math.max(1, socialActions))
+          };
+        });
+
+    return res.json({
+      success: true,
+      entityId,
+      windowDays: days,
+      generatedAt: new Date().toISOString(),
+      snapshots
+    });
+  } catch (error) {
+    console.error('Error loading entity behavior metrics:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 
 app.get('/observer/telemetry/entity-runtime-aggregate', async (req, res) => {
   try {
@@ -4488,6 +4612,53 @@ app.get('/observer/telemetry/entity-runtime-aggregate', async (req, res) => {
     });
   } catch (error) {
     console.error('Error loading aggregated entity telemetry:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/observer/telemetry/world-progress', async (req, res) => {
+  try {
+    const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+    const entityRows = process.env.DATABASE_URL
+      ? await db.getEntityTelemetryAggregate(days, 500)
+      : getInMemoryTelemetryAggregate(days);
+    const summaries = entityRows.map(summarizeTelemetryEntityRow);
+    const topExplorers = [...summaries]
+      .sort((a, b) => (b.uniqueGridCellsVisited - a.uniqueGridCellsVisited) || (b.distanceTraveled - a.distanceTraveled))
+      .slice(0, 5)
+      .map((row) => ({ entityId: row.entityId, uniqueGridCellsVisited: row.uniqueGridCellsVisited, distanceTraveled: row.distanceTraveled }));
+    const topBuilders = [...summaries]
+      .sort((a, b) => (b.expansionCount - a.expansionCount) || (b.expansionTilesPlacedPerDay - a.expansionTilesPlacedPerDay))
+      .slice(0, 5)
+      .map((row) => ({ entityId: row.entityId, expansionCount: row.expansionCount, expansionTilesPlacedPerDay: row.expansionTilesPlacedPerDay }));
+
+    const trend = process.env.DATABASE_URL
+      ? await db.getWorldBehaviorMetricsByDay(days)
+      : [];
+
+    const totalIdleChat = summaries.reduce((sum, row) => sum + Number(row.idleChatRatio || 0), 0);
+    const avgIdleChatRatio = summaries.length > 0 ? Number((totalIdleChat / summaries.length).toFixed(4)) : 0;
+    const tuning = {
+      objectiveBias: avgIdleChatRatio > 0.45 ? 0.65 : 0.5,
+      explorationBias: avgIdleChatRatio > 0.45 ? 0.25 : 0.3,
+      socialBias: avgIdleChatRatio > 0.45 ? 0.1 : 0.2,
+      validationTarget: 'idleChatRatio_down'
+    };
+
+    return res.json({
+      success: true,
+      windowDays: days,
+      generatedAt: new Date().toISOString(),
+      mapExpansionLevel: worldState.mapExpansionLevel,
+      mapExpansionTiles: worldState.expansionTiles.length,
+      mapExpansionLevelTrend: trend,
+      topExplorers,
+      topBuilders,
+      idleChatRatio: avgIdleChatRatio,
+      promptWeightTuning: tuning
+    });
+  } catch (error) {
+    console.error('Error loading world progress telemetry:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

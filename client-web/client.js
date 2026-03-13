@@ -356,6 +356,7 @@ class OpenBotWorld {
         this.summarizationTriggered = false; // Whether we've sent the one-time check this session
         this.leaderboardTriggered = false;
         this._lastLeaderboard = null;
+        this._lastWorldProgress = null;
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -4529,6 +4530,45 @@ class OpenBotWorld {
         }
     }
 
+    async fetchWorldProgress(days = 7) {
+        try {
+            const response = await fetch(`${this.apiBase}/observer/telemetry/world-progress?days=${encodeURIComponent(days)}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this._lastWorldProgress = data;
+            return data;
+        } catch (err) {
+            console.error('[WorldProgress] Fetch error:', err);
+            return null;
+        }
+    }
+
+    renderWorldProgressInto(container) {
+        const data = this._lastWorldProgress;
+        if (!data || data.success === false) return;
+
+        const trend = Array.isArray(data.mapExpansionLevelTrend) ? data.mapExpansionLevelTrend : [];
+        const trendText = trend.length > 0
+            ? trend.slice(-7).map((row) => `${this.escapeHtml(String(row.date).slice(5))}:${Number(row.expansionCount || 0)}`).join(' · ')
+            : 'No daily trend yet';
+        const explorers = Array.isArray(data.topExplorers) ? data.topExplorers : [];
+        const builders = Array.isArray(data.topBuilders) ? data.topBuilders : [];
+
+        const panel = document.createElement('div');
+        panel.className = 'activity-day';
+        panel.innerHTML = `
+            <div class="activity-day-header"><div><span class="activity-day-date">🌍 World Progress</span></div></div>
+            <div class="activity-day-summary" style="font-size:11px;line-height:1.45;">
+                <div>Expansion level: <strong>${Number(data.mapExpansionLevel || 0)}</strong> · Tiles: <strong>${Number(data.mapExpansionTiles || 0)}</strong></div>
+                <div>Trend (MM-DD:expansions): ${trendText}</div>
+                <div>Top explorers: ${explorers.slice(0, 3).map((r) => `${this.escapeHtml(r.entityId)} (${Number(r.uniqueGridCellsVisited || 0)})`).join(', ') || 'n/a'}</div>
+                <div>Top builders: ${builders.slice(0, 3).map((r) => `${this.escapeHtml(r.entityId)} (${Number(r.expansionCount || 0)})`).join(', ') || 'n/a'}</div>
+                <div>Idle-chat ratio: <strong>${(Number(data.idleChatRatio || 0) * 100).toFixed(1)}%</strong></div>
+            </div>
+        `;
+        container.appendChild(panel);
+    }
+
     renderLeaderboardInto(container) {
         const leaderboard = this._lastLeaderboard?.leaderboard || [];
         const seasonId = this._lastLeaderboard?.seasonId || 'N/A';
@@ -4575,7 +4615,7 @@ class OpenBotWorld {
             }
 
             this._lastActivitySummaries = data.summaries;
-            await this.fetchLeaderboard();
+            await Promise.all([this.fetchLeaderboard(), this.fetchWorldProgress(7)]);
             this.renderActivityLog(data.summaries, container);
 
             // No client-side polling or auto-refresh. AI summaries are generated
@@ -4592,6 +4632,7 @@ class OpenBotWorld {
      */
     renderActivityLog(summaries, container) {
         container.innerHTML = '';
+        this.renderWorldProgressInto(container);
         this.renderLeaderboardInto(container);
 
         for (const summary of summaries) {
