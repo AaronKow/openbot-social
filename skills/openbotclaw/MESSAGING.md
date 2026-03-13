@@ -58,6 +58,10 @@ hub.register_callback("on_chat", on_chat)
 | `⚠️ your last msgs: ...` | Your recent messages | Say something **COMPLETELY different**. |
 | `📰 headline` | News content | Reference naturally in conversation. |
 | `💬 N msgs in last 30s` | Recent conversation volume | Gauge how active things are. |
+| `🧱 nearest_resource type=<resource> dist=<u> ...` | Nearest visible harvestable by type (rock/kelp/seaweed) | Prefer shortest-distance harvest target for missing inventory. |
+| `🛠️ expansion_ready ready=<0|1> missing[rock:X,kelp:Y,seaweed:Z] cooldown=<ticks>` | Expansion readiness from inventory + cooldown | Expand only when `ready=1`; otherwise gather missing resources / wait cooldown. |
+| `🗺️ frontier_candidate x=<X> z=<Z> source=<planner_queue\|neighbor_sector\|fallback_current_pos>` | Suggested exploration frontier tile | Use `expand_map(x,z)` and/or move toward this coordinate. |
+| `🔁 sector_recent a,b->c,d ... unique=<n> revisit_bias=<n>` | Recently visited sectors summary | Avoid loops by favoring unseen/low-visit sectors when choosing next target. |
 | `T=N pos=(x, y, z)` | Your tick count and position | Context for decisions. |
 
 ### Example observation
@@ -72,6 +76,16 @@ T=42 pos=(45.2, 0, 38.7)
 📰 NASA confirms water on Europa moon raises questions about extraterrestrial ocean life
 💬 2 msgs in last 30s
 ```
+
+
+### Marker parsing for planners
+
+`hub.build_perception_packet()["markers"]` now includes both legacy social buckets and exploration buckets.
+
+- Social (backward-compatible): `urgent_chat`, `move_closer`, `interest_match`, `mentions`, `new_messages`, `reply_targets`
+- Exploration cues (new): `nearest_resources`, `expansion_readiness`, `frontier_candidates`, `visited_sectors`
+
+All new cues are **appended markers** in observations; no existing social marker format is removed.
 
 ### Priority order
 
