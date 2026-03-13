@@ -284,3 +284,107 @@ test('saveAgentsBatch rolls back transaction on query failure', async () => {
     db.pool.connect = originalConnect;
   }
 });
+
+
+test('incrementEntityUniqueDiscoveryCell increments only on unseen cells within rolling window', async () => {
+  const state = {
+    status: 'active',
+    progress_json: {
+      uniqueCellsDiscovered: 1,
+      discoveryWindowStartedAt: 1_000,
+      recentDiscoveredCells: [{ cellKey: '0,0', discoveredAt: 1_000 }]
+    }
+  };
+
+  const calls = [];
+  const originalConnect = db.pool.connect;
+  db.pool.connect = async () => ({
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('SELECT target_json FROM quest_catalog')) {
+        return { rows: [{ target_json: { uniqueCellsDiscovered: 10 } }] };
+      }
+      if (sql.includes('SELECT status, progress_json FROM entity_quests')) {
+        return { rows: [state] };
+      }
+      if (sql.includes('UPDATE entity_quests')) {
+        state.status = params[2];
+        state.progress_json = JSON.parse(params[3]);
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+
+  try {
+    const duplicate = await db.incrementEntityUniqueDiscoveryCell('entity-1', 'daily-explorer', '0,0', {
+      nowMs: 2_000,
+      rollingWindowMs: 60_000
+    });
+    assert.equal(duplicate.discoveredNewCell, false);
+    assert.equal(duplicate.progress.uniqueCellsDiscovered, 1);
+
+    const fresh = await db.incrementEntityUniqueDiscoveryCell('entity-1', 'daily-explorer', '1,0', {
+      nowMs: 2_100,
+      rollingWindowMs: 60_000
+    });
+    assert.equal(fresh.discoveredNewCell, true);
+    assert.equal(fresh.progress.uniqueCellsDiscovered, 2);
+
+    assert.ok(calls.some((c) => c.sql === 'BEGIN'));
+    assert.ok(calls.some((c) => c.sql === 'COMMIT'));
+  } finally {
+    db.pool.connect = originalConnect;
+  }
+});
+
+test('incrementEntityUniqueDiscoveryCell resets rolling window after expiry', async () => {
+  const state = {
+    status: 'active',
+    progress_json: {
+      uniqueCellsDiscovered: 3,
+      discoveryWindowStartedAt: 1_000,
+      recentDiscoveredCells: [
+        { cellKey: '0,0', discoveredAt: 1_000 },
+        { cellKey: '1,0', discoveredAt: 1_100 },
+        { cellKey: '2,0', discoveredAt: 1_200 }
+      ]
+    }
+  };
+
+  const originalConnect = db.pool.connect;
+  db.pool.connect = async () => ({
+    async query(sql, params) {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('SELECT target_json FROM quest_catalog')) {
+        return { rows: [{ target_json: { uniqueCellsDiscovered: 10 } }] };
+      }
+      if (sql.includes('SELECT status, progress_json FROM entity_quests')) {
+        return { rows: [state] };
+      }
+      if (sql.includes('UPDATE entity_quests')) {
+        state.status = params[2];
+        state.progress_json = JSON.parse(params[3]);
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+
+  try {
+    const result = await db.incrementEntityUniqueDiscoveryCell('entity-2', 'daily-explorer', '8,8', {
+      nowMs: 100_000,
+      rollingWindowMs: 60_000
+    });
+
+    assert.equal(result.discoveredNewCell, true);
+    assert.equal(result.progress.uniqueCellsDiscovered, 1);
+    assert.equal(result.progress.recentDiscoveredCells.length, 1);
+    assert.equal(result.progress.discoveryWindowStartedAt, 100_000);
+  } finally {
+    db.pool.connect = originalConnect;
+  }
+});

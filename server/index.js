@@ -172,6 +172,8 @@ const PORT = process.env.PORT || 3001;
 const TICK_RATE = getPositiveNumber('TICK_RATE', 30, 5, 60); // 30 updates per second
 const TICK_INTERVAL_MS = 1000 / TICK_RATE;
 const DAY_NIGHT_CYCLE_SECONDS = 24 * 60 * 60;
+const EXPLORATION_DISCOVERY_CELL_SIZE = Math.max(1, Number(process.env.EXPLORATION_DISCOVERY_CELL_SIZE || 4));
+const EXPLORATION_DISCOVERY_ROLLING_WINDOW_MS = Math.max(60_000, Number(process.env.EXPLORATION_DISCOVERY_ROLLING_WINDOW_MS || (24 * 60 * 60 * 1000)));
 const WORLD_SIZE = { x: 100, y: 100 }; // Ocean floor dimensions
 const MAP_EDGE_BUFFER = 1.35;
 const AGENT_TIMEOUT = Number(process.env.AGENT_TIMEOUT || 180000); // 3 minutes by default
@@ -719,7 +721,6 @@ function applyRotatingEventActionHooks(agent, actionType, context = {}) {
 
       if (agent.entityId) {
         updateQuestProgress(agent.entityId, {
-          moveCount: eventType === 'migration_signal' ? 1 : 0,
           cooperativeExpansionChains: eventType === 'migration_signal' ? 1 : 0,
           unexploredSectorsVisited: eventType === 'rescue_beacon' ? 1 : 0
         }).catch(() => {});
@@ -1644,6 +1645,15 @@ function getAgentSectorPosition(position = {}) {
   };
 }
 
+function getAgentDiscoveryCellPosition(position = {}) {
+  const x = Number(position?.x) || 0;
+  const z = Number(position?.z) || 0;
+  return {
+    x: Math.floor(x / EXPLORATION_DISCOVERY_CELL_SIZE),
+    z: Math.floor(z / EXPLORATION_DISCOVERY_CELL_SIZE)
+  };
+}
+
 function getAgentVisitedSectors(agent) {
   if (!agent) return new Set();
   if (!(agent.visitedSectors instanceof Set)) {
@@ -1654,6 +1664,16 @@ function getAgentVisitedSectors(agent) {
   return agent.visitedSectors;
 }
 
+function getAgentDiscoveredCells(agent) {
+  if (!agent) return new Set();
+  if (!(agent.discoveredCells instanceof Set)) {
+    agent.discoveredCells = new Set();
+    const current = getAgentDiscoveryCellPosition(agent.position);
+    agent.discoveredCells.add(`${current.x},${current.z}`);
+  }
+  return agent.discoveredCells;
+}
+
 function getAgentExpansionTiles(agent) {
   if (!agent) return new Set();
   if (!(agent.expandedFrontierTiles instanceof Set)) {
@@ -1662,28 +1682,49 @@ function getAgentExpansionTiles(agent) {
   return agent.expandedFrontierTiles;
 }
 
-function updateMovementExplorationQuestProgress(agent, previousPosition = {}, nextPosition = {}) {
+async function updateMovementExplorationQuestProgress(agent, previousPosition = {}, nextPosition = {}) {
   if (!agent?.entityId) return;
 
   const visitedSectors = getAgentVisitedSectors(agent);
   const beforeSector = getAgentSectorPosition(previousPosition);
   const afterSector = getAgentSectorPosition(nextPosition);
-  const afterKey = `${afterSector.x},${afterSector.z}`;
-  const enteredUnvisitedSector = !visitedSectors.has(afterKey);
+  const afterSectorKey = `${afterSector.x},${afterSector.z}`;
+  const enteredUnvisitedSector = !visitedSectors.has(afterSectorKey);
 
-  if (!enteredUnvisitedSector) return;
+  const discoveredCells = getAgentDiscoveredCells(agent);
+  const beforeCell = getAgentDiscoveryCellPosition(previousPosition);
+  const afterCell = getAgentDiscoveryCellPosition(nextPosition);
+  const afterCellKey = `${afterCell.x},${afterCell.z}`;
+  const enteredUnvisitedCell = !discoveredCells.has(afterCellKey);
+
+  if (!enteredUnvisitedSector && !enteredUnvisitedCell) return;
 
   const dx = (Number(nextPosition?.x) || 0) - (Number(previousPosition?.x) || 0);
   const dz = (Number(nextPosition?.z) || 0) - (Number(previousPosition?.z) || 0);
   const distance = Math.sqrt((dx * dx) + (dz * dz));
 
-  visitedSectors.add(afterKey);
+  visitedSectors.add(afterSectorKey);
   visitedSectors.add(`${beforeSector.x},${beforeSector.z}`);
+  discoveredCells.add(afterCellKey);
+  discoveredCells.add(`${beforeCell.x},${beforeCell.z}`);
 
   updateQuestProgress(agent.entityId, {
-    unexploredSectorsVisited: 1,
-    unexploredTraversalDistance: distance
+    unexploredSectorsVisited: enteredUnvisitedSector ? 1 : 0,
+    unexploredTraversalDistance: enteredUnvisitedSector ? distance : 0
   }).catch(() => {});
+
+  if (!enteredUnvisitedCell || !process.env.DATABASE_URL) return;
+
+  try {
+    await db.incrementEntityUniqueDiscoveryCell(
+      agent.entityId,
+      'daily-explorer',
+      afterCellKey,
+      { rollingWindowMs: EXPLORATION_DISCOVERY_ROLLING_WINDOW_MS }
+    );
+  } catch (_) {
+    // best effort only
+  }
 }
 
 function updateExpansionExplorationQuestProgress(agent, placement) {
@@ -1804,7 +1845,7 @@ async function updateQuestProgress(entityId, increments = {}) {
 
   const questProgressMap = {
     'daily-social-chat': { chatSent: increments.chatSent || 0 },
-    'daily-explorer': { moveCount: increments.moveCount || 0 },
+    'daily-explorer': { uniqueCellsDiscovered: increments.uniqueCellsDiscovered || 0 },
     'daily-queue-operator': { queueActions: increments.queueActions || 0 },
     'daily-mention-network': { mentionSent: increments.mentionSent || 0 },
     'exploration-first-expansion': { firstExpansionTilePlaced: increments.firstExpansionTilePlaced || 0 },
@@ -1985,7 +2026,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     const previousPosition = { ...agent.position };
     if (position) {
       agent.position = clampMovement(agent.position, position, { allowExpansion: true });
-      updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
+      updateMovementExplorationQuestProgress(agent, previousPosition, agent.position).catch(() => {});
       pushEntityRecentPosition(agent.entityId, agent.position);
       noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
     }
@@ -1995,7 +2036,6 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     agent.state = 'moving';
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
-    updateQuestProgress(agent.entityId, { moveCount: 1 }).catch(() => {});
     noteRuntimeAction(agent.entityId, 'move');
     res.json({ success: true });
   } catch (error) {
@@ -3136,6 +3176,7 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
       const summary = await db.getEntityQuestSummary(entityId);
       const runtimeAgent = findOnlineAgentByEntityId(entityId);
       const visitedSectors = runtimeAgent?.visitedSectors instanceof Set ? runtimeAgent.visitedSectors.size : 0;
+      const discoveredCells = runtimeAgent?.discoveredCells instanceof Set ? runtimeAgent.discoveredCells.size : 0;
       const expandedFrontierTiles = runtimeAgent?.expandedFrontierTiles instanceof Set ? runtimeAgent.expandedFrontierTiles.size : 0;
 
       return res.json({
@@ -3149,6 +3190,9 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
         },
         explorationSignals: {
           visitedSectors,
+          discoveredCells,
+          discoveryCellSize: EXPLORATION_DISCOVERY_CELL_SIZE,
+          rollingWindowMs: EXPLORATION_DISCOVERY_ROLLING_WINDOW_MS,
           expandedFrontierTiles
         }
       });
@@ -3156,6 +3200,7 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
 
     const runtimeAgent = findOnlineAgentByEntityId(entityId);
     const visitedSectors = runtimeAgent?.visitedSectors instanceof Set ? runtimeAgent.visitedSectors.size : 0;
+    const discoveredCells = runtimeAgent?.discoveredCells instanceof Set ? runtimeAgent.discoveredCells.size : 0;
     const expandedFrontierTiles = runtimeAgent?.expandedFrontierTiles instanceof Set ? runtimeAgent.expandedFrontierTiles.size : 0;
 
     return res.json({
@@ -3167,6 +3212,9 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
       counts: { active: 0, completed: 0, claimed: 0 },
       explorationSignals: {
         visitedSectors,
+        discoveredCells,
+        discoveryCellSize: EXPLORATION_DISCOVERY_CELL_SIZE,
+        rollingWindowMs: EXPLORATION_DISCOVERY_ROLLING_WINDOW_MS,
         expandedFrontierTiles
       }
     });

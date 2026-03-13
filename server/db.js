@@ -518,9 +518,9 @@ const QUEST_SEED_CATALOG = Object.freeze([
   {
     questId: 'daily-explorer',
     title: 'Explorer Loop',
-    description: 'Complete 10 movement actions.',
+    description: 'Discover 10 unique 4x4 exploration cells within a rolling 24-hour window.',
     category: 'exploration',
-    target: { moveCount: 10 },
+    target: { uniqueCellsDiscovered: 10 },
     reward: { shells: 12, badge: 'explorer-loop' }
   },
   {
@@ -667,6 +667,107 @@ async function incrementEntityQuestProgress(entityId, questId, increments = {}) 
   );
 
   return { questId, status: nextStatus, progress };
+}
+
+async function incrementEntityUniqueDiscoveryCell(entityId, questId, cellKey, options = {}) {
+  if (!entityId || !questId || !cellKey) return null;
+
+  const nowMs = Math.max(0, Math.floor(Number(options.nowMs) || Date.now()));
+  const rollingWindowMs = Math.max(60_000, Math.floor(Number(options.rollingWindowMs) || (24 * 60 * 60 * 1000)));
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const catalog = await client.query(
+      `SELECT target_json FROM quest_catalog WHERE quest_id = $1 AND is_active = TRUE`,
+      [questId]
+    );
+    if (catalog.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    await client.query(
+      `INSERT INTO entity_quests (entity_id, quest_id, status, progress_json)
+       VALUES ($1, $2, 'active', $3)
+       ON CONFLICT (entity_id, quest_id) DO NOTHING`,
+      [entityId, questId, JSON.stringify({ uniqueCellsDiscovered: 0, discoveryWindowStartedAt: 0, recentDiscoveredCells: [] })]
+    );
+
+    const state = await client.query(
+      `SELECT status, progress_json FROM entity_quests
+       WHERE entity_id = $1 AND quest_id = $2
+       FOR UPDATE`,
+      [entityId, questId]
+    );
+    if (state.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    const row = state.rows[0];
+    if (row.status === 'claimed') {
+      await client.query('COMMIT');
+      return { questId, status: 'claimed', discoveredNewCell: false, progress: row.progress_json || {} };
+    }
+
+    const progress = { ...(row.progress_json || {}) };
+    const previousWindowStart = Number(progress.discoveryWindowStartedAt) || 0;
+    const windowExpired = previousWindowStart <= 0 || (nowMs - previousWindowStart) >= rollingWindowMs;
+    const activeWindowStart = windowExpired ? nowMs : previousWindowStart;
+    const cutoffMs = nowMs - rollingWindowMs;
+
+    let recentDiscoveredCells = Array.isArray(progress.recentDiscoveredCells)
+      ? progress.recentDiscoveredCells
+      : [];
+    recentDiscoveredCells = recentDiscoveredCells
+      .map((item) => ({
+        cellKey: String(item?.cellKey || ''),
+        discoveredAt: Math.max(0, Math.floor(Number(item?.discoveredAt) || 0))
+      }))
+      .filter((item) => item.cellKey && item.discoveredAt >= cutoffMs);
+
+    if (windowExpired) {
+      recentDiscoveredCells = [];
+    }
+
+    const discoveredNewCell = !recentDiscoveredCells.some((item) => item.cellKey === cellKey);
+    if (discoveredNewCell) {
+      recentDiscoveredCells.push({ cellKey, discoveredAt: nowMs });
+    }
+
+    progress.discoveryWindowStartedAt = activeWindowStart;
+    progress.recentDiscoveredCells = recentDiscoveredCells.slice(-2048);
+    progress.uniqueCellsDiscovered = progress.recentDiscoveredCells.length;
+
+    const target = catalog.rows[0].target_json || {};
+    const completed = questTargetsMet(progress, target);
+    const nextStatus = completed ? 'completed' : (row.status || 'active');
+
+    await client.query(
+      `UPDATE entity_quests
+       SET status = $3,
+           progress_json = $4,
+           completed_at = CASE WHEN $3 = 'completed' AND completed_at IS NULL THEN NOW() ELSE completed_at END
+       WHERE entity_id = $1 AND quest_id = $2`,
+      [entityId, questId, nextStatus, JSON.stringify(progress)]
+    );
+
+    await client.query('COMMIT');
+    return {
+      questId,
+      status: nextStatus,
+      discoveredNewCell,
+      progress,
+      rollingWindowMs
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function setEntityQuestProgress(entityId, questId, progress = {}) {
@@ -2779,6 +2880,7 @@ module.exports = {
   getWorldBehaviorMetricsByDay,
   ensureEntityQuest,
   incrementEntityQuestProgress,
+  incrementEntityUniqueDiscoveryCell,
   setEntityQuestProgress,
   getEntityQuestSummary,
   claimEntityQuest,
