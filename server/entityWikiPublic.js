@@ -261,6 +261,138 @@ function deriveRecommendationCandidates(candidates = [], noveltyByEntity = {}, r
     .slice(0, 6);
 }
 
+function deriveExplorationRecommendations({ worldState, entityId, currentPosition, recentPositions = [], limit = 6 }) {
+  const safeWorld = worldState && typeof worldState === 'object' ? worldState : {};
+  const agents = Array.from(safeWorld.agents instanceof Map ? safeWorld.agents.values() : []);
+  const expansionTiles = Array.isArray(safeWorld.expansionTiles) ? safeWorld.expansionTiles : [];
+  const threats = Array.from(safeWorld.threats instanceof Map ? safeWorld.threats.values() : []);
+  const objects = Array.from(safeWorld.objects instanceof Map ? safeWorld.objects.values() : []);
+
+  const zoneSize = 10;
+  const worldMax = 100;
+  const zoneTraffic = new Map();
+  const zoneKey = (x, z) => `${Math.max(0, Math.floor(x / zoneSize))}:${Math.max(0, Math.floor(z / zoneSize))}`;
+  const bumpTraffic = (x, z, weight = 1) => {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    const key = zoneKey(x, z);
+    zoneTraffic.set(key, (zoneTraffic.get(key) || 0) + weight);
+  };
+
+  for (const agent of agents) {
+    if (!agent?.position) continue;
+    bumpTraffic(Number(agent.position.x), Number(agent.position.z), agent.entityId === entityId ? 0.4 : 1);
+  }
+  for (const tile of expansionTiles) {
+    bumpTraffic(Number(tile?.x), Number(tile?.z), 0.35);
+  }
+
+  const ownHistory = Array.isArray(recentPositions) ? recentPositions : [];
+  for (const point of ownHistory) {
+    bumpTraffic(Number(point?.x), Number(point?.z), 0.6);
+  }
+
+  const current = {
+    x: Number(currentPosition?.x || 50),
+    z: Number(currentPosition?.z || 50)
+  };
+
+  const opportunities = [
+    ...threats.map((threat) => ({
+      x: Number(threat?.position?.x),
+      z: Number(threat?.position?.z),
+      kind: 'threat',
+      label: String(threat?.type || threat?.id || 'threat')
+    })),
+    ...objects
+      .filter((obj) => ['rock', 'kelp', 'seaweed', 'algae_pallet'].includes(String(obj?.type || '').toLowerCase()))
+      .map((obj) => ({
+        x: Number(obj?.position?.x),
+        z: Number(obj?.position?.z),
+        kind: 'resource',
+        label: String(obj?.type || 'resource')
+      }))
+  ].filter((row) => Number.isFinite(row.x) && Number.isFinite(row.z));
+
+  const candidates = [];
+  const pushCandidate = (x, z, source) => {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    candidates.push({
+      x: Math.max(0, Math.min(worldMax, x)),
+      z: Math.max(0, Math.min(worldMax, z)),
+      source
+    });
+  };
+
+  for (const tile of expansionTiles.slice(-20)) {
+    pushCandidate(Number(tile?.x), Number(tile?.z), 'expansion-frontier');
+  }
+  for (let zx = 0; zx <= worldMax / zoneSize; zx += 1) {
+    for (let zz = 0; zz <= worldMax / zoneSize; zz += 1) {
+      pushCandidate((zx * zoneSize) + (zoneSize / 2), (zz * zoneSize) + (zoneSize / 2), 'low-traffic-zone');
+    }
+  }
+  for (const opportunity of opportunities.slice(0, 32)) {
+    pushCandidate(opportunity.x, opportunity.z, `${opportunity.kind}-opportunity`);
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = `${Math.round(candidate.x)}:${Math.round(candidate.z)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(candidate);
+  }
+
+  return deduped.map((candidate) => {
+    const traffic = zoneTraffic.get(zoneKey(candidate.x, candidate.z)) || 0;
+    const lowTrafficScore = clamp01(1 - Math.min(1, traffic / 6));
+
+    const nearbyOpportunities = opportunities
+      .map((op) => {
+        const distance = Math.hypot(candidate.x - op.x, candidate.z - op.z);
+        return { ...op, distance };
+      })
+      .filter((op) => op.distance <= 18)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 3);
+    const opportunityScore = clamp01(nearbyOpportunities.length / 3);
+
+    const revisitDistances = ownHistory
+      .map((point) => Math.hypot(candidate.x - Number(point?.x || 0), candidate.z - Number(point?.z || 0)))
+      .filter((value) => Number.isFinite(value));
+    const nearestOwnDistance = revisitDistances.length ? Math.min(...revisitDistances) : 99;
+    const revisitPenalty = clamp01(Math.exp(-nearestOwnDistance / 7));
+
+    const travelDistance = Math.hypot(candidate.x - current.x, candidate.z - current.z);
+    const travelPenalty = clamp01(travelDistance / 75);
+
+    const confidence = clamp01((0.45 * lowTrafficScore) + (0.35 * opportunityScore) - (0.3 * revisitPenalty) - (0.15 * travelPenalty) + 0.25);
+    const reasonParts = [
+      lowTrafficScore >= 0.6 ? 'low-traffic zone' : 'moderate traffic zone',
+      nearbyOpportunities.length ? `near ${nearbyOpportunities.map((op) => op.label).join(', ')}` : 'few nearby opportunities',
+      revisitPenalty < 0.35 ? 'novel relative to recent path' : 'partially revisited area'
+    ];
+
+    return {
+      targetPosition: { x: Number(candidate.x.toFixed(2)), z: Number(candidate.z.toFixed(2)) },
+      reason: reasonParts.join(' · '),
+      confidence: Number(confidence.toFixed(3)),
+      score: Number(confidence.toFixed(3)),
+      diagnostics: {
+        source: candidate.source,
+        lowTrafficScore: Number(lowTrafficScore.toFixed(3)),
+        opportunityScore: Number(opportunityScore.toFixed(3)),
+        revisitPenalty: Number(revisitPenalty.toFixed(3)),
+        nearestOwnDistance: Number(nearestOwnDistance.toFixed(2)),
+        travelDistance: Number(travelDistance.toFixed(2))
+      }
+    };
+  })
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, Math.max(1, Number(limit) || 6));
+}
+
 function buildRelationshipGraph(selfId, relationships) {
   const nodes = [{ id: selfId, label: selfId, kind: 'self' }];
   const edges = [];
@@ -489,7 +621,8 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     })
     : Promise.resolve(options.memoryGoalSnapshot && typeof options.memoryGoalSnapshot === 'object' ? options.memoryGoalSnapshot : null);
 
-  const recommendationCandidatesPromise = db && typeof db.getRecommendationCandidates === 'function'
+  const recommendationType = options.recommendationType || 'conversation';
+  const recommendationCandidatesPromise = recommendationType !== 'exploration' && db && typeof db.getRecommendationCandidates === 'function'
     ? db.getRecommendationCandidates(entityId, options.recommendationType || 'conversation', 16).catch(error => {
       console.warn(`[wiki-public] failed to read recommendation candidates for ${entityId}:`, error.message);
       return [];
@@ -558,11 +691,24 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     rawPartners = [...relMap.values()];
   }
 
-  const noveltyScores = db && typeof db.scoreInteractionNovelty === 'function'
-    ? await db.scoreInteractionNovelty(entityId, recommendationCandidates.map(c => c.entityId), options.recommendationType || 'conversation').catch(() => [])
-    : [];
-  const noveltyByEntity = Object.fromEntries((noveltyScores || []).map((row) => [row.candidateEntityId, row]));
-  const suggestedConnections = deriveRecommendationCandidates(recommendationCandidates, noveltyByEntity, options.recommendationType || 'conversation');
+  let suggestedConnections = [];
+  if (recommendationType === 'exploration') {
+    const fallbackCurrent = onlineAgent?.position || {};
+    const history = Array.isArray(options.recentPositionHistory) ? options.recentPositionHistory : [];
+    suggestedConnections = deriveExplorationRecommendations({
+      worldState,
+      entityId,
+      currentPosition: history[history.length - 1] || fallbackCurrent,
+      recentPositions: history,
+      limit: 6
+    });
+  } else {
+    const noveltyScores = db && typeof db.scoreInteractionNovelty === 'function'
+      ? await db.scoreInteractionNovelty(entityId, recommendationCandidates.map(c => c.entityId), recommendationType).catch(() => [])
+      : [];
+    const noveltyByEntity = Object.fromEntries((noveltyScores || []).map((row) => [row.candidateEntityId, row]));
+    suggestedConnections = deriveRecommendationCandidates(recommendationCandidates, noveltyByEntity, recommendationType);
+  }
 
   const currentState = {
     online: Boolean(onlineAgent),
@@ -591,7 +737,7 @@ async function buildEntityWikiPublic(entityId, worldState, db, options = {}) {
     achievements,
     earnedBadges,
     suggestedConnections,
-    recommendationType: options.recommendationType || 'conversation'
+    recommendationType
   });
 }
 

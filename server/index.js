@@ -307,6 +307,22 @@ const worldState = {
 
 const dirtyAgentIds = new Set();
 const pendingAgentDeleteIds = new Set();
+const entityRecentPositions = new Map(); // entityId -> [{x,z,tick,ts}]
+
+function pushEntityRecentPosition(entityId, position) {
+  const id = String(entityId || '').trim();
+  if (!id || !position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.z))) return;
+  const row = {
+    x: Number(position.x),
+    z: Number(position.z),
+    tick: Number(worldState.tick || 0),
+    ts: Date.now()
+  };
+  const list = entityRecentPositions.get(id) || [];
+  list.push(row);
+  if (list.length > 24) list.splice(0, list.length - 24);
+  entityRecentPositions.set(id, list);
+}
 
 function getTickChangeBucket(tick) {
   let bucket = worldState.agentChangeHistory.get(tick);
@@ -1674,6 +1690,7 @@ app.post('/spawn', requireAuth, async (req, res) => {
     }
 
     agent.position = validatePosition(agent.position || {});
+    pushEntityRecentPosition(agent.entityId || entityId, agent.position);
     
     res.json({
       success: true,
@@ -1720,6 +1737,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     if (position) {
       agent.position = clampMovement(agent.position, position);
       updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
+      pushEntityRecentPosition(agent.entityId, agent.position);
     }
     if (rotation !== undefined) {
       agent.rotation = Number(rotation) || 0;
@@ -2422,6 +2440,7 @@ function applyQueueAction(agent, action) {
       z: action.z
     });
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
+    pushEntityRecentPosition(agent.entityId, agent.position);
     if (action.rotation !== undefined) {
       agent.rotation = Number(action.rotation) || 0;
     }
@@ -2469,6 +2488,7 @@ function applyQueueAction(agent, action) {
     const previousPosition = { ...agent.position };
     agent.position = clampMovement(agent.position, targetPosition);
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
+    pushEntityRecentPosition(agent.entityId, agent.position);
     agent.state = 'moving';
     agent.lastAction = {
       type: 'move_to_agent',
@@ -3894,7 +3914,9 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
     const typeRaw = String(req.query.type || 'conversation').toLowerCase();
     const type = typeRaw === 'collab'
       ? 'collab'
-      : (typeRaw === 'expansion' ? 'expansion' : 'conversation');
+      : (typeRaw === 'expansion'
+        ? 'expansion'
+        : (typeRaw === 'exploration' ? 'exploration' : 'conversation'));
 
     if (!entityId) {
       return res.status(400).json({ success: false, error: 'entityId is required' });
@@ -3915,6 +3937,7 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
         memoryGoalSnapshot: app._memoryGoalSnapshots?.get(entityId) || null,
         runtimeActionQueue: actionQueues.get(entityId) || null,
         recommendationType: type,
+        recentPositionHistory: entityRecentPositions.get(entityId) || []
       })
       : null;
 
@@ -3927,12 +3950,15 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
         : []);
 
     await Promise.all(
-      recommendations.slice(0, 6).map((candidate) => (
-        db.trackRecommendationEvent(entityId, candidate.entityId, type, 'shown', {
-          score: candidate.score,
-          source: 'recommendations-endpoint'
-        }).catch(() => null)
-      ))
+      recommendations
+        .slice(0, 6)
+        .filter((candidate) => candidate && typeof candidate.entityId === 'string' && candidate.entityId.trim())
+        .map((candidate) => (
+          db.trackRecommendationEvent(entityId, candidate.entityId, type, 'shown', {
+            score: candidate.score,
+            source: 'recommendations-endpoint'
+          }).catch(() => null)
+        ))
     );
 
     const metrics = typeof db.getRecommendationMetrics === 'function'
@@ -3960,7 +3986,9 @@ app.post('/entity/:entityId/recommendations/events', requireAuth, async (req, re
     const typeRaw = String(req.body?.type || 'conversation').toLowerCase();
     const type = typeRaw === 'collab'
       ? 'collab'
-      : (typeRaw === 'expansion' ? 'expansion' : 'conversation');
+      : (typeRaw === 'expansion'
+        ? 'expansion'
+        : (typeRaw === 'exploration' ? 'exploration' : 'conversation'));
     const eventType = String(req.body?.eventType || '').trim().toLowerCase();
 
     if (!entityId) return res.status(400).json({ success: false, error: 'entityId is required' });

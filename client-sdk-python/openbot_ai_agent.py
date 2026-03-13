@@ -2294,12 +2294,32 @@ class AIAgent:
             "score": float(top.get("score", 0.0) or 0.0),
         }
 
+
+    def _derive_exploration_guidance(self, exploration_recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        hints = exploration_recommendations if isinstance(exploration_recommendations, list) else []
+        top = hints[0] if hints else {}
+        target = top.get("targetPosition") if isinstance(top.get("targetPosition"), dict) else {}
+        x = target.get("x")
+        z = target.get("z")
+        try:
+            tx = float(x)
+            tz = float(z)
+        except Exception:
+            tx, tz = None, None
+        return {
+            "target": ({"x": tx, "z": tz} if tx is not None and tz is not None else None),
+            "reason": str(top.get("reason") or "")[:180],
+            "confidence": float(top.get("confidence", top.get("score", 0.0)) or 0.0),
+            "raw": top,
+        }
+
     def _build_expansion_planner(self, perception: Dict[str, Any]) -> Dict[str, Any]:
         self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
         world_tick = int(perception.get("worldTick", 0) or 0)
         objects = perception.get("worldObjects") if isinstance(perception.get("worldObjects"), list) else []
         position = perception.get("position") if isinstance(perception.get("position"), dict) else {"x": 50.0, "z": 50.0}
         guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
+        exploration_guidance = perception.get("explorationGuidance") if isinstance(perception.get("explorationGuidance"), dict) else {}
         frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
 
         missing = self._expansion_missing_resources(self_state)
@@ -2351,6 +2371,10 @@ class AIAgent:
             else:
                 queue.append({"type": "expand_map"})
 
+        exploration_target = exploration_guidance.get("target") if isinstance(exploration_guidance.get("target"), dict) else None
+        if isinstance(exploration_target, dict) and exploration_target.get("x") is not None and exploration_target.get("z") is not None:
+            queue.append({"type": "move", "x": float(exploration_target.get("x")), "z": float(exploration_target.get("z"))})
+
         planner = {
             "phase": phase,
             "missing": missing,
@@ -2360,6 +2384,8 @@ class AIAgent:
             "ready": ready_now,
             "placementAvailable": placement_available,
             "target": target,
+            "explorationTarget": exploration_target,
+            "explorationConfidence": float(exploration_guidance.get("confidence", 0.0) or 0.0),
         }
         planner["scores"] = self._score_action_classes(perception, planner)
         self._planner_state = planner
@@ -2385,16 +2411,25 @@ class AIAgent:
         merged = [a for a in social_actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
         planner_queue = [a for a in (planner.get("queue") or []) if isinstance(a, dict)]
 
+        social_urgency = float((planner.get("scores") or {}).get("social_response_urgency", 0.0) or 0.0)
+        exploration_target = planner.get("explorationTarget") if isinstance(planner.get("explorationTarget"), dict) else None
+        exploration_confidence = float(planner.get("explorationConfidence", 0.0) or 0.0)
+        exploration_push: List[Dict[str, Any]] = []
+        if social_urgency < 0.45 and exploration_confidence >= 0.35 and isinstance(exploration_target, dict):
+            exploration_push.append({"type": "move", "x": float(exploration_target.get("x")), "z": float(exploration_target.get("z"))})
+
         if planner.get("ready"):
-            merged = planner_queue + [a for a in merged if a.get("type") != "expand_map"]
+            merged = planner_queue + exploration_push + [a for a in merged if a.get("type") != "expand_map"]
         elif planner.get("phase") == "gathering":
-            merged = planner_queue + [a for a in merged if a.get("type") not in {"wait", "harvest"}][:2]
+            merged = planner_queue + exploration_push + [a for a in merged if a.get("type") not in {"wait", "harvest"}][:2]
         elif channel in {"mentions", "urgent_chat"}:
             merged.extend(planner_queue[:1])
         elif channel == "objective_continuation":
-            merged = planner_queue + merged[:2]
+            merged = planner_queue + exploration_push + merged[:2]
         elif not merged:
-            merged = planner_queue[:1] if planner_queue else [{"type": "wait"}]
+            merged = (exploration_push + planner_queue[:1]) if planner_queue else (exploration_push or [{"type": "wait"}])
+        elif exploration_push:
+            merged = exploration_push + merged
 
         self._planner_state["last_channel"] = channel
         self._planner_state["weights"] = weights
@@ -2432,7 +2467,9 @@ class AIAgent:
         frontier["nearestFrontierCell"] = exploration.get("nearest_frontier_cell")
         recommendations = self._fetch_recommendations("conversation")
         expansion_recommendations = self._fetch_recommendations("expansion")
+        exploration_recommendations = self._fetch_recommendations("exploration")
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
+        exploration_guidance = self._derive_exploration_guidance(exploration_recommendations)
         threat_items = []
         if nearest:
             threat_items.append(nearest)
@@ -2455,7 +2492,9 @@ class AIAgent:
             "exploration": exploration,
             "recommendations": recommendations,
             "expansionRecommendations": expansion_recommendations,
+            "explorationRecommendations": exploration_recommendations,
             "expansionGuidance": expansion_guidance,
+            "explorationGuidance": exploration_guidance,
             "plannerState": dict(self._planner_state),
         }
 
@@ -2489,6 +2528,14 @@ class AIAgent:
                         "score": rec.get("score"),
                     }
                     for rec in (perception.get("expansionRecommendations") or [])[:3]
+                ],
+                "exploration_hints": [
+                    {
+                        "target": rec.get("targetPosition"),
+                        "confidence": rec.get("confidence"),
+                        "reason": rec.get("reason"),
+                    }
+                    for rec in (perception.get("explorationRecommendations") or [])[:3]
                 ],
                 "quest_focus": (self._build_compact_quest_context().get("active") or [])[:2],
             },
