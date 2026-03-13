@@ -322,6 +322,44 @@ const missionAchievementThresholds = Object.freeze([
   { key: 'mission-vanguard', min: 6 }
 ]);
 
+function getMapExpansionLevel() {
+  return Math.max(0, Number(worldState.mapExpansionLevel || 0), worldState.expansionTiles.length);
+}
+
+function getExpansionThreatTier() {
+  const level = getMapExpansionLevel();
+  if (level >= 24) return 3;
+  if (level >= 12) return 2;
+  return 1;
+}
+
+function getExpansionResourceDensityMultiplier() {
+  const level = getMapExpansionLevel();
+  if (level >= 28) return 1.5;
+  if (level >= 15) return 1.3;
+  if (level >= 6) return 1.15;
+  return 1;
+}
+
+function getExpansionSpecialUnlocks() {
+  const level = getMapExpansionLevel();
+  return {
+    ancientRelicEnabled: level >= 10,
+    expansionThreatsEnabled: level >= 8,
+    tier2ThreatsEnabled: level >= 12,
+    tier3ThreatsEnabled: level >= 24
+  };
+}
+
+function getExpansionDerivedState() {
+  return {
+    level: getMapExpansionLevel(),
+    threatTier: getExpansionThreatTier(),
+    resourceDensityMultiplier: getExpansionResourceDensityMultiplier(),
+    unlocks: getExpansionSpecialUnlocks()
+  };
+}
+
 function createMission(type, overrides = {}) {
   const base = MISSION_DEFAULTS[type] || MISSION_DEFAULTS['resource-drive'];
   const missionId = overrides.id || `mission-${type}-${uuidv4()}`;
@@ -503,9 +541,26 @@ function refreshWorldTimeState(nowMs = Date.now()) {
   return nextState;
 }
 
+
+function getExpansionOwnershipSummary(limit = 10) {
+  const counts = new Map();
+  for (const tile of worldState.expansionTiles) {
+    const ownerEntityId = String(tile?.ownerEntityId || '').trim();
+    if (!ownerEntityId) continue;
+    counts.set(ownerEntityId, (counts.get(ownerEntityId) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .map(([entityId, tilesOwned]) => ({ entityId, tilesOwned }))
+    .sort((a, b) => b.tilesOwned - a.tilesOwned)
+    .slice(0, Math.max(1, limit));
+}
+
 function getWorldStateMeta() {
   const uptimeMs = Date.now() - worldState.startTime;
   const worldTime = worldState.worldTimeState || refreshWorldTimeState();
+  const traversableBounds = getTraversableBoundaryMetadata();
+  const expansion = getExpansionDerivedState();
   return {
     tick: worldState.tick,
     uptimeMs,
@@ -520,14 +575,19 @@ function getWorldStateMeta() {
     events: worldState.rotatingEvents,
     expansionTiles: worldState.expansionTiles,
     mapExpansionLevel: worldState.mapExpansionLevel,
-    traversableBounds: getTraversableBoundaryMetadata()
+    traversableBounds,
+    expansion: {
+      ...expansion,
+      traversableBounds,
+      ownershipLeaders: getExpansionOwnershipSummary(),
+      mapObjectTargets: getDynamicMapObjectTargets()
+    }
   };
 }
 
 function randomEventCenter() {
-  const x = clampWorldCoordX(Math.random() * WORLD_SIZE.x);
-  const z = clampWorldCoordZ(Math.random() * WORLD_SIZE.y);
-  return { x, y: 0, z };
+  const position = randomWorldPosition({ includeExpansion: true, edgePadding: 1.25 });
+  return { x: position.x, y: 0, z: position.z };
 }
 
 function getRotatingEventObjective(type, center) {
@@ -739,6 +799,20 @@ function randomInRange(min, max) {
   return min + Math.random() * (max - min);
 }
 
+
+function randomCoordinateInBounds(min, max, edgePadding = 0) {
+  const clampedPadding = Math.max(0, Math.min((max - min) / 2, edgePadding));
+  return randomInRange(min + clampedPadding, max - clampedPadding);
+}
+
+function randomWorldPosition({ includeExpansion = false, edgePadding = 0 } = {}) {
+  const bounds = resolveNavigableBounds({ includeExpansion });
+  return {
+    x: randomCoordinateInBounds(bounds.minX, bounds.maxX, edgePadding),
+    z: randomCoordinateInBounds(bounds.minZ, bounds.maxZ, edgePadding)
+  };
+}
+
 function getObjectRadius(type, data = {}) {
   if (type === 'rock') return Number(data.radius) || 1.8;
   if (type === 'kelp') return Number(data.radius) || 0.9;
@@ -760,42 +834,48 @@ function distance2D(a, b) {
   return Math.sqrt((dx * dx) + (dz * dz));
 }
 
-function getTraversableBoundaryMetadata() {
+function resolveNavigableBounds({ includeExpansion = false } = {}) {
   let minX = 0;
   let maxX = WORLD_SIZE.x;
   let minZ = 0;
   let maxZ = WORLD_SIZE.y;
 
-  for (const tile of worldState.expansionTiles) {
-    const tileX = Number(tile?.x);
-    const tileZ = Number(tile?.z);
-    if (!Number.isFinite(tileX) || !Number.isFinite(tileZ)) continue;
-    minX = Math.min(minX, tileX - 0.5);
-    maxX = Math.max(maxX, tileX + 0.5);
-    minZ = Math.min(minZ, tileZ - 0.5);
-    maxZ = Math.max(maxZ, tileZ + 0.5);
+  if (includeExpansion) {
+    for (const tile of worldState.expansionTiles) {
+      const tileX = Number(tile?.x);
+      const tileZ = Number(tile?.z);
+      if (!Number.isFinite(tileX) || !Number.isFinite(tileZ)) continue;
+      minX = Math.min(minX, tileX - 0.5);
+      maxX = Math.max(maxX, tileX + 0.5);
+      minZ = Math.min(minZ, tileZ - 0.5);
+      maxZ = Math.max(maxZ, tileZ + 0.5);
+    }
   }
 
+  return { minX, maxX, minZ, maxZ };
+}
+
+function getTraversableBoundaryMetadata() {
+  const baseBounds = resolveNavigableBounds({ includeExpansion: false });
+  const traversableBounds = resolveNavigableBounds({ includeExpansion: true });
   return {
-    minX,
-    maxX,
-    minZ,
-    maxZ,
-    baseMinX: 0,
-    baseMaxX: WORLD_SIZE.x,
-    baseMinZ: 0,
-    baseMaxZ: WORLD_SIZE.y,
-    expansionTilesCount: worldState.expansionTiles.length
+    ...traversableBounds,
+    baseMinX: baseBounds.minX,
+    baseMaxX: baseBounds.maxX,
+    baseMinZ: baseBounds.minZ,
+    baseMaxZ: baseBounds.maxZ,
+    expansionTilesCount: worldState.expansionTiles.length,
+    expansionLevel: getMapExpansionLevel()
   };
 }
 
-function clampWorldCoordX(x) {
-  const { minX, maxX } = getTraversableBoundaryMetadata();
+function clampWorldCoordX(x, { includeExpansion = false } = {}) {
+  const { minX, maxX } = resolveNavigableBounds({ includeExpansion });
   return Math.max(minX, Math.min(maxX, Number(x) || 0));
 }
 
-function clampWorldCoordZ(z) {
-  const { minZ, maxZ } = getTraversableBoundaryMetadata();
+function clampWorldCoordZ(z, { includeExpansion = false } = {}) {
+  const { minZ, maxZ } = resolveNavigableBounds({ includeExpansion });
   return Math.max(minZ, Math.min(maxZ, Number(z) || 0));
 }
 
@@ -821,13 +901,14 @@ function pushCombatEvent(event) {
 
 function createOctopusThreat(position = {}) {
   const maxHp = OCTOPUS_MAX_HP;
+  const randomSpawn = randomWorldPosition({ includeExpansion: true, edgePadding: 6 });
   return {
     id: `threat-octopus-${uuidv4()}`,
     type: 'octopus',
     position: {
-      x: clampWorldCoordX(position.x ?? randomInRange(6, WORLD_SIZE.x - 6)),
+      x: clampWorldCoordX(position.x ?? randomSpawn.x, { includeExpansion: true }),
       y: 0.6,
-      z: clampWorldCoordZ(position.z ?? randomInRange(6, WORLD_SIZE.y - 6))
+      z: clampWorldCoordZ(position.z ?? randomSpawn.z, { includeExpansion: true })
     },
     velocity: { x: 0, z: 0 },
     hp: maxHp,
@@ -864,7 +945,7 @@ function movePointTowards(point, target, maxStep) {
     x: Number(point.x || 0) + ((dx / dist) * step),
     y: Number(point.y || 0),
     z: Number(point.z || 0) + ((dz / dist) * step)
-  });
+  }, { allowExpansion: true });
   point.x = next.x;
   point.z = next.z;
 }
@@ -951,12 +1032,23 @@ function removeThreatWithLoot(threat, killedByAgentId = null) {
 }
 
 function maybeSpawnOctopusThreat(dtSeconds) {
-  if (worldState.threats.size >= OCTOPUS_MAX_ACTIVE) return;
-  nextThreatSpawnInSec = Math.max(0, nextThreatSpawnInSec - Math.max(0, Number(dtSeconds) || 0));
+  const expansion = getExpansionDerivedState();
+  const maxActiveThreats = OCTOPUS_MAX_ACTIVE + Math.max(0, expansion.threatTier - 1);
+  if (worldState.threats.size >= maxActiveThreats) return;
+
+  const spawnRateMultiplier = expansion.unlocks.expansionThreatsEnabled
+    ? Math.min(1.5, 1 + (Math.max(0, expansion.level - 8) * 0.015))
+    : 1;
+  const adjustedTickSeconds = Math.max(0, Number(dtSeconds) || 0) * spawnRateMultiplier;
+  nextThreatSpawnInSec = Math.max(0, nextThreatSpawnInSec - adjustedTickSeconds);
   if (nextThreatSpawnInSec > 0) return;
+
   const threat = createOctopusThreat();
+  threat.tier = expansion.threatTier;
   worldState.threats.set(threat.id, threat);
-  nextThreatSpawnInSec = randomInRange(OCTOPUS_SPAWN_MIN_SEC, OCTOPUS_SPAWN_MAX_SEC);
+
+  const cooldownScale = expansion.unlocks.expansionThreatsEnabled ? 0.85 : 1;
+  nextThreatSpawnInSec = randomInRange(OCTOPUS_SPAWN_MIN_SEC * cooldownScale, OCTOPUS_SPAWN_MAX_SEC * cooldownScale);
 }
 
 function processThreatCombatTick(dtSeconds) {
@@ -1123,6 +1215,22 @@ function isObjectPlacementValid(x, z, radius) {
   return true;
 }
 
+
+function getDynamicMapObjectTargets() {
+  const densityMultiplier = getExpansionResourceDensityMultiplier();
+  const targets = {};
+  for (const [type, target] of Object.entries(MAP_OBJECT_TARGETS)) {
+    targets[type] = Math.max(1, Math.floor(target * densityMultiplier));
+  }
+
+  const { ancientRelicEnabled } = getExpansionSpecialUnlocks();
+  if (ancientRelicEnabled) {
+    targets.ancient_relic = Math.max(1, Math.floor(getMapExpansionLevel() / 12));
+  }
+
+  return targets;
+}
+
 function buildMapObject(type) {
   const radius = getObjectRadius(type, {
     radius: type === 'rock'
@@ -1149,7 +1257,9 @@ function buildMapObject(type) {
       ? randomInRange(1.5, 3.75)
       : type === 'seaweed'
         ? randomInRange(0.8, 2.25)
-        : 0.45;
+        : type === 'ancient_relic'
+          ? randomInRange(0.35, 0.85)
+          : 0.45;
   const objectId = `map-${type}-${uuidv4()}`;
 
   return {
@@ -1163,7 +1273,7 @@ function buildMapObject(type) {
         y: randomInRange(0, Math.PI),
         z: randomInRange(0, Math.PI)
       },
-      height: type === 'rock' ? null : type === 'kelp' ? randomInRange(2.5, 7.0) : type === 'seaweed' ? randomInRange(1.8, 4.5) : 0.6,
+      height: type === 'rock' ? null : type === 'kelp' ? randomInRange(2.5, 7.0) : type === 'seaweed' ? randomInRange(1.8, 4.5) : type === 'ancient_relic' ? randomInRange(0.9, 1.8) : 0.6,
       servesRemaining: type === 'algae_pallet' ? ALGAE_PALLET_MAX_SERVES : undefined,
       energyPerServe: type === 'algae_pallet' ? ALGAE_PALLET_ENERGY_PER_SERVE : undefined,
       lastRefilledAt: type === 'algae_pallet' ? Date.now() : undefined
@@ -1188,7 +1298,11 @@ function refillAlgaePalletServes() {
 }
 
 async function refillMapObjects({ persist = true } = {}) {
-  const typeCounts = { rock: 0, kelp: 0, seaweed: 0, algae_pallet: 0 };
+  const targetMapObjects = getDynamicMapObjectTargets();
+  const typeCounts = {};
+  for (const type of Object.keys(targetMapObjects)) {
+    typeCounts[type] = 0;
+  }
   for (const object of worldState.objects.values()) {
     if (typeCounts[object.type] !== undefined) {
       typeCounts[object.type] += 1;
@@ -1196,7 +1310,7 @@ async function refillMapObjects({ persist = true } = {}) {
   }
 
   const newObjects = [];
-  for (const [type, targetCount] of Object.entries(MAP_OBJECT_TARGETS)) {
+  for (const [type, targetCount] of Object.entries(targetMapObjects)) {
     const missing = Math.max(0, targetCount - (typeCounts[type] || 0));
     for (let i = 0; i < missing; i += 1) {
       const mapObject = buildMapObject(type);
@@ -1222,7 +1336,8 @@ async function refillMapObjects({ persist = true } = {}) {
 
   return {
     newObjects: newObjects.length,
-    refilledPallets: refilledPalletCount
+    refilledPallets: refilledPalletCount,
+    targets: targetMapObjects
   };
 }
 
@@ -1426,17 +1541,17 @@ function decayAgentSkillCooldowns(agent, dtSec) {
 }
 
 // Validate movement position (clamp to world bounds)
-function validatePosition(pos) {
+function validatePosition(pos, { allowExpansion = false } = {}) {
   const numericX = Number(pos?.x);
   const numericY = Number(pos?.y);
   const numericZ = Number(pos?.z);
   const rawX = Number.isFinite(numericX) ? numericX : 0;
   const rawZ = Number.isFinite(numericZ) ? numericZ : 0;
-  const clampedX = clampWorldCoordX(rawX);
-  const clampedZ = clampWorldCoordZ(rawZ);
-  const traversable = hasGroundTileAt(clampedX, clampedZ)
+  const clampedX = clampWorldCoordX(rawX, { includeExpansion: allowExpansion });
+  const clampedZ = clampWorldCoordZ(rawZ, { includeExpansion: allowExpansion });
+  const traversable = hasGroundTileAt(clampedX, clampedZ, { allowExpansion })
     ? { x: clampedX, z: clampedZ }
-    : findNearestTraversablePoint(clampedX, clampedZ);
+    : findNearestTraversablePoint(clampedX, clampedZ, { allowExpansion });
 
   return {
     x: traversable.x,
@@ -1446,9 +1561,9 @@ function validatePosition(pos) {
 }
 
 // Clamp movement to realistic distance from current position
-function clampMovement(currentPos, targetPos) {
-  const normalizedCurrent = validatePosition(currentPos || {});
-  const validated = validatePosition(targetPos);
+function clampMovement(currentPos, targetPos, { allowExpansion = false } = {}) {
+  const normalizedCurrent = validatePosition(currentPos || {}, { allowExpansion });
+  const validated = validatePosition(targetPos, { allowExpansion });
   const dx = validated.x - normalizedCurrent.x;
   const dy = validated.y - normalizedCurrent.y;
   const dz = validated.z - normalizedCurrent.z;
@@ -1464,7 +1579,7 @@ function clampMovement(currentPos, targetPos) {
     x: normalizedCurrent.x + dx * scale,
     y: normalizedCurrent.y + dy * scale,
     z: normalizedCurrent.z + dz * scale
-  });
+  }, { allowExpansion });
 }
 
 function getOwnedAgentOrReject(req, res, agentId) {
@@ -1869,7 +1984,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     // Update agent position with realistic distance clamping
     const previousPosition = { ...agent.position };
     if (position) {
-      agent.position = clampMovement(agent.position, position);
+      agent.position = clampMovement(agent.position, position, { allowExpansion: true });
       updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
       pushEntityRecentPosition(agent.entityId, agent.position);
       noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
@@ -2443,12 +2558,13 @@ function isBaseWorldTile(x, z) {
   return x >= 0 && x <= WORLD_SIZE.x && z >= 0 && z <= WORLD_SIZE.y;
 }
 
-function hasGroundTileAt(x, z) {
+function hasGroundTileAt(x, z, { allowExpansion = true } = {}) {
   if (isBaseWorldTile(x, z)) return true;
+  if (!allowExpansion) return false;
   return hasExpansionTileAt(x, z);
 }
 
-function findNearestTraversablePoint(x, z) {
+function findNearestTraversablePoint(x, z, { allowExpansion = true } = {}) {
   const fromX = Number.isFinite(Number(x)) ? Number(x) : 0;
   const fromZ = Number.isFinite(Number(z)) ? Number(z) : 0;
 
@@ -2457,6 +2573,10 @@ function findNearestTraversablePoint(x, z) {
     z: Math.max(0, Math.min(WORLD_SIZE.y, fromZ))
   };
   let bestDistanceSq = ((best.x - fromX) ** 2) + ((best.z - fromZ) ** 2);
+
+  if (!allowExpansion) {
+    return best;
+  }
 
   for (const tile of worldState.expansionTiles) {
     const tileX = Number(tile?.x);
@@ -2608,7 +2728,7 @@ function buildDeterministicNearbyTarget(agent, targetAgent) {
     x: targetAgent.position.x + offsetX,
     y: targetAgent.position.y,
     z: targetAgent.position.z + offsetZ
-  });
+  }, { allowExpansion: true });
 }
 
 function applyQueueAction(agent, action) {
@@ -2648,7 +2768,7 @@ function applyQueueAction(agent, action) {
       x: action.x,
       y: action.y ?? agent.position.y,
       z: action.z
-    });
+    }, { allowExpansion: true });
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     pushEntityRecentPosition(agent.entityId, agent.position);
     noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
@@ -2700,7 +2820,7 @@ function applyQueueAction(agent, action) {
 
     const targetPosition = buildDeterministicNearbyTarget(agent, targetAgent);
     const previousPosition = { ...agent.position };
-    agent.position = clampMovement(agent.position, targetPosition);
+    agent.position = clampMovement(agent.position, targetPosition, { allowExpansion: true });
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     pushEntityRecentPosition(agent.entityId, agent.position);
     agent.state = 'moving';
@@ -4902,6 +5022,10 @@ module.exports = {
     buildDeterministicNearbyTarget,
     clampMovement,
     validatePosition,
+    resolveNavigableBounds,
+    clampWorldCoordX,
+    clampWorldCoordZ,
+    getExpansionDerivedState,
     refillMapObjects,
     MAP_OBJECT_TARGETS,
     runAgentMaintenance,
