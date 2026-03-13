@@ -983,6 +983,85 @@ class AIAgent:
                 return False
         return True
 
+    def _expansion_missing_resources(self, self_state: Dict[str, Any]) -> Dict[str, int]:
+        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
+        return {
+            key: max(0, int(float(needed) - float(inventory.get(key, 0) or 0)))
+            for key, needed in MAP_EXPANSION_COST.items()
+        }
+
+    def _expansion_cooldown_ticks(self, self_state: Dict[str, Any], world_tick: int) -> int:
+        cooldown_ticks = 0
+        for key in ("expand_map", "expandMap", "mapExpand"):
+            value = self_state.get(key)
+            if isinstance(value, dict):
+                cooldown_ticks = max(cooldown_ticks, int(value.get("remainingTicks", 0) or 0))
+            elif isinstance(value, (int, float)):
+                cooldown_ticks = max(cooldown_ticks, int(value))
+
+        cooldown_until = int(
+            self_state.get("expansionCooldownUntilTick", self_state.get("expandCooldownUntilTick", 0)) or 0
+        )
+        if cooldown_until > world_tick:
+            cooldown_ticks = max(cooldown_ticks, cooldown_until - world_tick)
+        return cooldown_ticks
+
+    def _is_expansion_placement_available(
+        self,
+        target: Dict[str, Any],
+        objects: List[Dict[str, Any]],
+    ) -> bool:
+        if not isinstance(target, dict) or target.get("x") is None or target.get("z") is None:
+            return True
+        tx = float(target.get("x", 0.0))
+        tz = float(target.get("z", 0.0))
+        for obj in objects:
+            opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+            ox = float(opos.get("x", 0.0))
+            oz = float(opos.get("z", 0.0))
+            otype = str(obj.get("type", "")).lower()
+            if math.hypot(tx - ox, tz - oz) > 2.2:
+                continue
+            if otype in {"rock", "kelp", "seaweed", "wall", "obstacle", "entity", "shelter"}:
+                return False
+        return True
+
+    def _score_action_classes(self, perception: Dict[str, Any], planner: Dict[str, Any]) -> Dict[str, float]:
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        social_urgency = 0.2
+        if markers.get("mentions"):
+            social_urgency += 0.7
+        if markers.get("urgent_chat"):
+            social_urgency += 0.4
+        if markers.get("new_messages"):
+            social_urgency += 0.2
+
+        survival = 0.0
+        runtime = perception.get("survival") if isinstance(perception.get("survival"), dict) else {}
+        nearest_threat = float(runtime.get("nearest_threat_distance", 999.0) or 999.0)
+        if nearest_threat < 14.0:
+            survival += max(0.0, (14.0 - nearest_threat) / 14.0)
+        if not runtime.get("has_shelter"):
+            survival += 0.2
+
+        missing = planner.get("missing") if isinstance(planner.get("missing"), dict) else {}
+        gather_need = min(1.0, sum(max(0.0, float(v or 0.0)) for v in missing.values()) / max(1.0, float(len(MAP_EXPANSION_COST))))
+
+        expansion_opportunity = 0.0
+        if bool(planner.get("placementAvailable")):
+            expansion_opportunity += 0.5
+        if int(planner.get("cooldownTicks", 0) or 0) <= 0:
+            expansion_opportunity += 0.5
+        if bool(planner.get("ready")):
+            expansion_opportunity = 1.0
+
+        return {
+            "social_response_urgency": round(min(1.0, social_urgency), 3),
+            "survival": round(min(1.0, survival), 3),
+            "gather_need": round(min(1.0, gather_need), 3),
+            "expansion_opportunity": round(min(1.0, expansion_opportunity), 3),
+        }
+
     def _frontier_movement_action(
         self,
         perception: Dict[str, Any],
@@ -1696,8 +1775,15 @@ class AIAgent:
         planner_phase = str(self._planner_state.get("phase", "idle"))
         planner_reason = str(self._planner_state.get("last_reason", ""))
         planner_missing = self._planner_state.get("missing") if isinstance(self._planner_state.get("missing"), dict) else {}
+        planner_scores = self._planner_state.get("scores") if isinstance(self._planner_state.get("scores"), dict) else {}
         missing_summary = ",".join(f"{k}:{int(planner_missing.get(k, 0) or 0)}" for k in ("rock", "kelp", "seaweed"))
+        missing_total = sum(int(planner_missing.get(k, 0) or 0) for k in ("rock", "kelp", "seaweed"))
         lines.append(f"🧠 planner phase={planner_phase} missing[{missing_summary}] {planner_reason}".strip())
+        lines.append(
+            f"📈 expand-progress phase={planner_phase} miss={missing_total} "
+            f"cd={int(self._planner_state.get('cooldownTicks', 0) or 0)} ready={1 if self._planner_state.get('ready') else 0} "
+            f"opp={float(planner_scores.get('expansion_opportunity', 0.0) or 0.0):.2f}"
+        )
 
         # Recent conversation (last 6 messages so we catch new ones reliably)
         recent_window_secs = self._conversation_window_seconds()
@@ -2088,77 +2174,56 @@ class AIAgent:
         }
 
     def _build_expansion_planner(self, perception: Dict[str, Any]) -> Dict[str, Any]:
-        resources = ["rock", "kelp", "seaweed"]
         self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
-        inventory = self_state.get("inventory") if isinstance(self_state.get("inventory"), dict) else {}
         world_tick = int(perception.get("worldTick", 0) or 0)
-        objects_raw = self.client.get_world_objects() if self.client else []
-        objects = objects_raw if isinstance(objects_raw, list) else []
+        objects = perception.get("worldObjects") if isinstance(perception.get("worldObjects"), list) else []
         position = perception.get("position") if isinstance(perception.get("position"), dict) else {"x": 50.0, "z": 50.0}
         guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
         frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
 
-        required = dict(MAP_EXPANSION_COST)
-        missing = {
-            r: max(0, int(required.get(r, 0) - int(float(inventory.get(r, 0) or 0))))
-            for r in resources
-        }
+        missing = self._expansion_missing_resources(self_state)
+        cooldown_ticks = self._expansion_cooldown_ticks(self_state, world_tick)
         queue: List[Dict[str, Any]] = []
 
-        cooldown_ticks = 0
-        for key in ("expand_map", "expandMap", "mapExpand"):
-            value = self_state.get(key)
-            if isinstance(value, dict):
-                cooldown_ticks = max(cooldown_ticks, int(value.get("remainingTicks", 0) or 0))
-            elif isinstance(value, (int, float)):
-                cooldown_ticks = max(cooldown_ticks, int(value))
-        cooldown_until = int(self_state.get("expandCooldownUntilTick", 0) or 0)
-        if cooldown_until > world_tick:
-            cooldown_ticks = max(cooldown_ticks, cooldown_until - world_tick)
+        target = guidance.get("target") if isinstance(guidance.get("target"), dict) else None
+        if not target:
+            target = frontier.get("target_centroid") if isinstance(frontier.get("target_centroid"), dict) else None
+
+        placement_available = self._is_expansion_placement_available(target or {}, objects)
+        ready_now = sum(missing.values()) == 0 and cooldown_ticks <= 0 and placement_available
 
         reason = "inventory_ready"
         phase = "ready_to_expand"
+
         if sum(missing.values()) > 0:
             phase = "gathering"
             reason = "missing_inventory"
-            need_types = [k for k, v in missing.items() if v > 0]
-            target_obj = None
-            best_dist = float("inf")
-            for obj in objects:
-                otype = str(obj.get("type", "")).lower()
-                if otype not in need_types:
-                    continue
-                opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
-                dist = math.sqrt((float(opos.get("x", 0.0)) - float(position.get("x", 0.0))) ** 2 + (float(opos.get("z", 0.0)) - float(position.get("z", 0.0))) ** 2)
-                if dist < best_dist:
-                    best_dist = dist
-                    target_obj = obj
-            if target_obj:
-                tobj_pos = target_obj.get("position") if isinstance(target_obj.get("position"), dict) else {}
-                rtype = str(target_obj.get("type", "")).lower()
-                obj_id = str(target_obj.get("id", ""))
-                repeats = max(1, min(3, missing.get(rtype, 1)))
+            missing_types = [k for k, v in missing.items() if v > 0]
+            nearest_by_type: Dict[str, Dict[str, Any]] = {}
+            for resource_type in missing_types:
+                nearest_by_type[resource_type] = self._get_nearest_harvestable_object(position, [o for o in objects if str(o.get("type", "")).lower() == resource_type]) or {}
+
+            for resource_type in sorted(missing_types, key=lambda t: missing.get(t, 0), reverse=True):
+                target_obj = nearest_by_type.get(resource_type) or {}
+                repeats = max(1, min(4, int(missing.get(resource_type, 1))))
+                if target_obj.get("x") is not None and target_obj.get("z") is not None:
+                    queue.append({"type": "move", "x": float(target_obj.get("x")), "z": float(target_obj.get("z"))})
                 for _ in range(repeats):
-                    queue.append({
-                        "type": "move",
-                        "x": float(tobj_pos.get("x", position.get("x", 50.0))),
-                        "z": float(tobj_pos.get("z", position.get("z", 50.0))),
-                    })
-                    harvest = {"type": "harvest", "resource_type": rtype}
-                    if obj_id:
+                    harvest = {"type": "harvest", "resource_type": resource_type}
+                    obj_id = target_obj.get("id")
+                    if isinstance(obj_id, str) and obj_id:
                         harvest["object_id"] = obj_id
                     queue.append(harvest)
-            else:
-                reason = "missing_inventory_no_target"
-                queue.extend(self._frontier_movement_action(perception, prefer_expand=True)[:1])
         elif cooldown_ticks > 0:
             phase = "cooldown"
             reason = f"expand_cooldown_{cooldown_ticks}t"
             queue.extend(self._frontier_movement_action(perception, prefer_expand=False)[:1])
+        elif not placement_available:
+            phase = "seeking_placement"
+            reason = "placement_blocked"
+            queue.extend(self._frontier_movement_action(perception, prefer_expand=True)[:2])
         else:
-            target = guidance.get("target") if isinstance(guidance.get("target"), dict) else None
-            if not target:
-                target = frontier.get("target_centroid") if isinstance(frontier.get("target_centroid"), dict) else None
+            reason = "force_expand"
             if isinstance(target, dict) and target.get("x") is not None and target.get("z") is not None:
                 queue.append({"type": "move", "x": float(target.get("x")), "z": float(target.get("z"))})
                 queue.append({"type": "expand_map", "x": float(target.get("x")), "z": float(target.get("z"))})
@@ -2168,11 +2233,14 @@ class AIAgent:
         planner = {
             "phase": phase,
             "missing": missing,
-            "queue": queue[:6],
+            "queue": queue[:8],
             "last_reason": reason,
             "cooldownTicks": cooldown_ticks,
-            "ready": sum(missing.values()) == 0 and cooldown_ticks <= 0,
+            "ready": ready_now,
+            "placementAvailable": placement_available,
+            "target": target,
         }
+        planner["scores"] = self._score_action_classes(perception, planner)
         self._planner_state = planner
         return planner
 
@@ -2195,7 +2263,12 @@ class AIAgent:
 
         merged = [a for a in social_actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
         planner_queue = [a for a in (planner.get("queue") or []) if isinstance(a, dict)]
-        if channel in {"mentions", "urgent_chat"}:
+
+        if planner.get("ready"):
+            merged = planner_queue + [a for a in merged if a.get("type") != "expand_map"]
+        elif planner.get("phase") == "gathering":
+            merged = planner_queue + [a for a in merged if a.get("type") not in {"wait", "harvest"}][:2]
+        elif channel in {"mentions", "urgent_chat"}:
             merged.extend(planner_queue[:1])
         elif channel == "objective_continuation":
             merged = planner_queue + merged[:2]
@@ -2204,7 +2277,7 @@ class AIAgent:
 
         self._planner_state["last_channel"] = channel
         self._planner_state["weights"] = weights
-        print(f"  🧠 planner channel={channel} reason={planner.get('last_reason')} missing={planner.get('missing')}")
+        print(f"  🧠 planner channel={channel} reason={planner.get('last_reason')} missing={planner.get('missing')} scores={planner.get('scores')}")
         return merged[:16]
 
     def perceive(self) -> Dict[str, Any]:
@@ -2254,6 +2327,7 @@ class AIAgent:
             "threats": threat_items,
             "nearHarvestObject": nearest_harvest,
             "selfState": self_state,
+            "worldObjects": objects,
             "survival": survival,
             "progressionSignals": progression_signals,
             "frontier": frontier,
@@ -2485,8 +2559,11 @@ class AIAgent:
         inventory_state = signals.get("inventoryTowardsExpansionCost") if isinstance(signals.get("inventoryTowardsExpansionCost"), dict) else {}
         quest_state = signals.get("questProgressSnapshot") if isinstance(signals.get("questProgressSnapshot"), dict) else {}
         nearest_resources = signals.get("nearestHarvestableResources") if isinstance(signals.get("nearestHarvestableResources"), list) else []
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        missing = self._expansion_missing_resources(self_state)
+        cooldown_ticks = self._expansion_cooldown_ticks(self_state, int(perception.get("worldTick", 0) or 0))
 
-        expansion_ready = bool(inventory_state.get("ready"))
+        expansion_ready = bool(inventory_state.get("ready")) and sum(missing.values()) == 0 and cooldown_ticks <= 0
         has_expand_action = any(a.get("type") == "expand_map" for a in sanitized)
         has_harvest_action = any(a.get("type") == "harvest" for a in sanitized)
 
@@ -2497,22 +2574,31 @@ class AIAgent:
             for item in active_quests
         )
 
-        force_expand = expansion_ready and has_unmet_quest_metric
+        force_expand = expansion_ready or (expansion_ready and has_unmet_quest_metric)
         if force_expand and not has_expand_action:
             sanitized.insert(0, {"type": "expand_map"})
         elif force_expand and has_expand_action:
             sanitized.sort(key=lambda a: 0 if a.get("type") == "expand_map" else 1)
 
-        needs_harvest = (not expansion_ready) and bool(nearest_resources)
+        needs_harvest = (not expansion_ready) and bool(nearest_resources) and sum(missing.values()) > 0
         if needs_harvest and not has_harvest_action:
-            best = nearest_resources[0] if nearest_resources else {}
+            missing_types = {k for k, v in missing.items() if int(v) > 0}
+            best = next((r for r in nearest_resources if isinstance(r, dict) and str(r.get("type", "")).lower() in missing_types), None)
+            best = best or (nearest_resources[0] if nearest_resources else {})
             injected = {"type": "harvest"}
             if isinstance(best, dict) and best.get("type"):
-                injected["resource_type"] = best.get("type")
+                injected["resource_type"] = str(best.get("type")).lower()
             if isinstance(best, dict) and best.get("id"):
                 injected["object_id"] = best.get("id")
             sanitized.insert(0, injected)
         elif needs_harvest and has_harvest_action:
+            missing_types = {k for k, v in missing.items() if int(v) > 0}
+            for action in sanitized:
+                if action.get("type") != "harvest":
+                    continue
+                rtype = str(action.get("resource_type", "")).lower()
+                if rtype not in missing_types and missing_types:
+                    action["resource_type"] = sorted(missing_types)[0]
             sanitized.sort(key=lambda a: 0 if a.get("type") == "harvest" else 1)
 
         return sanitized[:16]
@@ -2653,10 +2739,14 @@ class AIAgent:
         slot = self._daily_reflection_rollup.setdefault(date_str, {
             "message_count": 0,
             "tag_replies": 0,
+            "expand_attempts": 0,
+            "expand_success": 0,
             "notes": [],
         })
         slot["message_count"] += record.get("chatActions", 0)
         slot["tag_replies"] += record.get("tagReplies", 0)
+        slot["expand_attempts"] += record.get("expandAttempts", 0)
+        slot["expand_success"] += record.get("expandSuccess", 0)
         if record.get("worked"):
             slot["notes"].append(record["worked"])
             slot["notes"] = slot["notes"][-8:]
@@ -2680,7 +2770,8 @@ class AIAgent:
         summary = (
             f"{self.entity_id} reflection for {prev_day}: "
             f"{rollup['message_count']} chat action(s), "
-            f"{rollup['tag_replies']} direct mention reply/replies. "
+            f"{rollup['tag_replies']} direct mention reply/replies, "
+            f"{int(rollup.get('expand_success', 0) or 0)}/{int(rollup.get('expand_attempts', 0) or 0)} expansion success. "
             f"Latest learning: {note}."
         )
         goals_payload = self._build_goal_snapshot_payload(prev_day, rollup)
@@ -2786,6 +2877,9 @@ class AIAgent:
         emote_actions = sum(1 for a in executed_actions if a.get("type") == "emote")
         wait_actions = sum(1 for a in executed_actions if a.get("type") == "wait")
         tag_replies = chat_actions if perception.get("taggedBy") else 0
+        expand_actions = [a for a in executed_actions if a.get("type") == "expand_map"]
+        expand_attempts = len(expand_actions)
+        expand_success = sum(1 for a in expand_actions if a.get("status") == "ok")
 
         self._procedural_stats["ticks"] += 1
         self._procedural_stats["chat_actions"] += chat_actions
@@ -2797,6 +2891,8 @@ class AIAgent:
         worked = "kept social cadence" if chat_actions > 0 else "maintained movement/exploration"
         if perception.get("markers", {}).get("mentions") and chat_actions == 0:
             worked = "missed direct mention; fallback override required"
+        if expand_attempts > 0:
+            worked = f"expansion {'succeeded' if expand_success > 0 else 'attempted but blocked'}"
 
         record = {
             "tick": perception.get("tick"),
@@ -2804,6 +2900,8 @@ class AIAgent:
             "chatActions": chat_actions,
             "movementActions": movement_actions,
             "tagReplies": tag_replies,
+            "expandAttempts": expand_attempts,
+            "expandSuccess": expand_success,
             "worked": worked,
             "nextAdjustment": "prioritize direct replies when tagged",
         }
