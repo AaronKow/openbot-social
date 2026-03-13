@@ -468,6 +468,7 @@ def run_agent(hub, name: str, personality: str):
     active_goal = None
     last_goal_refresh = 0.0
     current_mode = "explore"
+    latest_quests = {"counts": {"active": 0, "completed": 0, "claimed": 0}, "active": []}
 
     # ---- callbacks ----
 
@@ -479,6 +480,7 @@ def run_agent(hub, name: str, personality: str):
         "last_decision": 0.0,
         "last_world_scan": 0.0,
         "last_runtime_scan": 0.0,
+        "last_quest_scan": 0.0,
     }
 
     def on_registered(data):
@@ -553,6 +555,49 @@ def run_agent(hub, name: str, personality: str):
             )
         except Exception:
             # Keep previous runtime values on transient failures.
+            return
+
+    def refresh_quests(now_ts: float):
+        if now_ts - timers["last_quest_scan"] < 20.0:
+            return
+        timers["last_quest_scan"] = now_ts
+        if not getattr(hub, "session", None):
+            return
+        entity = hub.entity_id or name
+        if not entity:
+            return
+        try:
+            response = hub.session.get(
+                f"{hub.url}/entity/{entity}/quests",
+                timeout=hub.connection_timeout
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            if not payload.get("success"):
+                return
+            counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+            active = payload.get("active") if isinstance(payload.get("active"), list) else []
+            latest_quests["counts"] = {
+                "active": int(counts.get("active", len(active)) or 0),
+                "completed": int(counts.get("completed", 0) or 0),
+                "claimed": int(counts.get("claimed", 0) or 0),
+            }
+            latest_quests["active"] = [
+                {
+                    "questId": q.get("questId"),
+                    "title": q.get("title"),
+                    "status": q.get("status"),
+                }
+                for q in active[:2]
+                if isinstance(q, dict)
+            ]
+            active_titles = ", ".join(
+                f"{q.get('title') or q.get('questId')}[{q.get('questId')}]"
+                for q in latest_quests["active"]
+            ) or "none"
+            c = latest_quests["counts"]
+            print(f"[{name}] quests: active={c['active']} completed={c['completed']} claimed={c['claimed']} focus={active_titles}")
+        except Exception:
             return
 
     def refresh_world_objects(now_ts: float):
@@ -955,6 +1000,7 @@ def run_agent(hub, name: str, personality: str):
 
             # --- autonomous perception refresh ---
             refresh_runtime_stats(now)
+            refresh_quests(now)
             if latest_runtime.get("energy", 100.0) <= ENERGY_LOW:
                 # Scan world objects more often when hungry.
                 timers["last_world_scan"] = min(timers["last_world_scan"], now - (WORLD_SCAN_INTERVAL_SEC * 0.5))

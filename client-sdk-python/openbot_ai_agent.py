@@ -50,6 +50,7 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 # Shared across ALL AIAgent instances (same process AND cross-process via file).
 # Prevents redundant web-search API calls when multiple agents are running.
 NEWS_CACHE_TTL = 8 * 60 * 60  # 8 hours in seconds
+QUEST_POLL_INTERVAL_SECONDS = 15.0
 _NEWS_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".openbot", "news_cache.json")
 _NEWS_CACHE_LOCK = threading.Lock()
 _NEWS_CACHE_HEADLINES: List[str] = []
@@ -820,6 +821,10 @@ class AIAgent:
         self._recommendations_cache: Dict[str, Any] = {}
         self._quest_snapshot_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         self._quest_planning_context_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+        self._quest_progress_score: float = 0.0
+        self._quest_reward_signal: float = 0.0
+        self._quest_last_delta: float = 0.0
+        self._recent_quest_claim_notes: List[str] = []
         # Cached system prompt — rebuilt when interests evolve
         self._cached_system_prompt: Optional[str] = None
         self._cached_interests_key: Optional[str] = None  # hash of interests for cache invalidation
@@ -1106,9 +1111,75 @@ class AIAgent:
                 actions.append({"type": "expand_map", "x": cx, "z": cz})
         return actions
 
+    def _quest_progress_score_from_snapshot(self, snapshot: Dict[str, Any]) -> float:
+        active = snapshot.get("active") if isinstance(snapshot.get("active"), list) else []
+        ratios: List[float] = []
+        for quest in active:
+            if not isinstance(quest, dict):
+                continue
+            for metric in quest.get("metrics") or []:
+                if not isinstance(metric, dict):
+                    continue
+                ratios.append(float(metric.get("ratio", 0.0) or 0.0))
+        if not ratios:
+            return 0.0
+        return round(sum(ratios) / len(ratios), 4)
+
+    def _interpret_named_quest(self, quest_id: str, deficits: Dict[str, float], perception: Dict[str, Any]) -> Dict[str, Any]:
+        qid = (quest_id or "").strip().lower()
+        position = perception.get("position") if isinstance(perception.get("position"), dict) else {}
+        px = float(position.get("x", 50.0) or 50.0)
+        pz = float(position.get("z", 50.0) or 50.0)
+
+        if qid == "daily-explorer":
+            move_gap = max(deficits.get("moveCount", 0.0), deficits.get("distance", 0.0))
+            stride = min(5.0, max(2.0, move_gap / 3.0 if move_gap > 0 else 3.0))
+            return {
+                "label": "movement target cadence",
+                "templates": [
+                    {"type": "move", "x": max(0.0, min(100.0, px + stride)), "z": pz},
+                    {"type": "move", "x": px, "z": max(0.0, min(100.0, pz + stride))},
+                ],
+                "min_non_chat": 2,
+                "notes": [f"daily-explorer cadence stride={stride:.1f}"],
+            }
+
+        if qid == "daily-queue-operator":
+            return {
+                "label": "queue-first execution preference",
+                "templates": [
+                    {"type": "harvest"},
+                    {"type": "move"},
+                ],
+                "min_non_chat": 2,
+                "notes": ["daily-queue-operator: bias non-chat queueable actions first"],
+            }
+
+        if qid == "daily-social-chat":
+            remaining_chat = int(max(0.0, deficits.get("chatCount", deficits.get("messages", 0.0))))
+            return {
+                "label": "minimum daily chat floor",
+                "templates": [{"type": "chat", "message": "quick pulse-check: who's chasing a quest right now?"}],
+                "min_non_chat": 0,
+                "chat_floor": max(1, min(4, remaining_chat if remaining_chat > 0 else 1)),
+                "notes": [f"daily-social-chat floor remaining={remaining_chat}"],
+            }
+
+        if qid == "daily-mention-network":
+            remaining_mentions = int(max(0.0, deficits.get("mentionCount", deficits.get("mentions", 0.0))))
+            return {
+                "label": "@mention outreach goals",
+                "templates": [{"type": "chat", "message": "@reef-friends quick check-in: any mission updates?"}],
+                "min_non_chat": 1,
+                "mention_floor": max(1, min(3, remaining_mentions if remaining_mentions > 0 else 1)),
+                "notes": [f"daily-mention-network outreach remaining={remaining_mentions}"],
+            }
+
+        return {"label": qid or "quest", "templates": [], "min_non_chat": 0, "notes": []}
+
     def _get_quest_progress_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
-        if not force_refresh and (now - float(self._quest_snapshot_cache.get("ts", 0.0))) < 20.0:
+        if not force_refresh and (now - float(self._quest_snapshot_cache.get("ts", 0.0))) < QUEST_POLL_INTERVAL_SECONDS:
             return dict(self._quest_snapshot_cache.get("data") or {})
         if not self.client:
             return dict(self._quest_snapshot_cache.get("data") or {})
@@ -1119,8 +1190,22 @@ class AIAgent:
 
         counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
         active = summary.get("active") if isinstance(summary.get("active"), list) else []
+        completed = summary.get("completed") if isinstance(summary.get("completed"), list) else []
+
+        claimed_notes: List[str] = []
+        for item in completed[:4]:
+            if not isinstance(item, dict):
+                continue
+            quest_id = str(item.get("questId") or "").strip()
+            if not quest_id:
+                continue
+            claimed = self.client.claim_quest(quest_id)
+            if isinstance(claimed, dict):
+                title = str(claimed.get("title") or quest_id)
+                claimed_notes.append(f"claimed {title}")
+
         active_items = []
-        for item in active[:3]:
+        for item in active[:4]:
             if not isinstance(item, dict):
                 continue
             target = item.get("target") if isinstance(item.get("target"), dict) else {}
@@ -1152,12 +1237,23 @@ class AIAgent:
         snapshot = {
             "counts": {
                 "active": int(counts.get("active", len(active)) or 0),
-                "completed": int(counts.get("completed", len(summary.get("completed") or [])) or 0),
-                "claimed": int(counts.get("claimed", len(summary.get("claimed") or [])) or 0),
+                "completed": int(counts.get("completed", len(completed)) or 0),
+                "claimed": int(counts.get("claimed", len(summary.get("claimed") or [])) or 0) + len(claimed_notes),
             },
             "active": active_items,
+            "recent_claims": claimed_notes,
         }
+        score = self._quest_progress_score_from_snapshot(snapshot)
+        self._quest_last_delta = round(score - self._quest_progress_score, 4)
+        self._quest_progress_score = score
+        self._quest_reward_signal = round((self._quest_reward_signal * 0.88) + (self._quest_last_delta * 1.75), 4)
+        if claimed_notes:
+            self._recent_quest_claim_notes.extend(claimed_notes)
+            self._recent_quest_claim_notes = self._recent_quest_claim_notes[-8:]
+            print(f"[{self.entity_id}] 🎁 quest claims: {', '.join(claimed_notes)}")
+
         self._quest_snapshot_cache = {"ts": now, "data": snapshot}
+        self._quest_planning_context_cache = {"ts": 0.0, "data": {}}
         return dict(snapshot)
 
     def _build_compact_quest_context(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -1168,7 +1264,7 @@ class AIAgent:
         snapshot = self._get_quest_progress_snapshot(force_refresh=force_refresh)
         active = snapshot.get("active") if isinstance(snapshot.get("active"), list) else []
         compact_active = []
-        for item in active[:3]:
+        for item in active[:2]:
             if not isinstance(item, dict):
                 continue
             deficits = []
@@ -1186,6 +1282,7 @@ class AIAgent:
                 })
             compact_active.append(
                 {
+                    "questId": item.get("questId"),
                     "title": item.get("title"),
                     "category": item.get("category"),
                     "deficits": deficits[:4],
@@ -1195,62 +1292,50 @@ class AIAgent:
         compact = {
             "counts": snapshot.get("counts", {}),
             "active": compact_active,
+            "rewardSignal": round(self._quest_reward_signal, 4),
+            "progressDelta": round(self._quest_last_delta, 4),
+            "recentClaims": list(self._recent_quest_claim_notes[-3:]),
         }
         self._quest_planning_context_cache = {"ts": now, "data": compact}
         return dict(compact)
 
     def _quest_priority_templates(self, perception: Dict[str, Any], quest_context: Dict[str, Any]) -> Dict[str, Any]:
         deficits: Dict[str, float] = {}
+        templates: List[Dict[str, Any]] = []
+        min_non_chat = 0
+        chat_floor = 0
+        mention_floor = 0
+        quest_notes: List[str] = []
+
         for quest in quest_context.get("active") or []:
             if not isinstance(quest, dict):
                 continue
+            local_deficits: Dict[str, float] = {}
             for metric in quest.get("deficits") or []:
                 if not isinstance(metric, dict):
                     continue
                 name = str(metric.get("metric") or "").strip()
                 if not name:
                     continue
-                deficits[name] = max(deficits.get(name, 0.0), float(metric.get("remaining", 0.0) or 0.0))
+                remaining = float(metric.get("remaining", 0.0) or 0.0)
+                deficits[name] = max(deficits.get(name, 0.0), remaining)
+                local_deficits[name] = remaining
 
-        templates: List[Dict[str, Any]] = []
-        min_non_chat = 0
+            interpreted = self._interpret_named_quest(str(quest.get("questId") or ""), local_deficits, perception)
+            templates.extend([a for a in interpreted.get("templates", []) if isinstance(a, dict)])
+            min_non_chat = max(min_non_chat, int(interpreted.get("min_non_chat", 0) or 0))
+            chat_floor = max(chat_floor, int(interpreted.get("chat_floor", 0) or 0))
+            mention_floor = max(mention_floor, int(interpreted.get("mention_floor", 0) or 0))
+            quest_notes.extend([str(n) for n in interpreted.get("notes", []) if isinstance(n, str)])
 
-        move_deficit = deficits.get("moveCount", 0.0)
-        if move_deficit > 0:
-            position = perception.get("position") if isinstance(perception.get("position"), dict) else {}
-            px = float(position.get("x", 50.0) or 50.0)
-            pz = float(position.get("z", 50.0) or 50.0)
-            stride = min(5.0, max(2.0, move_deficit / 4.0))
-            waypoints = [
-                {"type": "move", "x": max(0.0, min(100.0, px + stride)), "z": pz},
-                {"type": "move", "x": px, "z": max(0.0, min(100.0, pz + stride))},
-                {"type": "move", "x": max(0.0, min(100.0, px - stride)), "z": pz},
-            ]
-            templates.extend(waypoints)
-            min_non_chat = max(min_non_chat, min(6, int(move_deficit)))
-
-        queue_deficit = deficits.get("queueActions", 0.0)
-        if queue_deficit > 0:
-            templates.extend([
-                {"type": "move"},
-                {"type": "harvest"},
-                {"type": "move"},
-            ])
-            min_non_chat = max(min_non_chat, min(7, int(max(2.0, queue_deficit))))
-
-        expansion_deficit = sum(
-            remain for key, remain in deficits.items()
-            if "expand" in key.lower() or "tile" in key.lower() or "harvest" in key.lower()
-        )
-        if expansion_deficit > 0:
-            templates.extend([
-                {"type": "harvest"},
-                {"type": "harvest"},
-                {"type": "expand_map"},
-            ])
-            min_non_chat = max(min_non_chat, 3)
-
-        return {"deficits": deficits, "templates": templates[:8], "min_non_chat": min_non_chat}
+        return {
+            "deficits": deficits,
+            "templates": templates[:8],
+            "min_non_chat": min_non_chat,
+            "chat_floor": chat_floor,
+            "mention_floor": mention_floor,
+            "notes": quest_notes[:4],
+        }
 
     def _merge_quest_priorities(
         self,
@@ -1263,6 +1348,8 @@ class AIAgent:
 
         templates = [a for a in (quest_priority.get("templates") or []) if isinstance(a, dict) and isinstance(a.get("type"), str)]
         min_non_chat = max(0, int(quest_priority.get("min_non_chat", 0) or 0))
+        chat_floor = max(0, int(quest_priority.get("chat_floor", 0) or 0))
+        mention_floor = max(0, int(quest_priority.get("mention_floor", 0) or 0))
         non_chat = [a for a in merged if a.get("type") != "chat"]
         slots_needed = max(0, min_non_chat - len(non_chat))
 
@@ -1271,6 +1358,23 @@ class AIAgent:
             merged = injected + merged
         elif templates and merged and merged[0].get("type") == "chat":
             merged = [templates[0]] + merged
+
+        chat_count = sum(1 for a in merged if a.get("type") == "chat")
+        while chat_count < chat_floor and len(merged) < 16:
+            merged.append({"type": "chat", "message": "quest pulse: reporting in and syncing goals."})
+            chat_count += 1
+
+        if mention_floor > 0:
+            needs_mention = True
+            for action in merged:
+                if action.get("type") != "chat":
+                    continue
+                msg = str(action.get("message") or "")
+                if "@" in msg:
+                    needs_mention = False
+                    break
+            if needs_mention and len(merged) < 16:
+                merged.insert(0, {"type": "chat", "message": "@nearby-lobsters quick outreach: what objective are you advancing?"})
 
         return merged[:16]
 
@@ -1784,6 +1888,18 @@ class AIAgent:
             f"cd={int(self._planner_state.get('cooldownTicks', 0) or 0)} ready={1 if self._planner_state.get('ready') else 0} "
             f"opp={float(planner_scores.get('expansion_opportunity', 0.0) or 0.0):.2f}"
         )
+
+        quest_context = self._build_compact_quest_context()
+        for quest in (quest_context.get("active") or [])[:2]:
+            if not isinstance(quest, dict):
+                continue
+            q_title = str(quest.get("title") or quest.get("questId") or "quest")
+            qid = str(quest.get("questId") or "")
+            deficits = quest.get("deficits") if isinstance(quest.get("deficits"), list) else []
+            primary = deficits[0] if deficits else {}
+            metric = str(primary.get("metric") or "")
+            remain = float(primary.get("remaining", 0.0) or 0.0)
+            lines.append(f"🎯 quest {q_title} ({qid}) {metric}:{remain:.1f}".strip())
 
         # Recent conversation (last 6 messages so we catch new ones reliably)
         recent_window_secs = self._conversation_window_seconds()
@@ -2369,6 +2485,7 @@ class AIAgent:
                     }
                     for rec in (perception.get("expansionRecommendations") or [])[:3]
                 ],
+                "quest_focus": (self._build_compact_quest_context().get("active") or [])[:2],
             },
             "situational": {
                 "threats": perception.get("threats", []),
@@ -2872,6 +2989,8 @@ class AIAgent:
         action_outcome: Dict[str, Any],
     ):
         executed_actions = action_outcome.get("executedActions", [])
+        quest_before = self._quest_progress_score
+        quest_snapshot = self._get_quest_progress_snapshot(force_refresh=True)
         chat_actions = sum(1 for a in executed_actions if a.get("type") == "chat")
         movement_actions = sum(1 for a in executed_actions if a.get("type") in ("move", "move_to_agent"))
         emote_actions = sum(1 for a in executed_actions if a.get("type") == "emote")
@@ -2893,6 +3012,11 @@ class AIAgent:
             worked = "missed direct mention; fallback override required"
         if expand_attempts > 0:
             worked = f"expansion {'succeeded' if expand_success > 0 else 'attempted but blocked'}"
+        quest_delta = round(self._quest_progress_score - quest_before, 4)
+        if quest_delta > 0:
+            worked = f"{worked}; quest progress +{quest_delta:.3f}"
+        if self._recent_quest_claim_notes:
+            worked = f"{worked}; {'; '.join(self._recent_quest_claim_notes[-2:])}"
 
         record = {
             "tick": perception.get("tick"),
@@ -2904,6 +3028,9 @@ class AIAgent:
             "expandSuccess": expand_success,
             "worked": worked,
             "nextAdjustment": "prioritize direct replies when tagged",
+            "questRewardSignal": round(self._quest_reward_signal, 4),
+            "questProgressDelta": quest_delta,
+            "questClaims": list((quest_snapshot.get("recent_claims") or [])[:2]),
         }
         self._reflection_history.append(record)
         self._reflection_history = self._reflection_history[-40:]
