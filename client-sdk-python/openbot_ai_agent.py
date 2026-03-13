@@ -865,6 +865,19 @@ class AIAgent:
             "stuck_ticks": 0,
         }
         self._sector_memory = SectorMemory(world_size=100, sector_size=10, recent_window=48)
+        self._exploration_memory: Dict[str, Any] = {
+            "version": 1,
+            "grid_size": self._sector_memory.grid_size,
+            "visited_cells": {},
+            "frontier_candidates": [],
+            "stagnation_streak": 0,
+            "loop_streak": 0,
+            "last_cell": None,
+            "last_tick": 0,
+            "recent_neighborhoods": [],
+            "progress": {"visited_ratio": 0.0, "frontier_debt": 1.0},
+        }
+        self._exploration_state_file = os.path.join(os.path.expanduser("~"), ".openbot", "exploration_memory.json")
         self._planner_state: Dict[str, Any] = {
             "phase": "idle",
             "missing": {"rock": 0, "kelp": 0, "seaweed": 0},
@@ -1407,9 +1420,172 @@ class AIAgent:
         # Invalidate cached system prompt so it rebuilds with loaded interests
         self._cached_system_prompt = None
         self._cached_interests_key = None
+        self._load_exploration_memory()
 
         self._running = True
         return True
+
+    def _cell_key(self, cell: Tuple[int, int]) -> str:
+        return f"{int(cell[0])},{int(cell[1])}"
+
+    def _parse_cell_key(self, key: str) -> Optional[Tuple[int, int]]:
+        try:
+            sx_raw, sz_raw = str(key).split(",", 1)
+            return int(sx_raw), int(sz_raw)
+        except Exception:
+            return None
+
+    def _load_exploration_memory(self):
+        try:
+            if not os.path.exists(self._exploration_state_file):
+                return
+            with open(self._exploration_state_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            by_entity = payload.get("entities") if isinstance(payload, dict) else {}
+            entity_payload = by_entity.get(self.entity_id) if isinstance(by_entity, dict) and self.entity_id else {}
+            if not isinstance(entity_payload, dict):
+                return
+            self._exploration_memory.update(entity_payload)
+            visited_cells = self._exploration_memory.get("visited_cells") if isinstance(self._exploration_memory.get("visited_cells"), dict) else {}
+            for key, meta in visited_cells.items():
+                cell = self._parse_cell_key(key)
+                if cell is None:
+                    continue
+                last_tick = int((meta or {}).get("last_tick", 0) or 0)
+                visits = int((meta or {}).get("visits", 0) or 0)
+                self._sector_memory.last_visit_tick[cell] = last_tick
+                self._sector_memory.visit_counts[cell] = max(visits, 1)
+            recent_neighborhoods = self._exploration_memory.get("recent_neighborhoods") if isinstance(self._exploration_memory.get("recent_neighborhoods"), list) else []
+            self._exploration_memory["recent_neighborhoods"] = recent_neighborhoods[-24:]
+        except Exception as exc:
+            print(f"[agent] ⚠️ failed to load exploration memory: {exc}")
+
+    def _save_exploration_memory(self):
+        if not self.entity_id:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._exploration_state_file), exist_ok=True)
+            payload: Dict[str, Any] = {}
+            if os.path.exists(self._exploration_state_file):
+                with open(self._exploration_state_file, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+            if not isinstance(payload, dict):
+                payload = {}
+            if not isinstance(payload.get("entities"), dict):
+                payload["entities"] = {}
+            payload["entities"][self.entity_id] = {
+                "version": self._exploration_memory.get("version", 1),
+                "grid_size": self._exploration_memory.get("grid_size", self._sector_memory.grid_size),
+                "visited_cells": self._exploration_memory.get("visited_cells", {}),
+                "frontier_candidates": self._exploration_memory.get("frontier_candidates", [])[:6],
+                "stagnation_streak": int(self._exploration_memory.get("stagnation_streak", 0) or 0),
+                "loop_streak": int(self._exploration_memory.get("loop_streak", 0) or 0),
+                "last_cell": self._exploration_memory.get("last_cell"),
+                "last_tick": int(self._exploration_memory.get("last_tick", 0) or 0),
+                "recent_neighborhoods": self._exploration_memory.get("recent_neighborhoods", [])[-24:],
+                "progress": self._exploration_memory.get("progress", {}),
+            }
+            with open(self._exploration_state_file, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+        except Exception as exc:
+            print(f"[agent] ⚠️ failed to save exploration memory: {exc}")
+
+    def _compute_exploration_state(
+        self,
+        tick: int,
+        position: Dict[str, float],
+        frontier: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        grid_size = self._sector_memory.grid_size
+        total_cells = max(1, grid_size * grid_size)
+        current_cell = self._sector_memory.sector_for(float(position.get("x", 0.0)), float(position.get("z", 0.0)))
+
+        visited_cells = self._exploration_memory.get("visited_cells") if isinstance(self._exploration_memory.get("visited_cells"), dict) else {}
+        ckey = self._cell_key(current_cell)
+        cell_meta = visited_cells.get(ckey) if isinstance(visited_cells.get(ckey), dict) else {"visits": 0, "last_tick": 0}
+        cell_meta["visits"] = int(cell_meta.get("visits", 0) or 0) + 1
+        cell_meta["last_tick"] = int(tick)
+        visited_cells[ckey] = cell_meta
+
+        last_cell = self._exploration_memory.get("last_cell")
+        if last_cell == ckey:
+            stagnation_streak = int(self._exploration_memory.get("stagnation_streak", 0) or 0) + 1
+        else:
+            stagnation_streak = 0
+        self._exploration_memory["last_cell"] = ckey
+
+        neighborhood = f"{int(float(position.get('x', 0.0)) // 3)},{int(float(position.get('z', 0.0)) // 3)}"
+        recent_neighborhoods = self._exploration_memory.get("recent_neighborhoods") if isinstance(self._exploration_memory.get("recent_neighborhoods"), list) else []
+        recent_neighborhoods = (recent_neighborhoods + [neighborhood])[-24:]
+        repeat_count = sum(1 for n in recent_neighborhoods[-12:] if n == neighborhood)
+        loop_streak = int(self._exploration_memory.get("loop_streak", 0) or 0)
+        if repeat_count >= 4:
+            loop_streak += 1
+        else:
+            loop_streak = max(0, loop_streak - 1)
+
+        nearest_frontier = None
+        best_key: Optional[str] = None
+        best_score = None
+        for sx in range(grid_size):
+            for sz in range(grid_size):
+                key = self._cell_key((sx, sz))
+                meta = visited_cells.get(key) if isinstance(visited_cells.get(key), dict) else {}
+                last_tick = int(meta.get("last_tick", 0) or 0)
+                visits = int(meta.get("visits", 0) or 0)
+                is_unvisited = visits <= 0
+                recency_age = tick - last_tick if last_tick > 0 else tick
+                dist = math.hypot(current_cell[0] - sx, current_cell[1] - sz)
+                if is_unvisited:
+                    score = (100000.0 - dist)
+                else:
+                    score = (recency_age * 100.0) - (dist * 10.0)
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_key = key
+                    nearest_frontier = {
+                        "cell": (sx, sz),
+                        "distance": round(dist, 3),
+                        "unvisited": bool(is_unvisited),
+                        "age": int(recency_age),
+                        "visits": visits,
+                    }
+
+        candidates = frontier.get("candidates") if isinstance(frontier.get("candidates"), list) else []
+        frontier_candidates = [self._cell_key(tuple(c.get("sector", current_cell))) for c in candidates if isinstance(c, dict) and isinstance(c.get("sector"), tuple)]
+        if best_key and best_key not in frontier_candidates:
+            frontier_candidates.insert(0, best_key)
+
+        visited_ratio = round(len(visited_cells) / float(total_cells), 3)
+        frontier_debt = round((1.0 - visited_ratio) * 0.75 + min(1.0, stagnation_streak / 8.0) * 0.25, 3)
+        progress = {
+            "visited_ratio": visited_ratio,
+            "visited_cells": len(visited_cells),
+            "total_cells": total_cells,
+            "stagnation_streak": stagnation_streak,
+            "loop_streak": loop_streak,
+            "frontier_debt": frontier_debt,
+        }
+
+        self._exploration_memory.update(
+            {
+                "visited_cells": visited_cells,
+                "frontier_candidates": frontier_candidates[:6],
+                "stagnation_streak": stagnation_streak,
+                "loop_streak": loop_streak,
+                "last_tick": int(tick),
+                "recent_neighborhoods": recent_neighborhoods,
+                "progress": progress,
+            }
+        )
+        self._save_exploration_memory()
+        return {
+            "current_cell": current_cell,
+            "nearest_frontier_cell": (nearest_frontier or {}).get("cell", current_cell),
+            "nearest_frontier": nearest_frontier or {},
+            "frontier_candidates": frontier_candidates[:6],
+            "progress": progress,
+        }
 
     def shutdown(self):
         """Gracefully disconnect and revoke session."""
@@ -1617,6 +1793,10 @@ class AIAgent:
         tsec = frontier_hint.get("target_sector", csec)
         lines.append(
             f"🧭 frontier c={csec}→t={tsec} v={frontier_hint.get('least_visited', 0)} n={float(frontier_hint.get('novelty', 0.0) or 0.0):.2f} r={float(frontier_hint.get('resource_likelihood', 0.0) or 0.0):.2f}"
+        )
+        em_progress = self._exploration_memory.get("progress") if isinstance(self._exploration_memory.get("progress"), dict) else {}
+        lines.append(
+            f"🗺 explore visited={float(em_progress.get('visited_ratio', 0.0) or 0.0):.2f} debt={float(em_progress.get('frontier_debt', 1.0) or 1.0):.2f} stagnation={int(em_progress.get('stagnation_streak', 0) or 0)} loops={int(em_progress.get('loop_streak', 0) or 0)}"
         )
 
         rt = self._shelter_runtime
@@ -2053,6 +2233,9 @@ class AIAgent:
         tx, tz = frontier.get("target_sector", current_sector)
         frontier["current_sector"] = current_sector
         frontier["edge_sector"] = tx in {0, self._sector_memory.grid_size - 1} or tz in {0, self._sector_memory.grid_size - 1}
+        exploration = self._compute_exploration_state(self._tick_count, position, frontier)
+        frontier["explorationProgress"] = exploration.get("progress", {})
+        frontier["nearestFrontierCell"] = exploration.get("nearest_frontier_cell")
         recommendations = self._fetch_recommendations("conversation")
         expansion_recommendations = self._fetch_recommendations("expansion")
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
@@ -2074,6 +2257,7 @@ class AIAgent:
             "survival": survival,
             "progressionSignals": progression_signals,
             "frontier": frontier,
+            "exploration": exploration,
             "recommendations": recommendations,
             "expansionRecommendations": expansion_recommendations,
             "expansionGuidance": expansion_guidance,
@@ -2089,10 +2273,12 @@ class AIAgent:
                 "tagged_by": perception.get("taggedBy", [])[-4:],
                 "blocked_resource": perception.get("markers", {}).get("blocked_resource", [])[-2:],
                 "recent_reflections": recent_reflections,
+                "exploration_frontier_candidates": (perception.get("exploration", {}) or {}).get("frontier_candidates", [])[:4],
             },
             "semantic": {
                 "interests": list(self._interests),
                 "context_summary": self._context_summary,
+                "exploration_progress": (perception.get("exploration", {}) or {}).get("progress", {}),
                 "suggested_connections": [
                     {
                         "entity_id": rec.get("entityId"),
@@ -2117,6 +2303,7 @@ class AIAgent:
                 "progression_signals": perception.get("progressionSignals", {}),
                 "frontier": perception.get("frontier", {}),
                 "expansion_guidance": perception.get("expansionGuidance", {}),
+                "exploration": perception.get("exploration", {}),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),
@@ -2140,6 +2327,11 @@ class AIAgent:
                 "discover and claim new frontier tiles instead of idling in explored areas",
                 "progress and complete exploration-oriented quests with measurable milestones",
             ],
+            "exploration_policy": {
+                "frontier_debt_threshold": 0.62,
+                "loop_penalty_threshold": 3,
+                "social_vs_exploration_rule": "If no urgent mention/reply and frontier debt is high, movement toward frontier is mandatory.",
+            },
             "user_prompt": self.user_prompt or "",
         }
 
@@ -2243,18 +2435,46 @@ class AIAgent:
         actions = self._apply_survival_reflex(actions, perception)
         actions = self._arbitrate_goal_channels(perception, actions)
 
+        exploration = perception.get("exploration") if isinstance(perception.get("exploration"), dict) else {}
+        progress = exploration.get("progress") if isinstance(exploration.get("progress"), dict) else {}
+        frontier_debt = float(progress.get("frontier_debt", 0.0) or 0.0)
+        loop_streak = int(progress.get("loop_streak", 0) or 0)
+        stagnation_streak = int(progress.get("stagnation_streak", 0) or 0)
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        urgent_social = bool(markers.get("mentions") or markers.get("new_messages") or markers.get("urgent_chat"))
+
         confidence = 0.65 if reasoning_artifact.get("reasoningNotes") else 0.5
-        if perception.get("markers", {}).get("mentions"):
+        if markers.get("mentions"):
             confidence = max(confidence, 0.7)
 
         fallback = {"type": "wait"}
+        needs_forced_frontier = (not urgent_social) and (frontier_debt >= 0.62 or stagnation_streak >= 4)
+        if needs_forced_frontier:
+            frontier_actions = self._frontier_movement_action(perception, prefer_expand=True, force_harvest=loop_streak >= 3)
+            if frontier_actions:
+                actions = frontier_actions + [a for a in actions if a.get("type") not in {"wait", "move"}]
+                fallback = dict(frontier_actions[0])
+                confidence = max(confidence, 0.62)
+
+        if loop_streak >= 3:
+            penalized: List[Dict[str, Any]] = []
+            move_seen = 0
+            for action in actions:
+                atype = action.get("type")
+                if atype in {"move", "move_to_agent"}:
+                    move_seen += 1
+                    if move_seen > 1:
+                        continue
+                penalized.append(action)
+            actions = penalized[:16] if penalized else [{"type": "wait"}]
+
         if len(actions) == 1 and actions[0].get("type") == "wait":
             frontier_actions = self._frontier_movement_action(perception, prefer_expand=True)
             if frontier_actions:
                 actions = frontier_actions
                 fallback = dict(frontier_actions[0])
                 confidence = max(confidence, 0.58)
-        return {"actions": actions, "confidence": round(confidence, 2), "fallback": fallback}
+        return {"actions": actions[:16], "confidence": round(confidence, 2), "fallback": fallback}
 
     def _apply_progression_policy(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
         sanitized = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
