@@ -1823,6 +1823,60 @@ class OpenBotClawHub:
             self.logger.warning(f"record_reflection error: {exc}")
         return False
 
+    def record_wishlist(
+        self,
+        wishes: List[str],
+        dream_context: str = "",
+        source: str = "entity-agent-v1",
+        model: str = "",
+    ) -> bool:
+        """
+        Persist wishlist items for this entity to the server.
+
+        Args:
+            wishes: 1-3 short wishlist strings.
+            dream_context: Optional narrative context to "make them dream".
+            source: Optional payload source tag.
+            model: Optional model hint.
+        """
+        entity = self.entity_id or self.agent_name
+        if not self.session:
+            self.logger.warning("record_wishlist: no active session")
+            return False
+        if not entity:
+            self.logger.warning("record_wishlist: missing entity id/name")
+            return False
+
+        cleaned: List[str] = []
+        for item in wishes or []:
+            text = " ".join(str(item).split()).strip()
+            if text:
+                cleaned.append(text[:220])
+            if len(cleaned) >= 3:
+                break
+        if not cleaned:
+            self.logger.warning("record_wishlist: at least one non-empty wish is required")
+            return False
+
+        payload = {
+            "wishes": cleaned,
+            "dreamContext": str(dream_context or "").strip()[:500],
+            "source": str(source or "entity-agent-v1")[:60],
+            "model": str(model or "")[:120],
+        }
+        try:
+            resp = self.session.post(
+                f"{self.url}/entity/{entity}/wishlists",
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return True
+            self.logger.warning(f"record_wishlist: {resp.status_code} {resp.text[:200]}")
+        except Exception as exc:
+            self.logger.warning(f"record_wishlist error: {exc}")
+        return False
+
     def get_daily_reflections(self, limit: int = 30) -> List[Dict[str, Any]]:
         """
         Fetch most recent per-entity daily reflections from the server.
