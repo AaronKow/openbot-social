@@ -271,6 +271,12 @@ const ROTATING_EVENT_RADIUS = Object.freeze({
   rescue_beacon: Math.max(4, Number(process.env.RESCUE_BEACON_RADIUS || 8)),
   migration_signal: Math.max(5, Number(process.env.MIGRATION_SIGNAL_RADIUS || 11))
 });
+const HAZARD_ZONE_MOVE_SPEED_PER_SEC = Math.max(0, Number(process.env.HAZARD_ZONE_MOVE_SPEED_PER_SEC || 0.95));
+const HAZARD_ZONE_MIN_SPEED_FACTOR = Math.max(0.1, Number(process.env.HAZARD_ZONE_MIN_SPEED_FACTOR || 0.65));
+const HAZARD_ZONE_MAX_SPEED_FACTOR = Math.max(HAZARD_ZONE_MIN_SPEED_FACTOR, Number(process.env.HAZARD_ZONE_MAX_SPEED_FACTOR || 1.35));
+const HAZARD_ZONE_TURN_JITTER_RAD = Math.max(0, Number(process.env.HAZARD_ZONE_TURN_JITTER_RAD || 0.85));
+const HAZARD_ZONE_MIN_TURN_TICKS = Math.max(4, Math.floor(Number(process.env.HAZARD_ZONE_MIN_TURN_TICKS || Math.floor(TICK_RATE * 1.5))));
+const HAZARD_ZONE_MAX_TURN_TICKS = Math.max(HAZARD_ZONE_MIN_TURN_TICKS, Math.floor(Number(process.env.HAZARD_ZONE_MAX_TURN_TICKS || Math.floor(TICK_RATE * 4))));
 const MISSION_TYPES = Object.freeze(['expand-sector', 'defend-zone', 'resource-drive']);
 const MISSION_DEFAULTS = Object.freeze({
   'expand-sector': { target: 12, rewardLeaderboardBonus: 35, rewardAchievementXp: 24 },
@@ -313,6 +319,7 @@ const worldState = {
 
 const dirtyAgentIds = new Set();
 const pendingAgentDeleteIds = new Set();
+const rotatingEventMotionState = new Map(); // eventId -> { vx, vz, turnInTicks }
 const entityRecentPositions = new Map(); // entityId -> [{x,z,tick,ts}]
 const missionRegistry = new Map();
 const missionEntityIndex = new Map();
@@ -656,6 +663,96 @@ function updateRotatingEvents(now = Date.now()) {
 
     const nextEvent = createRotatingEvent(type, now);
     worldState.rotatingEvents.push(nextEvent);
+  }
+
+  const activeIds = new Set(worldState.rotatingEvents.map((event) => String(event.id || '')));
+  for (const eventId of rotatingEventMotionState.keys()) {
+    if (!activeIds.has(eventId)) {
+      rotatingEventMotionState.delete(eventId);
+    }
+  }
+
+  updateHazardZoneEventCenters(TICK_INTERVAL_MS / 1000);
+}
+
+function updateHazardZoneEventCenters(dtSeconds = TICK_INTERVAL_MS / 1000) {
+  if (HAZARD_ZONE_MOVE_SPEED_PER_SEC <= 0) return;
+  const dt = Math.max(0, Number(dtSeconds) || 0);
+  if (dt <= 0) return;
+
+  const bounds = resolveNavigableBounds({ includeExpansion: true });
+
+  for (const event of worldState.rotatingEvents) {
+    if (!event || event.status !== 'active' || String(event.type || '') !== 'hazard_zone') continue;
+
+    const center = event.center && typeof event.center === 'object' ? event.center : null;
+    if (!center) continue;
+    const x = Number(center.x);
+    const z = Number(center.z);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+
+    const eventId = String(event.id || '');
+    if (!eventId) continue;
+
+    let motion = rotatingEventMotionState.get(eventId);
+    if (!motion) {
+      const angle = randomInRange(0, Math.PI * 2);
+      const speed = HAZARD_ZONE_MOVE_SPEED_PER_SEC * randomInRange(HAZARD_ZONE_MIN_SPEED_FACTOR, HAZARD_ZONE_MAX_SPEED_FACTOR);
+      motion = {
+        vx: Math.cos(angle) * speed,
+        vz: Math.sin(angle) * speed,
+        turnInTicks: Math.floor(randomInRange(HAZARD_ZONE_MIN_TURN_TICKS, HAZARD_ZONE_MAX_TURN_TICKS + 1))
+      };
+      rotatingEventMotionState.set(eventId, motion);
+    }
+
+    motion.turnInTicks -= 1;
+    if (motion.turnInTicks <= 0) {
+      const speed = Math.max(0.01, Math.sqrt((motion.vx * motion.vx) + (motion.vz * motion.vz)));
+      const currentHeading = Math.atan2(motion.vz, motion.vx);
+      const nextHeading = currentHeading + randomInRange(-HAZARD_ZONE_TURN_JITTER_RAD, HAZARD_ZONE_TURN_JITTER_RAD);
+      const nextSpeed = HAZARD_ZONE_MOVE_SPEED_PER_SEC * randomInRange(HAZARD_ZONE_MIN_SPEED_FACTOR, HAZARD_ZONE_MAX_SPEED_FACTOR);
+      motion.vx = Math.cos(nextHeading) * Math.max(0.01, nextSpeed || speed);
+      motion.vz = Math.sin(nextHeading) * Math.max(0.01, nextSpeed || speed);
+      motion.turnInTicks = Math.floor(randomInRange(HAZARD_ZONE_MIN_TURN_TICKS, HAZARD_ZONE_MAX_TURN_TICKS + 1));
+    }
+
+    const radius = Math.max(0, Number(event.radius) || 0);
+    const edgePad = Math.max(0.5, radius + 0.5);
+    const minX = bounds.minX + edgePad;
+    const maxX = bounds.maxX - edgePad;
+    const minZ = bounds.minZ + edgePad;
+    const maxZ = bounds.maxZ - edgePad;
+
+    let nextX = x + (motion.vx * dt);
+    let nextZ = z + (motion.vz * dt);
+
+    if (minX <= maxX) {
+      if (nextX < minX || nextX > maxX) {
+        motion.vx *= -1;
+      }
+      nextX = Math.max(minX, Math.min(maxX, nextX));
+    } else {
+      nextX = (bounds.minX + bounds.maxX) / 2;
+      motion.vx = 0;
+    }
+
+    if (minZ <= maxZ) {
+      if (nextZ < minZ || nextZ > maxZ) {
+        motion.vz *= -1;
+      }
+      nextZ = Math.max(minZ, Math.min(maxZ, nextZ));
+    } else {
+      nextZ = (bounds.minZ + bounds.maxZ) / 2;
+      motion.vz = 0;
+    }
+
+    event.center = {
+      ...(event.center || {}),
+      x: nextX,
+      y: Number.isFinite(Number(event.center?.y)) ? Number(event.center.y) : 0,
+      z: nextZ
+    };
   }
 }
 

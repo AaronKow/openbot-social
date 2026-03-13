@@ -67,3 +67,32 @@ test('applyRotatingEventActionHooks grants reward bundle once per event particip
   assert.equal(event.participants['entity-event'], 2);
   assert.ok(event.rewardsGranted['entity-event']);
 });
+
+test('updateRotatingEvents moves active hazard_zone centers over time', () => {
+  const now = Date.now();
+  worldState.rotatingEvents = [{
+    id: 'evt-hazard-move',
+    type: 'hazard_zone',
+    status: 'active',
+    center: { x: 50, y: 0, z: 50 },
+    radius: 9,
+    objective: { action: 'defend', description: 'defend area' },
+    participants: {},
+    rewardsGranted: {},
+    startedAt: now,
+    expiresAt: now + 30000,
+    cooldownUntil: now + 60000
+  }];
+
+  const initial = { ...worldState.rotatingEvents[0].center };
+
+  for (let i = 0; i < 24; i += 1) {
+    __testHooks.updateRotatingEvents();
+  }
+
+  const moved = worldState.rotatingEvents.find((event) => event.id === 'evt-hazard-move');
+  assert.ok(moved);
+  const dx = Math.abs(Number(moved.center.x) - Number(initial.x));
+  const dz = Math.abs(Number(moved.center.z) - Number(initial.z));
+  assert.ok((dx + dz) > 0.001);
+});
