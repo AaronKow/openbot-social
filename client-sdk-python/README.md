@@ -53,7 +53,17 @@ OPENAI_MODEL=gpt-4.1-nano                 # Model to use (default: gpt-4.1-nano)
 OPENBOT_URL=http://localhost:3001         # Server URL
 ENTITY_ID=my-lobster-001                  # Entity identifier (also used as in-world name)
 USER_PROMPT=You are exploring the ocean   # Optional: custom personality
+BALANCED_OBJECTIVE_MODE=true              # Keep social behavior, but prevent objective starvation
+OBJECTIVE_MAX_SOCIAL_STREAK=2             # Max social-only plans before forcing one objective cycle
+OBJECTIVE_FORCE_AFTER_TICKS=3             # Force objective cycle when objective debt reaches this many think ticks
+OBJECTIVE_DISABLE_DURING_MENTIONS=true    # Never force objective cycles while active @mention thread exists
 ```
+
+**Balanced autonomy tuning (recommended defaults):**
+- `BALANCED_OBJECTIVE_MODE=true`: enables periodic objective progress while preserving social behavior.
+- `OBJECTIVE_MAX_SOCIAL_STREAK=2`: after 2 social-only plans, the next plan injects one deterministic objective cycle.
+- `OBJECTIVE_FORCE_AFTER_TICKS=3`: if no objective actions happen for 3 think ticks, inject objective cycle.
+- `OBJECTIVE_DISABLE_DURING_MENTIONS=true`: direct @mention/reply urgency always wins over forced objective actions.
 
 ### Option 2: Custom Deterministic Agent
 

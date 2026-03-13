@@ -785,6 +785,10 @@ class AIAgent:
         self._queue_target_max_items = max(4, int(_env_float("ACTION_QUEUE_TARGET_MAX_ITEMS", 16)))
         self._queue_max_ticks_per_action = max(1, int(_env_float("ACTION_QUEUE_AGENT_MAX_TICKS_PER_ACTION", 3600)))
         self._action_step_interval = max(1.0, _env_float("ACTION_STEP_INTERVAL_SECONDS", min(8.0, max(1.0, self.TICK_INTERVAL / 12.0))))
+        self._balanced_objective_mode = _env_bool("BALANCED_OBJECTIVE_MODE", True)
+        self._objective_max_social_streak = max(1, int(_env_float("OBJECTIVE_MAX_SOCIAL_STREAK", 2)))
+        self._objective_force_after_ticks = max(1, int(_env_float("OBJECTIVE_FORCE_AFTER_TICKS", 3)))
+        self._objective_disable_during_mentions = _env_bool("OBJECTIVE_DISABLE_DURING_MENTIONS", True)
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -894,6 +898,10 @@ class AIAgent:
         self._mission_membership: Dict[str, Any] = {"missionId": None, "joinedAt": 0.0}
         self._mission_role: str = "builder"
         self._last_mission_chat_at: float = 0.0
+        self._last_objective_tick: int = 0
+        self._social_only_plan_streak: int = 0
+        self._missing_resource_streak: int = 0
+        self._last_forced_objective_reason: str = ""
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -1114,6 +1122,168 @@ class AIAgent:
             if at_edge or high_novelty:
                 actions.append({"type": "expand_map", "x": cx, "z": cz})
         return actions
+
+    def _is_active_mention_thread(self, perception: Dict[str, Any]) -> bool:
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        if markers.get("mentions"):
+            return True
+        tagged_by = perception.get("taggedBy")
+        return bool(tagged_by) if isinstance(tagged_by, list) else False
+
+    def _is_objective_action(self, action: Dict[str, Any]) -> bool:
+        if not isinstance(action, dict):
+            return False
+        action_type = str(action.get("type", "")).lower()
+        if action_type in {"harvest", "expand_map"}:
+            return True
+        if action_type == "move" and bool(action.get("__objective_cycle")):
+            return True
+        return False
+
+    def _build_balanced_objective_cycle(self, perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        planner = self._planner_state if isinstance(self._planner_state, dict) else {}
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        world_tick = int(perception.get("worldTick", 0) or 0)
+        objects = perception.get("worldObjects") if isinstance(perception.get("worldObjects"), list) else []
+        position = perception.get("position") if isinstance(perception.get("position"), dict) else {"x": 50.0, "z": 50.0}
+        px = float(position.get("x", 50.0))
+        pz = float(position.get("z", 50.0))
+
+        missing = planner.get("missing") if isinstance(planner.get("missing"), dict) else self._expansion_missing_resources(self_state)
+        missing_total = sum(int(missing.get(k, 0) or 0) for k in ("rock", "kelp", "seaweed"))
+        cooldown_ticks = self._expansion_cooldown_ticks(self_state, world_tick)
+        expansion_ready = self._compute_inventory_expansion_ready(self_state) and cooldown_ticks <= 0
+
+        last_action = self_state.get("lastAction") if isinstance(self_state.get("lastAction"), dict) else {}
+        failed_harvest_id = None
+        if str(last_action.get("type", "")).lower() == "harvest" and bool(last_action.get("skipped")):
+            failed_harvest_id = str(last_action.get("targetObjectId") or last_action.get("objectId") or "").strip() or None
+
+        objective_actions: List[Dict[str, Any]] = []
+        if missing_total > 0:
+            missing_types = [k for k in ("rock", "kelp", "seaweed") if int(missing.get(k, 0) or 0) > 0]
+            ranked = self._get_nearest_harvestable_resources(position, objects, limit=8)
+            candidates = [r for r in ranked if str(r.get("type", "")).lower() in missing_types]
+            if failed_harvest_id:
+                alternatives = [r for r in candidates if str(r.get("id", "")) != failed_harvest_id]
+                if alternatives:
+                    candidates = alternatives
+            target = candidates[0] if candidates else {}
+            if target.get("x") is not None and target.get("z") is not None:
+                tx = float(target.get("x"))
+                tz = float(target.get("z"))
+                distance = float(target.get("distance", math.hypot(tx - px, tz - pz)) or 0.0)
+                if distance > 1.4:
+                    objective_actions.append({"type": "move", "x": tx, "z": tz})
+                harvest = {"type": "harvest", "resource_type": str(target.get("type", missing_types[0])).lower()}
+                if target.get("id"):
+                    harvest["object_id"] = str(target.get("id"))
+                objective_actions.append(harvest)
+            else:
+                objective_actions.extend(self._frontier_movement_action(perception, prefer_expand=False)[:1])
+        elif expansion_ready:
+            target = planner.get("target") if isinstance(planner.get("target"), dict) else None
+            if not target:
+                guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
+                target = guidance.get("target") if isinstance(guidance.get("target"), dict) else None
+            tx = tz = None
+            if isinstance(target, dict) and target.get("x") is not None and target.get("z") is not None:
+                tx = float(target.get("x"))
+                tz = float(target.get("z"))
+                if math.hypot(tx - px, tz - pz) > 1.4:
+                    objective_actions.append({"type": "move", "x": tx, "z": tz})
+            expand = {"type": "expand_map"}
+            if tx is not None and tz is not None:
+                expand["x"] = tx
+                expand["z"] = tz
+            objective_actions.append(expand)
+        else:
+            objective_actions.extend(self._frontier_movement_action(perception, prefer_expand=False)[:1])
+
+        sanitized: List[Dict[str, Any]] = []
+        for action in objective_actions:
+            if isinstance(action, dict) and action.get("type") != "wait":
+                tagged_action = dict(action)
+                tagged_action["__objective_cycle"] = True
+                sanitized.append(tagged_action)
+        return sanitized[:3]
+
+    def _apply_balanced_objective_guardrails(
+        self,
+        actions: List[Dict[str, Any]],
+        perception: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not self._balanced_objective_mode:
+            return actions
+
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        planner = self._planner_state if isinstance(self._planner_state, dict) else {}
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        missing = planner.get("missing") if isinstance(planner.get("missing"), dict) else {}
+        if not missing or not any(int(missing.get(k, 0) or 0) > 0 for k in ("rock", "kelp", "seaweed")):
+            missing = self._expansion_missing_resources(self_state)
+        missing_total = sum(int(missing.get(k, 0) or 0) for k in ("rock", "kelp", "seaweed"))
+        if missing_total > 0:
+            self._missing_resource_streak += 1
+        else:
+            self._missing_resource_streak = 0
+
+        debt_ticks = max(0, self._tick_count - self._last_objective_tick)
+        active_mention_thread = self._is_active_mention_thread(perception)
+        social_urgency = bool(markers.get("new_messages") or markers.get("urgent_chat") or active_mention_thread)
+
+        has_objective = any(self._is_objective_action(action) for action in actions)
+        has_social = any(
+            str(action.get("type", "")).lower() in {"chat", "move_to_agent", "emote"}
+            for action in actions
+            if isinstance(action, dict)
+        )
+
+        if has_objective:
+            self._social_only_plan_streak = 0
+            return actions
+
+        if has_social:
+            self._social_only_plan_streak += 1
+        else:
+            self._social_only_plan_streak = 0
+
+        mention_blocked = self._objective_disable_during_mentions and active_mention_thread
+        force_due_to_debt = debt_ticks >= self._objective_force_after_ticks
+        force_due_to_social_streak = self._social_only_plan_streak >= self._objective_max_social_streak
+        force_due_to_missing = self._missing_resource_streak >= self._objective_force_after_ticks
+        should_force = force_due_to_debt or force_due_to_social_streak or force_due_to_missing
+        if mention_blocked or not should_force:
+            return actions
+
+        # If social pressure exists and missing resources are not persistent, allow one more social turn.
+        if social_urgency and not force_due_to_missing and not force_due_to_social_streak:
+            return actions
+
+        objective_cycle = self._build_balanced_objective_cycle(perception)
+        if not objective_cycle:
+            return actions
+
+        retained = [a for a in actions if isinstance(a, dict) and a.get("type") != "wait"]
+        if social_urgency:
+            first_chat = next((a for a in retained if a.get("type") == "chat"), None)
+            merged = ([first_chat] if first_chat else []) + objective_cycle + [a for a in retained if a is not first_chat][:1]
+        else:
+            merged = objective_cycle + retained[:1]
+
+        if force_due_to_missing:
+            reason = "missing_resources_persisted"
+        elif force_due_to_social_streak:
+            reason = "social_streak_cap"
+        else:
+            reason = "objective_debt"
+        self._last_forced_objective_reason = reason
+        self._social_only_plan_streak = 0
+        print(
+            f"  🧠 balanced objective injection reason={reason} "
+            f"debt={debt_ticks} missing_streak={self._missing_resource_streak}"
+        )
+        return merged[:16]
 
     def _quest_progress_score_from_snapshot(self, snapshot: Dict[str, Any]) -> float:
         active = snapshot.get("active") if isinstance(snapshot.get("active"), list) else []
@@ -2853,6 +3023,7 @@ class AIAgent:
                 actions = frontier_actions
                 fallback = dict(frontier_actions[0])
                 confidence = max(confidence, 0.58)
+        actions = self._apply_balanced_objective_guardrails(actions[:16], perception)
         return {"actions": actions[:16], "confidence": round(confidence, 2), "fallback": fallback}
 
     def _apply_progression_policy(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3187,6 +3358,17 @@ class AIAgent:
         expand_actions = [a for a in executed_actions if a.get("type") == "expand_map"]
         expand_attempts = len(expand_actions)
         expand_success = sum(1 for a in expand_actions if a.get("status") == "ok")
+        objective_actions = [
+            action for action in executed_actions
+            if str(action.get("type", "")).lower() in {"harvest", "expand_map"}
+            or (
+                str(action.get("type", "")).lower() == "move"
+                and bool(action.get("objectiveCycle"))
+            )
+        ]
+        if objective_actions:
+            self._last_objective_tick = self._tick_count
+            self._social_only_plan_streak = 0
 
         self._procedural_stats["ticks"] += 1
         self._maybe_publish_mission_progress_chat(perception, executed_actions)
@@ -3351,7 +3533,12 @@ class AIAgent:
                     self._recent_own_messages.append(msg)
                     if len(self._recent_own_messages) > 8:
                         self._recent_own_messages = self._recent_own_messages[-8:]
-                    executed.append({"type": "chat", "message": msg, "status": "ok"})
+                    executed.append({
+                        "type": "chat",
+                        "message": msg,
+                        "status": "ok",
+                        "objectiveCycle": bool(act.get("__objective_cycle")),
+                    })
 
             elif t == "move":
                 x = float(act.get("x", self.client.position["x"]))
@@ -3364,20 +3551,36 @@ class AIAgent:
                 )
                 self.client.move(x, 0, z, rotation)
                 print(f"  🚶 move → ({x:.1f}, {z:.1f})")
-                executed.append({"type": "move", "x": x, "z": z, "status": "ok"})
+                executed.append({
+                    "type": "move",
+                    "x": x,
+                    "z": z,
+                    "status": "ok",
+                    "objectiveCycle": bool(act.get("__objective_cycle")),
+                })
 
             elif t == "move_to_agent":
                 name = act.get("agent_name", "")
                 if name:
                     moved = self.client.move_towards_agent(name, stop_distance=3.0, step=5.0)
                     print(f"  🚶 move toward {name} ({'ok' if moved else 'already close'})")
-                    executed.append({"type": "move_to_agent", "agent_name": name, "status": "ok" if moved else "already_close"})
+                    executed.append({
+                        "type": "move_to_agent",
+                        "agent_name": name,
+                        "status": "ok" if moved else "already_close",
+                        "objectiveCycle": bool(act.get("__objective_cycle")),
+                    })
 
             elif t == "emote":
                 emote = act.get("emote", "wave")
                 self.client.action(emote)
                 print(f"  🙌 emote: {emote}")
-                executed.append({"type": "emote", "emote": emote, "status": "ok"})
+                executed.append({
+                    "type": "emote",
+                    "emote": emote,
+                    "status": "ok",
+                    "objectiveCycle": bool(act.get("__objective_cycle")),
+                })
 
             elif t == "harvest":
                 resource_type = act.get("resource_type")
@@ -3389,7 +3592,12 @@ class AIAgent:
                     payload["objectId"] = object_id.strip()[:96]
                 ok = self.client.action("harvest", **payload)
                 print(f"  ⛏️ harvest ({'ok' if ok else 'failed'})")
-                executed.append({"type": "harvest", "status": "ok" if ok else "failed", **payload})
+                executed.append({
+                    "type": "harvest",
+                    "status": "ok" if ok else "failed",
+                    "objectiveCycle": bool(act.get("__objective_cycle")),
+                    **payload,
+                })
 
             elif t == "expand_map":
                 ex = act.get("x")
@@ -3401,11 +3609,20 @@ class AIAgent:
                     payload["z"] = float(ez)
                 ok = self.client.action("expand_map", **payload)
                 print(f"  🧱 expand_map ({'ok' if ok else 'failed'})")
-                executed.append({"type": "expand_map", "status": "ok" if ok else "failed", **payload})
+                executed.append({
+                    "type": "expand_map",
+                    "status": "ok" if ok else "failed",
+                    "objectiveCycle": bool(act.get("__objective_cycle")),
+                    **payload,
+                })
 
             elif t == "wait":
                 print("  ⏳ wait")
-                executed.append({"type": "wait", "status": "ok"})
+                executed.append({
+                    "type": "wait",
+                    "status": "ok",
+                    "objectiveCycle": bool(act.get("__objective_cycle")),
+                })
 
             else:
                 print(f"  ❓ unknown action type: {t}")

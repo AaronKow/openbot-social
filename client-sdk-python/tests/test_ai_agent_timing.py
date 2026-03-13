@@ -54,6 +54,47 @@ class DummyClient:
 
 
 class AIAgentTimingTests(unittest.TestCase):
+    def _base_perception(self):
+        return {
+            "tick": 1,
+            "worldTick": 100,
+            "position": {"x": 10.0, "z": 10.0},
+            "markers": {
+                "mentions": [],
+                "urgent_chat": [],
+                "new_messages": [],
+                "blocked_resource": [],
+            },
+            "selfState": {
+                "inventory": {"rock": 0, "kelp": 0, "seaweed": 0},
+                "lastAction": {},
+                "expansionCooldownUntilTick": 0,
+            },
+            "worldObjects": [
+                {"id": "rock-1", "type": "rock", "position": {"x": 11, "z": 10}},
+                {"id": "kelp-1", "type": "kelp", "position": {"x": 12, "z": 10}},
+                {"id": "seaweed-1", "type": "seaweed", "position": {"x": 13, "z": 10}},
+            ],
+            "frontier": {
+                "centroid": {"x": 20, "z": 20},
+                "resource_likelihood": 0.7,
+                "novelty": 0.8,
+                "edge_sector": True,
+            },
+            "expansionGuidance": {"target": {"x": 22, "z": 22}},
+            "explorationGuidance": {},
+            "progressionSignals": {
+                "inventoryTowardsExpansionCost": {"ready": False},
+                "questProgressSnapshot": {"active": []},
+                "nearestHarvestableResources": [
+                    {"id": "rock-1", "type": "rock", "x": 11, "z": 10, "distance": 1.0}
+                ],
+            },
+            "exploration": {"progress": {"frontier_debt": 0.1, "loop_streak": 0, "stagnation_streak": 0}},
+            "survival": {},
+            "threats": [],
+        }
+
     @patch("openbot_ai_agent.OpenAI")
     def test_build_observation_scales_silence_and_recent_window_with_tick_interval(self, mock_openai):
         agent = AIAgent(openai_api_key="test-key", tick_interval=900.0)
@@ -105,6 +146,76 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertEqual(result.get("execution"), "lobster-side")
         self.assertGreaterEqual(result.get("queuedPlanActions", 0), 1)
         self.assertGreaterEqual(len(agent.client.moves), 1)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_balanced_guardrail_no_force_when_social_streak_below_threshold(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent._tick_count = 5
+        agent._last_objective_tick = 4
+        agent._social_only_plan_streak = 0
+        perception = self._base_perception()
+
+        actions = agent._apply_balanced_objective_guardrails(
+            [{"type": "chat", "message": "hi there"}],
+            perception,
+        )
+
+        self.assertEqual(actions[0].get("type"), "chat")
+        self.assertEqual(agent._social_only_plan_streak, 1)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_balanced_guardrail_forces_objective_after_social_streak(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent._tick_count = 20
+        agent._last_objective_tick = 1
+        agent._social_only_plan_streak = 2
+        perception = self._base_perception()
+        perception["selfState"]["inventory"] = {"rock": 0, "kelp": 1, "seaweed": 1}
+
+        forced = agent._apply_balanced_objective_guardrails(
+            [{"type": "chat", "message": "still social"}],
+            perception,
+        )
+
+        self.assertIn(forced[0].get("type"), {"move", "harvest"})
+        self.assertTrue(any(a.get("type") == "harvest" for a in forced))
+        self.assertTrue(any(bool(a.get("__objective_cycle")) for a in forced))
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_balanced_guardrail_defers_when_mentions_active(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent._tick_count = 20
+        agent._last_objective_tick = 1
+        agent._social_only_plan_streak = 4
+        perception = self._base_perception()
+        perception["markers"]["mentions"] = ["📣 TAGGED BY reef-bot"]
+        perception["taggedBy"] = ["reef-bot"]
+
+        actions = agent._apply_balanced_objective_guardrails(
+            [{"type": "chat", "message": "@reef-bot on it"}],
+            perception,
+        )
+
+        self.assertEqual(actions[0].get("type"), "chat")
+        self.assertFalse(any(a.get("type") in {"harvest", "expand_map"} for a in actions))
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_balanced_guardrail_forces_when_missing_resources_persist(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent._tick_count = 30
+        agent._last_objective_tick = 28
+        agent._social_only_plan_streak = 0
+        agent._missing_resource_streak = 2
+        perception = self._base_perception()
+        perception["selfState"]["inventory"] = {"rock": 0, "kelp": 1, "seaweed": 1}
+
+        forced = agent._apply_balanced_objective_guardrails(
+            [{"type": "wait"}],
+            perception,
+        )
+
+        self.assertTrue(any(a.get("type") == "harvest" for a in forced))
+        self.assertEqual(agent._last_forced_objective_reason, "missing_resources_persisted")
 
 
 if __name__ == "__main__":
