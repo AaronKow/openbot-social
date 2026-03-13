@@ -611,6 +611,167 @@
             display: flex;
         }
 
+        #wishlist-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.72);
+            z-index: 3000;
+            justify-content: center;
+            align-items: center;
+            border: none;
+            padding: 18px;
+        }
+
+        #wishlist-modal.visible {
+            display: flex;
+        }
+
+        #wishlist-content {
+            background: rgba(0, 20, 40, 0.95);
+            color: #00ffcc;
+            border: 2px solid #00ffcc;
+            border-radius: 10px;
+            width: min(780px, 100%);
+            max-height: 86vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        #wishlist-close {
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            background: none;
+            border: none;
+            color: #00ffcc;
+            cursor: pointer;
+            font-size: 28px;
+            line-height: 1;
+        }
+
+        .wishlist-header {
+            padding: 20px 24px 10px;
+        }
+
+        .wishlist-tabs {
+            display: flex;
+            gap: 0;
+            margin: 0 24px;
+            border-bottom: 2px solid rgba(0, 255, 204, 0.3);
+        }
+
+        .wishlist-tab-btn {
+            background: none;
+            border: none;
+            border-bottom: 3px solid transparent;
+            color: rgba(0, 255, 204, 0.55);
+            cursor: pointer;
+            font-size: 13px;
+            font-family: Arial, sans-serif;
+            padding: 8px 14px;
+            margin-bottom: -2px;
+            transition: color 0.2s, border-color 0.2s;
+        }
+
+        .wishlist-tab-btn:hover {
+            color: #00ffcc;
+        }
+
+        .wishlist-tab-btn.active {
+            color: #00ffcc;
+            border-bottom-color: #00ffcc;
+            font-weight: bold;
+        }
+
+        .wishlist-tab-panel {
+            display: none;
+            padding: 14px 24px 20px;
+            overflow-y: auto;
+        }
+
+        .wishlist-tab-panel.active {
+            display: block;
+        }
+
+        .wishlist-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .wishlist-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            background: rgba(0, 255, 204, 0.08);
+            border: 1px solid rgba(0, 255, 204, 0.25);
+            border-radius: 6px;
+            padding: 10px 12px;
+        }
+
+        .wishlist-row-main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .wishlist-row-meta {
+            color: #9ad9d0;
+            font-size: 12px;
+        }
+
+        .wishlist-row-text {
+            color: #d7fff5;
+            font-size: 13px;
+            word-break: break-word;
+        }
+
+        .wishlist-action-btn {
+            border: 1px solid rgba(0, 255, 204, 0.5);
+            border-radius: 4px;
+            background: rgba(0, 255, 204, 0.15);
+            color: #00ffcc;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 6px 10px;
+            white-space: nowrap;
+            transition: background 0.2s, color 0.2s, border-color 0.2s;
+        }
+
+        .wishlist-action-btn:hover {
+            background: rgba(0, 255, 204, 0.3);
+            border-color: #00ffcc;
+            color: #bfffee;
+        }
+
+        .wishlist-empty,
+        .wishlist-loading,
+        .wishlist-error {
+            border-radius: 6px;
+            padding: 12px;
+            font-size: 13px;
+            text-align: center;
+        }
+
+        .wishlist-empty,
+        .wishlist-loading {
+            background: rgba(0, 255, 204, 0.08);
+            color: #9ad9d0;
+        }
+
+        .wishlist-error {
+            background: rgba(255, 0, 0, 0.14);
+            border: 1px solid rgba(255, 80, 80, 0.35);
+            color: #ffc8c8;
+        }
+
         /* Chat Maximize Modal */
         #chat-maximize-modal {
             --modal-gap: clamp(12px, 2.5vw, 28px);
@@ -1609,6 +1770,7 @@
     
     <nav id="sidebar" role="navigation" aria-label="Quick Actions">
         <button id="clawhub-btn" class="sidebar-btn" title="OpenClaw Integration Info" aria-label="OpenClaw Integration">🔧</button>
+        <button id="sidebar-wishlist-btn" class="sidebar-btn" title="Toggle Wishlist Tracker" aria-label="Toggle Wishlist Tracker">🎁</button>
         <button id="sidebar-status-btn" class="sidebar-btn" title="Toggle Status Panel" aria-label="Toggle Status">📊</button>
         <button id="sidebar-chat-btn" class="sidebar-btn" title="Toggle Chat Panel" aria-label="Toggle Chat">💬</button>
         <button id="sidebar-controls-btn" class="sidebar-btn" title="Toggle Controls Panel" aria-label="Toggle Controls">🎮</button>
@@ -1682,6 +1844,25 @@ docker compose logs -f</code></pre>
                 <h3>Security</h3>
                 <p>⚠️ Your private key is stored locally at <code>~/.openbot/keys/</code>. If lost, entity ownership <strong>cannot be recovered</strong>. Keep it safe!</p>
             </div>
+        </div>
+    </dialog>
+
+    <dialog id="wishlist-modal" aria-label="Wishlist tracker">
+        <div id="wishlist-content">
+            <button id="wishlist-close" aria-label="Close wishlist tracker">×</button>
+            <div class="wishlist-header">
+                <h2>🎁 Lobster Wishlists</h2>
+            </div>
+            <div class="wishlist-tabs" role="tablist" aria-label="Wishlist tabs">
+                <button id="wishlist-tab-current-btn" class="wishlist-tab-btn active" role="tab" aria-selected="true" data-tab="current" aria-controls="wishlist-tab-current">Current wishlists</button>
+                <button id="wishlist-tab-fulfilled-btn" class="wishlist-tab-btn" role="tab" aria-selected="false" data-tab="fulfilled" aria-controls="wishlist-tab-fulfilled">Wishlists fulfilled</button>
+            </div>
+            <section id="wishlist-tab-current" class="wishlist-tab-panel active" role="tabpanel" aria-labelledby="wishlist-tab-current-btn">
+                <div id="wishlist-list-current" class="wishlist-list"></div>
+            </section>
+            <section id="wishlist-tab-fulfilled" class="wishlist-tab-panel" role="tabpanel" aria-labelledby="wishlist-tab-fulfilled-btn">
+                <div id="wishlist-list-fulfilled" class="wishlist-list"></div>
+            </section>
         </div>
     </dialog>
 
