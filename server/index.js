@@ -575,6 +575,10 @@ function buildWorldStateDelta(sinceTick, limit) {
 
 const actionQueues = new Map(); // entityId -> runtime queue
 const queueLifecyclePersistBuffer = new Map(); // queueId -> snapshot
+const runtimeDailyTelemetry = new Map(); // entityId::YYYY-MM-DD -> counters
+const runtimeTelemetryPersistBuffer = new Map(); // entityId::YYYY-MM-DD -> counters
+const SOCIAL_ACTION_TYPES = new Set(['chat', 'talk', 'emoji', 'emote', 'dance']);
+const OBJECTIVE_ACTION_TYPES = new Set(['move', 'move_to_agent', 'jump', 'wait', 'harvest', 'expand_map', 'guard', 'defend', 'build']);
 const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RETENTION_MS || 120000);
 const QUEUE_EXPIRY_GRACE_TICKS = Math.max(1, Math.floor(Number(process.env.ACTION_QUEUE_EXPIRY_GRACE_TICKS || 30)));
 let mapRefillTimer = null;
@@ -1724,7 +1728,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
     updateQuestProgress(agent.entityId, { moveCount: 1 }).catch(() => {});
-    
+    noteRuntimeAction(agent.entityId, 'move');
     res.json({ success: true });
   } catch (error) {
     console.error('Error moving agent:', error);
@@ -1789,6 +1793,7 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
+    noteRuntimeAction(agent.entityId, 'chat');
     
     res.json({ success: true });
   } catch (error) {
@@ -1820,6 +1825,7 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
       applyQueueAction(agent, action);
     } else {
       agent.lastAction = action;
+      noteRuntimeAction(agent.entityId, actionType);
       trainAgentSkill(agent, actionType);
       const eventResults = applyRotatingEventActionHooks(agent, actionType, {
         position: agent.position,
@@ -1848,6 +1854,228 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
   }
 });
 
+
+
+function getUtcDateKey(timestampMs = Date.now()) {
+  return new Date(timestampMs).toISOString().slice(0, 10);
+}
+
+function getRuntimeTelemetryKey(entityId, dateKey = getUtcDateKey()) {
+  return `${entityId}::${dateKey}`;
+}
+
+function ensureRuntimeTelemetryRecord(entityId, dateKey = getUtcDateKey()) {
+  const key = getRuntimeTelemetryKey(entityId, dateKey);
+  if (!runtimeDailyTelemetry.has(key)) {
+    runtimeDailyTelemetry.set(key, {
+      entityId,
+      date: dateKey,
+      ticksTotal: 0,
+      idleTicks: 0,
+      socialActions: 0,
+      objectiveActions: 0,
+      uniqueSectors: 0,
+      expansionTilesPlaced: 0,
+      queueCompleted: 0,
+      queueFailed: 0,
+      queueExpired: 0,
+      queueCancelled: 0,
+      queueFailureReasons: {}
+    });
+  }
+  return runtimeDailyTelemetry.get(key);
+}
+
+function markRuntimeTelemetryDirty(record) {
+  if (!record) return;
+  runtimeTelemetryPersistBuffer.set(getRuntimeTelemetryKey(record.entityId, record.date), {
+    ...record,
+    queueFailureReasons: { ...(record.queueFailureReasons || {}) }
+  });
+}
+
+function noteRuntimeTick(agent) {
+  if (!agent?.entityId) return;
+  const record = ensureRuntimeTelemetryRecord(agent.entityId);
+  record.ticksTotal += 1;
+  if ((agent.state || 'idle') === 'idle') {
+    record.idleTicks += 1;
+  }
+  const visitedSectors = getAgentVisitedSectors(agent);
+  record.uniqueSectors = Math.max(record.uniqueSectors, visitedSectors.size);
+  markRuntimeTelemetryDirty(record);
+}
+
+function noteRuntimeAction(entityId, actionType) {
+  if (!entityId) return;
+  const normalized = String(actionType || '').trim().toLowerCase();
+  if (!normalized) return;
+
+  const record = ensureRuntimeTelemetryRecord(entityId);
+  if (SOCIAL_ACTION_TYPES.has(normalized)) {
+    record.socialActions += 1;
+  }
+  if (OBJECTIVE_ACTION_TYPES.has(normalized)) {
+    record.objectiveActions += 1;
+  }
+  markRuntimeTelemetryDirty(record);
+}
+
+function noteExpansionTilePlaced(entityId, tileCount = 1) {
+  if (!entityId) return;
+  const record = ensureRuntimeTelemetryRecord(entityId);
+  record.expansionTilesPlaced += Math.max(0, Number(tileCount) || 0);
+  markRuntimeTelemetryDirty(record);
+}
+
+function noteQueueTerminalStatus(queue, status, reason = null) {
+  if (!queue?.entityId) return;
+  const record = ensureRuntimeTelemetryRecord(queue.entityId);
+  if (status === 'completed') record.queueCompleted += 1;
+  if (status === 'failed') record.queueFailed += 1;
+  if (status === 'expired') record.queueExpired += 1;
+  if (status === 'cancelled') record.queueCancelled += 1;
+  if (reason) {
+    const key = String(reason).trim().slice(0, 64) || 'unknown';
+    record.queueFailureReasons[key] = (Number(record.queueFailureReasons[key]) || 0) + 1;
+  }
+  markRuntimeTelemetryDirty(record);
+}
+
+function toRatio(numerator, denominator) {
+  if (!denominator) return 0;
+  return Number((numerator / denominator).toFixed(4));
+}
+
+function getRuntimeTelemetrySnapshotForEntity(entityId, days = 1) {
+  const rows = getInMemoryTelemetryAggregate(days);
+  const row = rows.find((item) => item.entityId === entityId) || {
+    entityId,
+    ticksTotal: 0,
+    idleTicks: 0,
+    socialActions: 0,
+    objectiveActions: 0,
+    uniqueSectors: 0,
+    expansionTilesPlaced: 0,
+    queueCompleted: 0,
+    queueFailed: 0,
+    queueExpired: 0,
+    queueCancelled: 0,
+    queueFailureReasons: {}
+  };
+  return summarizeTelemetryEntityRow(row);
+}
+
+function summarizeTelemetryEntityRow(row) {
+  const ticksTotal = Number(row.ticksTotal || 0);
+  const idleTicks = Number(row.idleTicks || 0);
+  const socialActions = Number(row.socialActions || 0);
+  const objectiveActions = Number(row.objectiveActions || 0);
+  const totalActions = socialActions + objectiveActions;
+
+  return {
+    entityId: row.entityId,
+    ticksTotal,
+    idleTicks,
+    idleTimeRatio: toRatio(idleTicks, ticksTotal),
+    socialActions,
+    objectiveActions,
+    socialActionRatio: toRatio(socialActions, totalActions),
+    objectiveActionRatio: toRatio(objectiveActions, totalActions),
+    uniqueSectorCoveragePerDay: Number(row.uniqueSectors || 0),
+    expansionTilesPlacedPerDay: Number(row.expansionTilesPlaced || 0),
+    queue: {
+      completed: Number(row.queueCompleted || 0),
+      failed: Number(row.queueFailed || 0),
+      expired: Number(row.queueExpired || 0),
+      cancelled: Number(row.queueCancelled || 0),
+      failureReasons: row.queueFailureReasons || {}
+    }
+  };
+}
+
+function getInMemoryTelemetryAggregate(days = 7) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const thresholdTs = new Date(`${getUtcDateKey()}T00:00:00.000Z`).getTime() - ((safeDays - 1) * 24 * 60 * 60 * 1000);
+  const byEntity = new Map();
+
+  for (const record of runtimeDailyTelemetry.values()) {
+    const dateTs = new Date(`${record.date}T00:00:00.000Z`).getTime();
+    if (dateTs < thresholdTs) continue;
+    if (!byEntity.has(record.entityId)) {
+      byEntity.set(record.entityId, {
+        entityId: record.entityId,
+        ticksTotal: 0,
+        idleTicks: 0,
+        socialActions: 0,
+        objectiveActions: 0,
+        uniqueSectors: 0,
+        expansionTilesPlaced: 0,
+        queueCompleted: 0,
+        queueFailed: 0,
+        queueExpired: 0,
+        queueCancelled: 0,
+        queueFailureReasons: {}
+      });
+    }
+
+    const target = byEntity.get(record.entityId);
+    target.ticksTotal += Number(record.ticksTotal || 0);
+    target.idleTicks += Number(record.idleTicks || 0);
+    target.socialActions += Number(record.socialActions || 0);
+    target.objectiveActions += Number(record.objectiveActions || 0);
+    target.uniqueSectors += Number(record.uniqueSectors || 0);
+    target.expansionTilesPlaced += Number(record.expansionTilesPlaced || 0);
+    target.queueCompleted += Number(record.queueCompleted || 0);
+    target.queueFailed += Number(record.queueFailed || 0);
+    target.queueExpired += Number(record.queueExpired || 0);
+    target.queueCancelled += Number(record.queueCancelled || 0);
+    const reasons = record.queueFailureReasons || {};
+    for (const [reasonKey, count] of Object.entries(reasons)) {
+      target.queueFailureReasons[reasonKey] = (Number(target.queueFailureReasons[reasonKey]) || 0) + (Number(count) || 0);
+    }
+  }
+
+  return Array.from(byEntity.values());
+}
+
+function getTelemetryRegressions(rows, limit = 10) {
+  const scored = rows
+    .map((row) => {
+      const idleRatio = row.idleTimeRatio;
+      const expansionScore = Math.min(1, Number(row.expansionTilesPlacedPerDay || 0) / 3);
+      const queuePressure = Math.min(1, (Number(row.queue.failed || 0) + Number(row.queue.expired || 0)) / Math.max(1, Number(row.queue.completed || 0) + Number(row.queue.failed || 0) + Number(row.queue.expired || 0)));
+      const score = Number((idleRatio * 0.55 + (1 - expansionScore) * 0.3 + queuePressure * 0.15).toFixed(4));
+      return {
+        entityId: row.entityId,
+        score,
+        idleTimeRatio: idleRatio,
+        expansionTilesPlacedPerDay: row.expansionTilesPlacedPerDay,
+        objectiveActionRatio: row.objectiveActionRatio,
+        queueFailed: row.queue.failed,
+        queueExpired: row.queue.expired
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(1, Math.min(25, Number(limit) || 10)));
+
+  return scored;
+}
+
+async function flushRuntimeTelemetryPersistBuffer() {
+  if (!process.env.DATABASE_URL || runtimeTelemetryPersistBuffer.size === 0) return;
+  const snapshots = Array.from(runtimeTelemetryPersistBuffer.values());
+  runtimeTelemetryPersistBuffer.clear();
+
+  for (const snapshot of snapshots) {
+    try {
+      await db.upsertEntityRuntimeDailyStats(snapshot.entityId, snapshot.date, snapshot);
+    } catch (error) {
+      console.error('Error persisting runtime telemetry snapshot:', error);
+      runtimeTelemetryPersistBuffer.set(getRuntimeTelemetryKey(snapshot.entityId, snapshot.date), snapshot);
+    }
+  }
+}
 
 function serializeQueue(queue) {
   if (!queue) return null;
@@ -2384,6 +2612,7 @@ function applyQueueAction(agent, action) {
 
     deductExpandCost(agent.inventory);
     updateExpansionExplorationQuestProgress(agent, placement);
+    noteExpansionTilePlaced(agent.entityId, 1);
     agent.expansionCooldownUntilTick = worldState.tick + MAP_EXPANSION_COOLDOWN_TICKS;
     agent.state = 'acting';
     agent.lastAction = {
@@ -2400,6 +2629,7 @@ function applyQueueAction(agent, action) {
   delete payload.requiredTicks;
   agent.lastAction = payload;
   agent.state = 'acting';
+  noteRuntimeAction(agent.entityId, action.type);
   finishAction(action.type);
 }
 
@@ -2413,6 +2643,7 @@ async function processActionQueues() {
       queue.completedAtTick = worldState.tick;
       queue.completedAtMs = now;
       persistQueueLifecycle(queue);
+      noteQueueTerminalStatus(queue, 'expired', 'expired_tick_budget');
       actionQueues.delete(entityId);
       continue;
     }
@@ -2429,6 +2660,7 @@ async function processActionQueues() {
       queue.completedAtTick = worldState.tick;
       queue.completedAtMs = Date.now();
       persistQueueLifecycle(queue);
+      noteQueueTerminalStatus(queue, 'completed');
       continue;
     }
 
@@ -2443,6 +2675,7 @@ async function processActionQueues() {
       queue.completedAtTick = worldState.tick;
       queue.completedAtMs = Date.now();
       persistQueueLifecycle(queue);
+      noteQueueTerminalStatus(queue, 'failed', 'no_active_agent');
       continue;
     }
 
@@ -2458,6 +2691,7 @@ async function processActionQueues() {
       queue.completedAtMs = Date.now();
       queue.remainingTicks = 0;
       persistQueueLifecycle(queue);
+      noteQueueTerminalStatus(queue, 'completed');
       continue;
     }
 
@@ -2715,6 +2949,7 @@ app.post('/entity/:entityId/action-queue/cancel', requireAuth, rateLimiters.acti
     queue.completedAtMs = Date.now();
     queue.lastError = null;
     persistQueueLifecycle(queue);
+    noteQueueTerminalStatus(queue, 'cancelled');
     _entityWikiCache.delete(entityId);
 
     return res.json({ success: true, queue: serializeQueue(queue) });
@@ -3102,6 +3337,7 @@ async function gameLoop() {
     ensureAgentInventory(agent);
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
     applyAgentEnergyTick(agent, dtSeconds, worldTime.dayPhase);
+    noteRuntimeTick(agent);
     markAgentUpdated(agent);
   }
 
@@ -3375,6 +3611,7 @@ async function persistState() {
 
   // Flush queued lifecycle updates every second.
   await flushQueueLifecyclePersistBuffer();
+  await flushRuntimeTelemetryPersistBuffer();
 
   // Delete removed agents in one DB call to avoid per-tick blocking I/O.
   if (pendingAgentDeleteIds.size > 0) {
@@ -3822,6 +4059,7 @@ app.get('/entity/:entityId/wiki-public', async (req, res) => {
       runtimeActionQueue.completedAtTick = worldState.tick;
       runtimeActionQueue.completedAtMs = Date.now();
       persistQueueLifecycle(runtimeActionQueue);
+      noteQueueTerminalStatus(runtimeActionQueue, 'expired', 'expired_tick_budget');
       actionQueues.delete(entityId);
       runtimeActionQueue = null;
     }
@@ -3873,6 +4111,7 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
         state: onlineAgent.state || 'idle',
         lastAction,
         runtime: buildRuntimeStatsPayload(onlineAgent),
+        telemetry: getRuntimeTelemetrySnapshotForEntity(entityId, 1),
         expansion: {
           mapExpansionLevel: worldState.mapExpansionLevel,
           expansionTilesCount: worldState.expansionTiles.length,
@@ -3895,6 +4134,7 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
       state: 'offline',
       lastAction: null,
       runtime: null,
+      telemetry: getRuntimeTelemetrySnapshotForEntity(entityId, 1),
       expansion: {
         mapExpansionLevel: worldState.mapExpansionLevel,
         expansionTilesCount: worldState.expansionTiles.length,
@@ -3907,6 +4147,51 @@ app.get('/entity/:entityId/runtime-stats', async (req, res) => {
   }
 });
 
+
+app.get('/observer/telemetry/entity-runtime-aggregate', async (req, res) => {
+  try {
+    const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+
+    const sourceRows = process.env.DATABASE_URL
+      ? await db.getEntityTelemetryAggregate(days, limit)
+      : getInMemoryTelemetryAggregate(days).slice(0, limit);
+
+    const entities = sourceRows.map(summarizeTelemetryEntityRow);
+    const totals = summarizeTelemetryEntityRow({
+      entityId: 'all',
+      ticksTotal: entities.reduce((sum, row) => sum + row.ticksTotal, 0),
+      idleTicks: entities.reduce((sum, row) => sum + row.idleTicks, 0),
+      socialActions: entities.reduce((sum, row) => sum + row.socialActions, 0),
+      objectiveActions: entities.reduce((sum, row) => sum + row.objectiveActions, 0),
+      uniqueSectors: entities.reduce((sum, row) => sum + row.uniqueSectorCoveragePerDay, 0),
+      expansionTilesPlaced: entities.reduce((sum, row) => sum + row.expansionTilesPlacedPerDay, 0),
+      queueCompleted: entities.reduce((sum, row) => sum + row.queue.completed, 0),
+      queueFailed: entities.reduce((sum, row) => sum + row.queue.failed, 0),
+      queueExpired: entities.reduce((sum, row) => sum + row.queue.expired, 0),
+      queueCancelled: entities.reduce((sum, row) => sum + row.queue.cancelled, 0),
+      queueFailureReasons: entities.reduce((acc, row) => {
+        for (const [reason, count] of Object.entries(row.queue.failureReasons || {})) {
+          acc[reason] = (Number(acc[reason]) || 0) + (Number(count) || 0);
+        }
+        return acc;
+      }, {})
+    });
+
+    return res.json({
+      success: true,
+      windowDays: days,
+      generatedAt: new Date().toISOString(),
+      entityCount: entities.length,
+      totals,
+      entities,
+      topRegressions: getTelemetryRegressions(entities, 10)
+    });
+  } catch (error) {
+    console.error('Error loading aggregated entity telemetry:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
 
 // Get per-entity daily reflections
 app.get('/entity/:entityId/daily-reflections', requireAuth, async (req, res) => {

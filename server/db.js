@@ -282,6 +282,26 @@ async function initDatabase() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS entity_runtime_daily_stats (
+        entity_id VARCHAR(255) NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+        stat_date DATE NOT NULL,
+        ticks_total INTEGER NOT NULL DEFAULT 0,
+        idle_ticks INTEGER NOT NULL DEFAULT 0,
+        social_actions INTEGER NOT NULL DEFAULT 0,
+        objective_actions INTEGER NOT NULL DEFAULT 0,
+        unique_sectors INTEGER NOT NULL DEFAULT 0,
+        expansion_tiles_placed INTEGER NOT NULL DEFAULT 0,
+        queue_completed INTEGER NOT NULL DEFAULT 0,
+        queue_failed INTEGER NOT NULL DEFAULT 0,
+        queue_expired INTEGER NOT NULL DEFAULT 0,
+        queue_cancelled INTEGER NOT NULL DEFAULT 0,
+        queue_failure_reasons JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (entity_id, stat_date)
+      )
+    `);
+
     // Quest catalog (global quest definitions)
     await client.query(`
       CREATE TABLE IF NOT EXISTS quest_catalog (
@@ -374,6 +394,10 @@ const indexMigrations = [
   {
     name: 'idx_chat_messages_timestamp',
     query: 'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp DESC)'
+  },
+  {
+    name: 'idx_entity_runtime_daily_stats_date',
+    query: 'CREATE INDEX IF NOT EXISTS idx_entity_runtime_daily_stats_date ON entity_runtime_daily_stats(stat_date DESC, entity_id)'
   },
   {
     name: 'idx_chat_messages_timestamp_id',
@@ -2010,6 +2034,178 @@ async function getRecentEntityActionQueues(entityId, limit = 10) {
 /**
  * Get all interests for an entity, ordered by weight descending.
  */
+
+async function upsertEntityRuntimeDailyStats(entityId, statDate, metrics = {}) {
+  const failureReasons = metrics.queueFailureReasons && typeof metrics.queueFailureReasons === 'object'
+    ? metrics.queueFailureReasons
+    : {};
+
+  await pool.query(
+    `INSERT INTO entity_runtime_daily_stats (
+       entity_id, stat_date, ticks_total, idle_ticks, social_actions, objective_actions,
+       unique_sectors, expansion_tiles_placed, queue_completed, queue_failed, queue_expired,
+       queue_cancelled, queue_failure_reasons, updated_at
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+     ON CONFLICT (entity_id, stat_date) DO UPDATE SET
+       ticks_total = GREATEST(entity_runtime_daily_stats.ticks_total, EXCLUDED.ticks_total),
+       idle_ticks = GREATEST(entity_runtime_daily_stats.idle_ticks, EXCLUDED.idle_ticks),
+       social_actions = GREATEST(entity_runtime_daily_stats.social_actions, EXCLUDED.social_actions),
+       objective_actions = GREATEST(entity_runtime_daily_stats.objective_actions, EXCLUDED.objective_actions),
+       unique_sectors = GREATEST(entity_runtime_daily_stats.unique_sectors, EXCLUDED.unique_sectors),
+       expansion_tiles_placed = GREATEST(entity_runtime_daily_stats.expansion_tiles_placed, EXCLUDED.expansion_tiles_placed),
+       queue_completed = GREATEST(entity_runtime_daily_stats.queue_completed, EXCLUDED.queue_completed),
+       queue_failed = GREATEST(entity_runtime_daily_stats.queue_failed, EXCLUDED.queue_failed),
+       queue_expired = GREATEST(entity_runtime_daily_stats.queue_expired, EXCLUDED.queue_expired),
+       queue_cancelled = GREATEST(entity_runtime_daily_stats.queue_cancelled, EXCLUDED.queue_cancelled),
+       queue_failure_reasons = (
+         SELECT jsonb_object_agg(key, value)
+         FROM (
+           SELECT key, SUM(value)::int AS value
+           FROM (
+             SELECT key, (value::text)::int AS value FROM jsonb_each_text(entity_runtime_daily_stats.queue_failure_reasons)
+             UNION ALL
+             SELECT key, (value::text)::int AS value FROM jsonb_each_text(EXCLUDED.queue_failure_reasons)
+           ) merged
+           GROUP BY key
+         ) aggregated
+       ),
+       updated_at = NOW()`,
+    [
+      entityId,
+      statDate,
+      Number(metrics.ticksTotal || 0),
+      Number(metrics.idleTicks || 0),
+      Number(metrics.socialActions || 0),
+      Number(metrics.objectiveActions || 0),
+      Number(metrics.uniqueSectors || 0),
+      Number(metrics.expansionTilesPlaced || 0),
+      Number(metrics.queueCompleted || 0),
+      Number(metrics.queueFailed || 0),
+      Number(metrics.queueExpired || 0),
+      Number(metrics.queueCancelled || 0),
+      JSON.stringify(failureReasons)
+    ]
+  );
+}
+
+async function getEntityRuntimeDailyStat(entityId, days = 1) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 1));
+  const result = await pool.query(
+    `WITH base AS (
+       SELECT
+         SUM(ticks_total)::int AS ticks_total,
+         SUM(idle_ticks)::int AS idle_ticks,
+         SUM(social_actions)::int AS social_actions,
+         SUM(objective_actions)::int AS objective_actions,
+         SUM(unique_sectors)::int AS unique_sectors,
+         SUM(expansion_tiles_placed)::int AS expansion_tiles_placed,
+         SUM(queue_completed)::int AS queue_completed,
+         SUM(queue_failed)::int AS queue_failed,
+         SUM(queue_expired)::int AS queue_expired,
+         SUM(queue_cancelled)::int AS queue_cancelled
+       FROM entity_runtime_daily_stats
+       WHERE entity_id = $1
+         AND stat_date >= (CURRENT_DATE - ($2::int - 1))
+     ),
+     reasons AS (
+       SELECT r.key AS reason_key, SUM((r.value::text)::int)::int AS reason_count
+       FROM entity_runtime_daily_stats s
+       CROSS JOIN LATERAL jsonb_each(s.queue_failure_reasons) r
+       WHERE s.entity_id = $1
+         AND s.stat_date >= (CURRENT_DATE - ($2::int - 1))
+       GROUP BY r.key
+     )
+     SELECT b.*, COALESCE((SELECT jsonb_object_agg(reason_key, reason_count) FROM reasons), '{}'::jsonb) AS queue_failure_reasons
+     FROM base b`,
+    [entityId, safeDays]
+  );
+
+  const row = result.rows[0] || {};
+  return {
+    entityId,
+    ticksTotal: Number(row.ticks_total || 0),
+    idleTicks: Number(row.idle_ticks || 0),
+    socialActions: Number(row.social_actions || 0),
+    objectiveActions: Number(row.objective_actions || 0),
+    uniqueSectors: Number(row.unique_sectors || 0),
+    expansionTilesPlaced: Number(row.expansion_tiles_placed || 0),
+    queueCompleted: Number(row.queue_completed || 0),
+    queueFailed: Number(row.queue_failed || 0),
+    queueExpired: Number(row.queue_expired || 0),
+    queueCancelled: Number(row.queue_cancelled || 0),
+    queueFailureReasons: row.queue_failure_reasons || {}
+  };
+}
+
+async function getEntityTelemetryAggregate(days = 7, limit = 100) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+
+  const result = await pool.query(
+    `WITH base AS (
+       SELECT entity_id,
+              SUM(ticks_total)::int AS ticks_total,
+              SUM(idle_ticks)::int AS idle_ticks,
+              SUM(social_actions)::int AS social_actions,
+              SUM(objective_actions)::int AS objective_actions,
+              SUM(unique_sectors)::int AS unique_sectors,
+              SUM(expansion_tiles_placed)::int AS expansion_tiles_placed,
+              SUM(queue_completed)::int AS queue_completed,
+              SUM(queue_failed)::int AS queue_failed,
+              SUM(queue_expired)::int AS queue_expired,
+              SUM(queue_cancelled)::int AS queue_cancelled
+       FROM entity_runtime_daily_stats
+       WHERE stat_date >= (CURRENT_DATE - ($1::int - 1))
+       GROUP BY entity_id
+     ),
+     reasons AS (
+       SELECT s.entity_id, r.key AS reason_key, SUM((r.value::text)::int)::int AS reason_count
+       FROM entity_runtime_daily_stats s
+       CROSS JOIN LATERAL jsonb_each(s.queue_failure_reasons) r
+       WHERE s.stat_date >= (CURRENT_DATE - ($1::int - 1))
+       GROUP BY s.entity_id, r.key
+     ),
+     reason_json AS (
+       SELECT entity_id, jsonb_object_agg(reason_key, reason_count) AS queue_failure_reasons
+       FROM reasons
+       GROUP BY entity_id
+     )
+     SELECT b.entity_id,
+            b.ticks_total,
+            b.idle_ticks,
+            b.social_actions,
+            b.objective_actions,
+            b.unique_sectors,
+            b.expansion_tiles_placed,
+            b.queue_completed,
+            b.queue_failed,
+            b.queue_expired,
+            b.queue_cancelled,
+            COALESCE(rj.queue_failure_reasons, '{}'::jsonb) AS queue_failure_reasons
+     FROM base b
+     LEFT JOIN reason_json rj ON rj.entity_id = b.entity_id
+     ORDER BY b.ticks_total DESC, b.entity_id ASC
+     LIMIT $2`,
+    [safeDays, safeLimit]
+  );
+
+  return result.rows.map((row) => ({
+    entityId: row.entity_id,
+    ticksTotal: Number(row.ticks_total || 0),
+    idleTicks: Number(row.idle_ticks || 0),
+    socialActions: Number(row.social_actions || 0),
+    objectiveActions: Number(row.objective_actions || 0),
+    uniqueSectors: Number(row.unique_sectors || 0),
+    expansionTilesPlaced: Number(row.expansion_tiles_placed || 0),
+    queueCompleted: Number(row.queue_completed || 0),
+    queueFailed: Number(row.queue_failed || 0),
+    queueExpired: Number(row.queue_expired || 0),
+    queueCancelled: Number(row.queue_cancelled || 0),
+    queueFailureReasons: row.queue_failure_reasons || {}
+  }));
+}
+
 async function getEntityInterests(entityId) {
   const result = await pool.query(
     `SELECT interest, weight::float FROM entity_interests
@@ -2439,6 +2635,9 @@ module.exports = {
   // Action queue functions
   saveEntityActionQueue,
   getRecentEntityActionQueues,
+  upsertEntityRuntimeDailyStats,
+  getEntityRuntimeDailyStat,
+  getEntityTelemetryAggregate,
   ensureEntityQuest,
   incrementEntityQuestProgress,
   setEntityQuestProgress,
