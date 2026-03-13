@@ -2980,8 +2980,7 @@ class AIAgent:
             if t in {"move", "move_to_agent", "harvest", "expand_map"}:
                 if callable(reporter):
                     reporter(mission_id, t, 1)
-        summary = f"mission update: role={self._mission_role}, mission={mission_id[:10]}, actions={','.join(action_types[:3]) or 'idle'}"
-        self.client.chat(summary[:280])
+        # Keep mission progress reporting internal; do not emit world chat updates.
         self._last_mission_chat_at = now
 
     def perceive(self) -> Dict[str, Any]:
