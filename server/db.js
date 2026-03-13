@@ -480,6 +480,38 @@ const QUEST_SEED_CATALOG = Object.freeze([
     reward: { shells: 12, badge: 'explorer-loop' }
   },
   {
+    questId: 'exploration-first-expansion',
+    title: 'First Frontier Stake',
+    description: 'Place your first expansion tile on the frontier.',
+    category: 'exploration',
+    target: { firstExpansionTilePlaced: 1 },
+    reward: { shells: 10, badge: 'first-frontier-stake' }
+  },
+  {
+    questId: 'exploration-frontier-cartographer',
+    title: 'Frontier Cartographer',
+    description: 'Expand 8 unique frontier tiles.',
+    category: 'exploration',
+    target: { frontierTilesExpanded: 8 },
+    reward: { shells: 20, badge: 'frontier-cartographer' }
+  },
+  {
+    questId: 'exploration-unseen-traverse',
+    title: 'Unseen Traverse',
+    description: 'Travel 40 units while entering unexplored sectors.',
+    category: 'exploration',
+    target: { unexploredTraversalDistance: 40 },
+    reward: { shells: 22, badge: 'unseen-traverse' }
+  },
+  {
+    questId: 'exploration-cooperative-chain',
+    title: 'Chain Reaction',
+    description: 'Create 3 cooperative expansion links with other entities.',
+    category: 'exploration',
+    target: { cooperativeExpansionChains: 3 },
+    reward: { shells: 24, badge: 'chain-reaction' }
+  },
+  {
     questId: 'daily-queue-operator',
     title: 'Queue Operator',
     description: 'Execute 6 queued actions.',
