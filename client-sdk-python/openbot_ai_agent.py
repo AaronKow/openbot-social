@@ -890,6 +890,10 @@ class AIAgent:
             "last_reason": "init",
             "last_channel": "idle_fallback",
         }
+        self._mission_cache: Dict[str, Any] = {"ts": 0.0, "missions": []}
+        self._mission_membership: Dict[str, Any] = {"missionId": None, "joinedAt": 0.0}
+        self._mission_role: str = "builder"
+        self._last_mission_chat_at: float = 0.0
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -2436,6 +2440,125 @@ class AIAgent:
         print(f"  🧠 planner channel={channel} reason={planner.get('last_reason')} missing={planner.get('missing')} scores={planner.get('scores')}")
         return merged[:16]
 
+    def _mission_social_pressure(self, markers: Dict[str, Any]) -> float:
+        pressure = 0.0
+        if markers.get("mentions"):
+            pressure += 0.6
+        if markers.get("urgent_chat"):
+            pressure += 0.3
+        if markers.get("new_messages"):
+            pressure += 0.2
+        return min(1.0, pressure)
+
+    def _fetch_active_missions(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        now = time.time()
+        if not force_refresh and (now - float(self._mission_cache.get("ts", 0.0))) < 10.0:
+            missions = self._mission_cache.get("missions")
+            return missions if isinstance(missions, list) else []
+        if not self.client:
+            return []
+        getter = getattr(self.client, "get_active_missions", None)
+        missions = getter() if callable(getter) else []
+        missions = missions if isinstance(missions, list) else []
+        self._mission_cache = {"ts": now, "missions": missions}
+        return missions
+
+    def _choose_mission_role(self, mission_type: str) -> str:
+        mtype = str(mission_type or "").lower()
+        if mtype == "resource-drive":
+            return "forager"
+        if mtype == "defend-zone":
+            return "defender"
+        return "builder"
+
+    def _maybe_join_mission(self, perception: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        pressure = self._mission_social_pressure(markers)
+        if pressure > 0.45:
+            return None
+        if self._mission_membership.get("missionId"):
+            return None
+        missions = self._fetch_active_missions()
+        if not missions:
+            return None
+        frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+        novelty = float(frontier.get("novelty", 0.0) or 0.0)
+        resources = float(frontier.get("resource_likelihood", 0.0) or 0.0)
+
+        def score(m: Dict[str, Any]) -> float:
+            mtype = str(m.get("type", ""))
+            reward = m.get("reward") if isinstance(m.get("reward"), dict) else {}
+            reward_score = float(reward.get("leaderboardBonus", 0.0) or 0.0) + (float(reward.get("achievementXp", 0.0) or 0.0) * 0.8)
+            type_bonus = 0.0
+            if mtype == "expand-sector":
+                type_bonus = novelty * 12.0
+            elif mtype == "resource-drive":
+                type_bonus = resources * 12.0
+            elif mtype == "defend-zone":
+                nearest = perception.get("threats") if isinstance(perception.get("threats"), list) else []
+                near = float((nearest[0] or {}).get("distance", 999.0)) if nearest else 999.0
+                type_bonus = max(0.0, (20.0 - near))
+            return reward_score + type_bonus
+
+        ranked = sorted([m for m in missions if isinstance(m, dict)], key=score, reverse=True)
+        if not ranked:
+            return None
+        selected = ranked[0]
+        joiner = getattr(self.client, "join_mission", None)
+        joined = joiner(selected.get("id")) if callable(joiner) and selected.get("id") else None
+        if not isinstance(joined, dict):
+            return None
+        mission = joined.get("mission") if isinstance(joined.get("mission"), dict) else selected
+        self._mission_membership = {"missionId": mission.get("id"), "joinedAt": time.time()}
+        self._mission_role = self._choose_mission_role(str(mission.get("type", "")))
+        return mission
+
+    def _inject_mission_role_bias(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        role = self._mission_role
+        if not self._mission_membership.get("missionId"):
+            return actions
+        base = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
+        if role == "forager":
+            prefix = [{"type": "harvest"}, {"type": "move"}]
+        elif role == "defender":
+            threats = perception.get("threats") if isinstance(perception.get("threats"), list) else []
+            if threats and isinstance(threats[0], dict):
+                prefix = [{"type": "move", "x": float(threats[0].get("x", 50.0)), "z": float(threats[0].get("z", 50.0))}]
+            else:
+                prefix = [{"type": "move"}]
+        else:
+            frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+            cent = frontier.get("centroid") if isinstance(frontier.get("centroid"), dict) else {}
+            prefix = [{"type": "expand_map", "x": float(cent.get("x", 50.0)), "z": float(cent.get("z", 50.0))}, {"type": "move"}]
+        merged = prefix + base
+        # de-duplicate immediate identical action types for queue quality
+        compact = []
+        last = None
+        for item in merged:
+            t = item.get("type")
+            if t == last:
+                continue
+            compact.append(item)
+            last = t
+        return compact[:16]
+
+    def _maybe_publish_mission_progress_chat(self, perception: Dict[str, Any], executed_actions: List[Dict[str, Any]]) -> None:
+        mission_id = self._mission_membership.get("missionId")
+        if not mission_id or not self.client:
+            return
+        now = time.time()
+        if (now - self._last_mission_chat_at) < 45.0:
+            return
+        reporter = getattr(self.client, "report_mission_progress", None)
+        action_types = [str(a.get("type", "")).lower() for a in executed_actions if isinstance(a, dict)]
+        for t in action_types:
+            if t in {"move", "move_to_agent", "harvest", "expand_map"}:
+                if callable(reporter):
+                    reporter(mission_id, t, 1)
+        summary = f"mission update: role={self._mission_role}, mission={mission_id[:10]}, actions={','.join(action_types[:3]) or 'idle'}"
+        self.client.chat(summary[:280])
+        self._last_mission_chat_at = now
+
     def perceive(self) -> Dict[str, Any]:
         self._maybe_fetch_news()
         observation = self._build_observation()
@@ -2473,6 +2596,17 @@ class AIAgent:
         threat_items = []
         if nearest:
             threat_items.append(nearest)
+        joined_mission = self._maybe_join_mission({
+            "markers": self._extract_markers(observation),
+            "frontier": frontier,
+            "threats": threat_items,
+        })
+        mission_context = {
+            "activeMissions": self._fetch_active_missions(),
+            "membership": dict(self._mission_membership),
+            "role": self._mission_role,
+            "joinedMission": joined_mission,
+        }
         return {
             "tick": self._tick_count,
             "worldTick": world_tick,
@@ -2496,6 +2630,7 @@ class AIAgent:
             "expansionGuidance": expansion_guidance,
             "explorationGuidance": exploration_guidance,
             "plannerState": dict(self._planner_state),
+            "missions": mission_context,
         }
 
     def retrieve_memory(self, perception: Dict[str, Any]) -> Dict[str, Any]:
@@ -2672,6 +2807,7 @@ class AIAgent:
         if not actions:
             actions = [{"type": "wait"}]
         actions = self._apply_progression_policy(actions, perception)
+        actions = self._inject_mission_role_bias(actions, perception)
         quest_context = self._build_compact_quest_context()
         quest_priority = self._quest_priority_templates(perception, quest_context)
         actions = self._merge_quest_priorities(actions, quest_priority)
@@ -3053,6 +3189,7 @@ class AIAgent:
         expand_success = sum(1 for a in expand_actions if a.get("status") == "ok")
 
         self._procedural_stats["ticks"] += 1
+        self._maybe_publish_mission_progress_chat(perception, executed_actions)
         self._procedural_stats["chat_actions"] += chat_actions
         self._procedural_stats["movement_actions"] += movement_actions
         self._procedural_stats["emote_actions"] += emote_actions

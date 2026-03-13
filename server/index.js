@@ -84,7 +84,7 @@ function isNonPublicCorsPath(req) {
     if (reqPath === '/spawn' || reqPath === '/move' || reqPath === '/action') return true;
     if (/^\/agent\/[^/]+\/heartbeat$/.test(reqPath)) return true;
     if (reqPath.startsWith('/disconnect/')) return true;
-    if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots)(?:\/.*)?$/.test(reqPath)) return true;
+    if (/^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|missions)(?:\/.*)?$/.test(reqPath)) return true;
     return false;
   }
 
@@ -93,7 +93,7 @@ function isNonPublicCorsPath(req) {
   if (normalizedMethod === 'DELETE' && reqPath.startsWith('/disconnect/')) return true;
 
   if (
-    /^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots)(?:\/.*)?$/.test(reqPath)
+    /^\/entity\/[^/]+\/(action-queue|interests|daily-reflections|goal-snapshots|missions)(?:\/.*)?$/.test(reqPath)
   ) {
     return true;
   }
@@ -271,6 +271,12 @@ const ROTATING_EVENT_RADIUS = Object.freeze({
   rescue_beacon: Math.max(4, Number(process.env.RESCUE_BEACON_RADIUS || 8)),
   migration_signal: Math.max(5, Number(process.env.MIGRATION_SIGNAL_RADIUS || 11))
 });
+const MISSION_TYPES = Object.freeze(['expand-sector', 'defend-zone', 'resource-drive']);
+const MISSION_DEFAULTS = Object.freeze({
+  'expand-sector': { target: 12, rewardLeaderboardBonus: 35, rewardAchievementXp: 24 },
+  'defend-zone': { target: 8, rewardLeaderboardBonus: 30, rewardAchievementXp: 30 },
+  'resource-drive': { target: 16, rewardLeaderboardBonus: 26, rewardAchievementXp: 18 }
+});
 
 function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
   const raw = process.env[envKey];
@@ -308,6 +314,132 @@ const worldState = {
 const dirtyAgentIds = new Set();
 const pendingAgentDeleteIds = new Set();
 const entityRecentPositions = new Map(); // entityId -> [{x,z,tick,ts}]
+const missionRegistry = new Map();
+const missionEntityIndex = new Map();
+const missionAchievementThresholds = Object.freeze([
+  { key: 'mission-contributor', min: 1 },
+  { key: 'mission-specialist', min: 3 },
+  { key: 'mission-vanguard', min: 6 }
+]);
+
+function createMission(type, overrides = {}) {
+  const base = MISSION_DEFAULTS[type] || MISSION_DEFAULTS['resource-drive'];
+  const missionId = overrides.id || `mission-${type}-${uuidv4()}`;
+  const mission = {
+    id: missionId,
+    type,
+    title: overrides.title || `${type.replace(/-/g, ' ')} operation`,
+    status: 'active',
+    createdAt: Date.now(),
+    target: Math.max(1, Number(overrides.target || base.target) || base.target),
+    progress: 0,
+    reward: {
+      leaderboardBonus: Math.max(0, Number(overrides.rewardLeaderboardBonus || base.rewardLeaderboardBonus) || 0),
+      achievementXp: Math.max(0, Number(overrides.rewardAchievementXp || base.rewardAchievementXp) || 0)
+    },
+    contributions: {},
+    participants: new Set(),
+    completion: null
+  };
+  missionRegistry.set(missionId, mission);
+  return mission;
+}
+
+function seedMissionRegistry() {
+  if (missionRegistry.size > 0) return;
+  for (const type of MISSION_TYPES) {
+    createMission(type);
+  }
+}
+
+function ensureMissionRuntimeForEntity(entityId) {
+  const key = String(entityId || '').trim();
+  if (!key) return null;
+  const existing = missionEntityIndex.get(key);
+  if (existing) return existing;
+  const state = {
+    activeMissionId: null,
+    joinedAt: null,
+    leaderboardBonus: 0,
+    achievementBonusXp: 0,
+    completedMissions: 0,
+    completionLog: []
+  };
+  missionEntityIndex.set(key, state);
+  return state;
+}
+
+function getMissionContributionWeight(missionType, actionType) {
+  const normalized = String(actionType || '').toLowerCase();
+  if (normalized === 'mission-manual') return 1;
+  if (missionType === 'expand-sector') {
+    if (normalized === 'expand_map') return 2;
+    if (normalized === 'move' || normalized === 'move_to_agent') return 1;
+    return 0;
+  }
+  if (missionType === 'defend-zone') {
+    if (normalized === 'combat') return 2;
+    if (normalized === 'defend' || normalized === 'guard') return 1;
+    return 0;
+  }
+  if (missionType === 'resource-drive') {
+    if (normalized === 'harvest') return 2;
+    if (normalized === 'move' || normalized === 'move_to_agent') return 1;
+    return 0;
+  }
+  return 0;
+}
+
+function serializeMission(mission) {
+  const participantCount = mission.participants?.size || 0;
+  return {
+    id: mission.id,
+    type: mission.type,
+    title: mission.title,
+    status: mission.status,
+    createdAt: mission.createdAt,
+    target: mission.target,
+    progress: mission.progress,
+    completion: mission.completion,
+    reward: { ...mission.reward },
+    participantCount,
+    participants: Array.from(mission.participants || []),
+    contributions: { ...(mission.contributions || {}) }
+  };
+}
+
+function applyMissionCompletionRewards(mission) {
+  if (!mission || mission.status !== 'active' || mission.progress < mission.target) return;
+  mission.status = 'completed';
+  mission.completion = { completedAt: Date.now() };
+  for (const entityId of mission.participants || []) {
+    const runtime = ensureMissionRuntimeForEntity(entityId);
+    if (!runtime) continue;
+    runtime.leaderboardBonus += mission.reward.leaderboardBonus;
+    runtime.achievementBonusXp += mission.reward.achievementXp;
+    runtime.completedMissions += 1;
+    runtime.completionLog.push({ missionId: mission.id, type: mission.type, completedAt: mission.completion.completedAt });
+    if (runtime.completionLog.length > 20) runtime.completionLog = runtime.completionLog.slice(-20);
+    if (runtime.activeMissionId === mission.id) runtime.activeMissionId = null;
+  }
+}
+
+function applyMissionProgress(entityId, missionId, actionType, units = 1) {
+  const mission = missionRegistry.get(String(missionId || ''));
+  if (!mission || mission.status !== 'active') return null;
+  const runtime = ensureMissionRuntimeForEntity(entityId);
+  if (!runtime || runtime.activeMissionId !== mission.id) return null;
+  const baseWeight = getMissionContributionWeight(mission.type, actionType);
+  const increment = Math.max(0, Number(units) || 0) * baseWeight;
+  if (increment <= 0) return serializeMission(mission);
+  mission.participants.add(entityId);
+  mission.progress = Math.min(mission.target, mission.progress + increment);
+  mission.contributions[entityId] = Number((Number(mission.contributions[entityId]) + increment).toFixed(2));
+  applyMissionCompletionRewards(mission);
+  return serializeMission(mission);
+}
+
+seedMissionRegistry();
 
 function pushEntityRecentPosition(entityId, position) {
   const id = String(entityId || '').trim();
@@ -955,6 +1087,7 @@ function processLobsterCombatAgainstThreats(dtSeconds) {
       targets: impacts.map((entry) => entry.threatId)
     };
     trainAgentSkill(agent, 'defend');
+    noteRuntimeAction(agent.entityId, 'combat');
     markAgentUpdated(agent);
 
     pushCombatEvent({
@@ -1937,6 +2070,8 @@ function noteRuntimeAction(entityId, actionType) {
     record.objectiveActions += 1;
   }
   markRuntimeTelemetryDirty(record);
+
+  applyMissionProgress(entityId, ensureMissionRuntimeForEntity(entityId)?.activeMissionId, normalized, 1);
 }
 
 function noteExpansionTilePlaced(entityId, tileCount = 1) {
@@ -3889,7 +4024,41 @@ app.get('/leaderboard/current', async (req, res) => {
     }
 
     const seasonId = getCurrentSeasonId();
-    const leaderboard = process.env.DATABASE_URL ? await db.getCurrentLeaderboard(limit) : [];
+    const baseLeaderboard = process.env.DATABASE_URL ? await db.getCurrentLeaderboard(limit) : [];
+    const missionBonuses = Array.from(missionEntityIndex.entries())
+      .filter(([, runtime]) => Number(runtime?.leaderboardBonus || 0) > 0)
+      .map(([entityId, runtime]) => ({ entityId, bonus: Number(runtime.leaderboardBonus || 0) }));
+
+    const leaderboardMap = new Map();
+    for (const row of baseLeaderboard) {
+      if (!row || !row.entityId) continue;
+      leaderboardMap.set(row.entityId, { ...row, score: Number(row.score || 0), missionBonus: 0 });
+    }
+    for (const bonusRow of missionBonuses) {
+      const existing = leaderboardMap.get(bonusRow.entityId);
+      if (existing) {
+        existing.score += bonusRow.bonus;
+        existing.missionBonus = bonusRow.bonus;
+      } else {
+        leaderboardMap.set(bonusRow.entityId, {
+          entityId: bonusRow.entityId,
+          score: bonusRow.bonus,
+          missionBonus: bonusRow.bonus,
+          level: 1,
+          xp: 0,
+          activeDays: 0,
+          activeStreakDays: 0,
+          uniqueRelationships: 0,
+          badges: []
+        });
+      }
+    }
+
+    const leaderboard = Array.from(leaderboardMap.values())
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+      .slice(0, limit)
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+
     const payload = {
       seasonId,
       policy: {
@@ -3904,6 +4073,84 @@ app.get('/leaderboard/current', async (req, res) => {
   } catch (error) {
     console.error('Error loading current leaderboard:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+
+app.get('/missions/active', (req, res) => {
+  const active = Array.from(missionRegistry.values())
+    .filter((mission) => mission.status === 'active')
+    .map((mission) => serializeMission(mission));
+  res.json({ success: true, missions: active });
+});
+
+app.post('/entity/:entityId/missions/:missionId/join', requireAuth, async (req, res) => {
+  try {
+    const { entityId, missionId } = req.params;
+    if (!entityId || !missionId) {
+      return res.status(400).json({ success: false, error: 'entityId and missionId are required' });
+    }
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Can only join missions for your authenticated entity' });
+    }
+    const mission = missionRegistry.get(missionId);
+    if (!mission || mission.status !== 'active') {
+      return res.status(404).json({ success: false, error: 'Mission not found or inactive' });
+    }
+
+    const runtime = ensureMissionRuntimeForEntity(entityId);
+    runtime.activeMissionId = missionId;
+    runtime.joinedAt = Date.now();
+    mission.participants.add(entityId);
+
+    return res.json({
+      success: true,
+      entityId,
+      mission: serializeMission(mission),
+      missionRuntime: {
+        activeMissionId: runtime.activeMissionId,
+        joinedAt: runtime.joinedAt,
+        completedMissions: runtime.completedMissions,
+        leaderboardBonus: runtime.leaderboardBonus,
+        achievementBonusXp: runtime.achievementBonusXp
+      }
+    });
+  } catch (error) {
+    console.error('Error joining mission:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.post('/entity/:entityId/missions/:missionId/progress', requireAuth, async (req, res) => {
+  try {
+    const { entityId, missionId } = req.params;
+    if (!entityId || !missionId) {
+      return res.status(400).json({ success: false, error: 'entityId and missionId are required' });
+    }
+    if (req.entityId !== entityId) {
+      return res.status(403).json({ success: false, error: 'Can only report mission progress for your authenticated entity' });
+    }
+
+    const mission = missionRegistry.get(missionId);
+    if (!mission || mission.status !== 'active') {
+      return res.status(404).json({ success: false, error: 'Mission not found or inactive' });
+    }
+
+    const actionType = String(req.body?.actionType || 'mission-manual').trim().toLowerCase();
+    const units = Math.max(1, Math.floor(Number(req.body?.units) || 1));
+    const updated = applyMissionProgress(entityId, missionId, actionType, units);
+
+    return res.json({
+      success: true,
+      entityId,
+      mission: updated || serializeMission(mission),
+      actionType,
+      units,
+      accepted: Boolean(updated)
+    });
+  } catch (error) {
+    console.error('Error reporting mission progress:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
@@ -4020,8 +4267,23 @@ app.get('/entity/:entityId/achievements', async (req, res) => {
   try {
     const { entityId } = req.params;
     if (!entityId) return res.status(400).json({ success: false, error: 'entityId is required' });
+    const missionRuntime = ensureMissionRuntimeForEntity(entityId);
+
     if (!process.env.DATABASE_URL) {
-      return res.json({ success: true, entityId, level: 1, xp: 0, earnedBadges: [], telemetry: {} });
+      return res.json({
+        success: true,
+        entityId,
+        level: 1,
+        xp: Number(missionRuntime?.achievementBonusXp || 0),
+        earnedBadges: (missionAchievementThresholds
+          .filter((threshold) => Number(missionRuntime?.completedMissions || 0) >= threshold.min)
+          .map((threshold) => ({ badgeKey: threshold.key, awardedAt: null, metadata: { source: 'mission-runtime' } }))),
+        telemetry: {},
+        missionBonus: {
+          achievementXp: Number(missionRuntime?.achievementBonusXp || 0),
+          completedMissions: Number(missionRuntime?.completedMissions || 0)
+        }
+      });
     }
 
     const achievements = await db.evaluateAndAwardEntityBadges(entityId);
@@ -4029,19 +4291,28 @@ app.get('/entity/:entityId/achievements', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Entity not found' });
     }
 
+    const missionBadges = missionAchievementThresholds
+      .filter((threshold) => Number(missionRuntime?.completedMissions || 0) >= threshold.min)
+      .map((threshold) => ({ badgeKey: threshold.key, awardedAt: null, metadata: { source: 'mission-runtime' } }));
+
     res.json({
       success: true,
       entityId,
       level: achievements.level,
-      xp: achievements.xp,
-      earnedBadges: achievements.earnedBadges || [],
+      xp: Number(achievements.xp || 0) + Number(missionRuntime?.achievementBonusXp || 0),
+      earnedBadges: [...(achievements.earnedBadges || []), ...missionBadges],
       telemetry: {
         responseConsistency: achievements.responseConsistency,
         mentionsReplied: achievements.mentionsReplied,
         mentionsReceived: achievements.mentionsReceived,
         socialBreadth: achievements.uniqueRelationships,
         activeDays: achievements.activeDays,
-        activeStreakDays: achievements.activeStreakDays
+        activeStreakDays: achievements.activeStreakDays,
+        missionCompleted: Number(missionRuntime?.completedMissions || 0)
+      },
+      missionBonus: {
+        achievementXp: Number(missionRuntime?.achievementBonusXp || 0),
+        completedMissions: Number(missionRuntime?.completedMissions || 0)
       }
     });
   } catch (error) {
