@@ -7,13 +7,16 @@
 
 const db = require('./db');
 
-function summarizeLocally(entityId, dateStr, messages) {
+function summarizeLocally(entityId, dateStr, messages, telemetry = null) {
   if (!messages.length) {
     return {
       dailySummary: `${entityId} had no recorded conversation activity on ${dateStr}.`,
       socialSummary: 'No social interactions detected.',
       goalProgress: { responsiveness: 0, exploration: 0 },
-      memoryUpdates: { lessons: ['No interactions captured for this date'] }
+      memoryUpdates: {
+        lessons: ['No interactions captured for this date'],
+        runtimeTelemetry: telemetry || null
+      }
     };
   }
 
@@ -39,11 +42,23 @@ function summarizeLocally(entityId, dateStr, messages) {
     socialSummary: `It interacted with ${uniquePartners.size} unique partner(s): ${partnerText}.`,
     goalProgress: {
       responsiveness: Math.min(100, messages.length * 5),
-      socialBreadth: uniquePartners.size
+      socialBreadth: uniquePartners.size,
+      idleTimeRatio: Number(telemetry?.idleTimeRatio || 0),
+      socialActionRatio: Number(telemetry?.socialActionRatio || 0),
+      objectiveActionRatio: Number(telemetry?.objectiveActionRatio || 0),
+      uniqueSectorCoveragePerDay: Number(telemetry?.uniqueSectors || 0),
+      expansionTilesPlacedPerDay: Number(telemetry?.expansionTilesPlaced || 0)
     },
     memoryUpdates: {
       likelyPartners: partners,
-      nextFocus: uniquePartners.size === 0 ? 'initiate more chats' : 'continue partner follow-ups'
+      nextFocus: uniquePartners.size === 0 ? 'initiate more chats' : 'continue partner follow-ups',
+      queueCompletionQuality: telemetry ? {
+        completed: Number(telemetry.queueCompleted || 0),
+        failed: Number(telemetry.queueFailed || 0),
+        expired: Number(telemetry.queueExpired || 0),
+        cancelled: Number(telemetry.queueCancelled || 0),
+        failureReasons: telemetry.queueFailureReasons || {}
+      } : null
     }
   };
 }
@@ -55,7 +70,19 @@ async function processEntityDay(entityId, dateStr) {
   const messages = await db.getConversationMessagesForEntityDateRange(entityId, start, end);
   if (messages.length === 0) return false;
 
-  const summary = summarizeLocally(entityId, dateStr, messages);
+  let telemetry = null;
+  if (typeof db.getEntityRuntimeDailyStat === 'function') {
+    const stat = await db.getEntityRuntimeDailyStat(entityId, 1);
+    const totalActions = Number(stat.socialActions || 0) + Number(stat.objectiveActions || 0);
+    telemetry = {
+      ...stat,
+      idleTimeRatio: stat.ticksTotal > 0 ? Number((stat.idleTicks / stat.ticksTotal).toFixed(4)) : 0,
+      socialActionRatio: totalActions > 0 ? Number((stat.socialActions / totalActions).toFixed(4)) : 0,
+      objectiveActionRatio: totalActions > 0 ? Number((stat.objectiveActions / totalActions).toFixed(4)) : 0
+    };
+  }
+
+  const summary = summarizeLocally(entityId, dateStr, messages, telemetry);
   await db.saveEntityDailyReflection(
     entityId,
     dateStr,

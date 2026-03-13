@@ -46,6 +46,7 @@ test('checkAndSummarizeEntityReflections processes unsummarized days and saves s
   const originalGetUnsummarized = db.getUnsummarizedEntityDays;
   const originalGetMessages = db.getConversationMessagesForEntityDateRange;
   const originalSaveReflection = db.saveEntityDailyReflection;
+  const originalGetRuntimeStat = db.getEntityRuntimeDailyStat;
 
   process.env.DATABASE_URL = 'postgres://unit-test';
 
@@ -63,6 +64,19 @@ test('checkAndSummarizeEntityReflections processes unsummarized days and saves s
   db.saveEntityDailyReflection = async (...args) => {
     saved.push(args);
   };
+  db.getEntityRuntimeDailyStat = async () => ({
+    ticksTotal: 10,
+    idleTicks: 3,
+    socialActions: 2,
+    objectiveActions: 5,
+    uniqueSectors: 4,
+    expansionTilesPlaced: 1,
+    queueCompleted: 1,
+    queueFailed: 0,
+    queueExpired: 0,
+    queueCancelled: 0,
+    queueFailureReasons: {}
+  });
 
   try {
     const result = await reflectionSummary.checkAndSummarizeEntityReflections();
@@ -79,5 +93,35 @@ test('checkAndSummarizeEntityReflections processes unsummarized days and saves s
     db.getUnsummarizedEntityDays = originalGetUnsummarized;
     db.getConversationMessagesForEntityDateRange = originalGetMessages;
     db.saveEntityDailyReflection = originalSaveReflection;
+    db.getEntityRuntimeDailyStat = originalGetRuntimeStat;
   }
+});
+
+
+test('summarizeLocally carries runtime telemetry ratios and queue quality', () => {
+  const base = Date.parse('2026-01-08T08:00:00.000Z');
+  const telemetry = {
+    idleTimeRatio: 0.62,
+    socialActionRatio: 0.2,
+    objectiveActionRatio: 0.8,
+    uniqueSectors: 14,
+    expansionTilesPlaced: 2,
+    queueCompleted: 4,
+    queueFailed: 1,
+    queueExpired: 2,
+    queueCancelled: 0,
+    queueFailureReasons: { expired_tick_budget: 2, no_active_agent: 1 }
+  };
+
+  const result = reflectionSummary.summarizeLocally('lobster-telemetry', '2026-01-08', [
+    { agentName: 'friend', timestamp: base }
+  ], telemetry);
+
+  assert.equal(result.goalProgress.idleTimeRatio, 0.62);
+  assert.equal(result.goalProgress.socialActionRatio, 0.2);
+  assert.equal(result.goalProgress.objectiveActionRatio, 0.8);
+  assert.equal(result.goalProgress.uniqueSectorCoveragePerDay, 14);
+  assert.equal(result.goalProgress.expansionTilesPlacedPerDay, 2);
+  assert.equal(result.memoryUpdates.queueCompletionQuality.expired, 2);
+  assert.equal(result.memoryUpdates.queueCompletionQuality.failureReasons.expired_tick_budget, 2);
 });
