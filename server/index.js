@@ -1199,6 +1199,91 @@ function findOnlineAgentByEntityId(entityId) {
   return null;
 }
 
+function getAgentSectorPosition(position = {}) {
+  return {
+    x: Math.round(Number(position?.x) || 0),
+    z: Math.round(Number(position?.z) || 0)
+  };
+}
+
+function getAgentVisitedSectors(agent) {
+  if (!agent) return new Set();
+  if (!(agent.visitedSectors instanceof Set)) {
+    agent.visitedSectors = new Set();
+    const current = getAgentSectorPosition(agent.position);
+    agent.visitedSectors.add(`${current.x},${current.z}`);
+  }
+  return agent.visitedSectors;
+}
+
+function getAgentExpansionTiles(agent) {
+  if (!agent) return new Set();
+  if (!(agent.expandedFrontierTiles instanceof Set)) {
+    agent.expandedFrontierTiles = new Set();
+  }
+  return agent.expandedFrontierTiles;
+}
+
+function updateMovementExplorationQuestProgress(agent, previousPosition = {}, nextPosition = {}) {
+  if (!agent?.entityId) return;
+
+  const visitedSectors = getAgentVisitedSectors(agent);
+  const beforeSector = getAgentSectorPosition(previousPosition);
+  const afterSector = getAgentSectorPosition(nextPosition);
+  const afterKey = `${afterSector.x},${afterSector.z}`;
+  const enteredUnvisitedSector = !visitedSectors.has(afterKey);
+
+  if (!enteredUnvisitedSector) return;
+
+  const dx = (Number(nextPosition?.x) || 0) - (Number(previousPosition?.x) || 0);
+  const dz = (Number(nextPosition?.z) || 0) - (Number(previousPosition?.z) || 0);
+  const distance = Math.sqrt((dx * dx) + (dz * dz));
+
+  visitedSectors.add(afterKey);
+  visitedSectors.add(`${beforeSector.x},${beforeSector.z}`);
+
+  updateQuestProgress(agent.entityId, {
+    unexploredSectorsVisited: 1,
+    unexploredTraversalDistance: distance
+  }).catch(() => {});
+}
+
+function updateExpansionExplorationQuestProgress(agent, placement) {
+  if (!agent?.entityId || !placement?.ok || !placement.tile) return;
+
+  const expandedTiles = getAgentExpansionTiles(agent);
+  const tileKey = `${placement.tile.x},${placement.tile.z}`;
+  const isFirstExpansion = expandedTiles.size === 0;
+  const isNewTileForEntity = !expandedTiles.has(tileKey);
+
+  if (isNewTileForEntity) {
+    expandedTiles.add(tileKey);
+  }
+
+  let cooperativeExpansionChains = 0;
+  if (placement.tile?.ownerEntityId) {
+    const adjacentEntityIds = new Set();
+    const offsets = [
+      [1, 0], [-1, 0], [0, 1], [0, -1]
+    ];
+    for (const [dx, dz] of offsets) {
+      const neighbor = worldState.expansionTiles.find((tile) => (
+        Number(tile?.x) === Number(placement.tile.x) + dx
+        && Number(tile?.z) === Number(placement.tile.z) + dz
+      ));
+      if (!neighbor?.ownerEntityId || neighbor.ownerEntityId === placement.tile.ownerEntityId) continue;
+      adjacentEntityIds.add(neighbor.ownerEntityId);
+    }
+    cooperativeExpansionChains = adjacentEntityIds.size;
+  }
+
+  updateQuestProgress(agent.entityId, {
+    firstExpansionTilePlaced: isFirstExpansion ? 1 : 0,
+    frontierTilesExpanded: isNewTileForEntity ? 1 : 0,
+    cooperativeExpansionChains
+  }).catch(() => {});
+}
+
 async function resolveEntityById(entityId) {
   const memoryEntity = getMemoryEntities()?.get(entityId) || null;
   if (memoryEntity) return memoryEntity;
@@ -1283,7 +1368,14 @@ async function updateQuestProgress(entityId, increments = {}) {
     'daily-social-chat': { chatSent: increments.chatSent || 0 },
     'daily-explorer': { moveCount: increments.moveCount || 0 },
     'daily-queue-operator': { queueActions: increments.queueActions || 0 },
-    'daily-mention-network': { mentionSent: increments.mentionSent || 0 }
+    'daily-mention-network': { mentionSent: increments.mentionSent || 0 },
+    'exploration-first-expansion': { firstExpansionTilePlaced: increments.firstExpansionTilePlaced || 0 },
+    'exploration-frontier-cartographer': { frontierTilesExpanded: increments.frontierTilesExpanded || 0 },
+    'exploration-unseen-traverse': {
+      unexploredSectorsVisited: increments.unexploredSectorsVisited || 0,
+      unexploredTraversalDistance: increments.unexploredTraversalDistance || 0
+    },
+    'exploration-cooperative-chain': { cooperativeExpansionChains: increments.cooperativeExpansionChains || 0 }
   };
 
   for (const [questId, questIncrements] of Object.entries(questProgressMap)) {
@@ -1451,8 +1543,10 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
     }
     
     // Update agent position with realistic distance clamping
+    const previousPosition = { ...agent.position };
     if (position) {
       agent.position = clampMovement(agent.position, position);
+      updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     }
     if (rotation !== undefined) {
       agent.rotation = Number(rotation) || 0;
@@ -1900,11 +1994,13 @@ function applyQueueAction(agent, action) {
   };
 
   if (action.type === 'move') {
+    const previousPosition = { ...agent.position };
     agent.position = clampMovement(agent.position, {
       x: action.x,
       y: action.y ?? agent.position.y,
       z: action.z
     });
+    updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     if (action.rotation !== undefined) {
       agent.rotation = Number(action.rotation) || 0;
     }
@@ -1949,7 +2045,9 @@ function applyQueueAction(agent, action) {
     }
 
     const targetPosition = buildDeterministicNearbyTarget(agent, targetAgent);
+    const previousPosition = { ...agent.position };
     agent.position = clampMovement(agent.position, targetPosition);
+    updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     agent.state = 'moving';
     agent.lastAction = {
       type: 'move_to_agent',
@@ -2092,6 +2190,7 @@ function applyQueueAction(agent, action) {
     }
 
     deductExpandCost(agent.inventory);
+    updateExpansionExplorationQuestProgress(agent, placement);
     agent.expansionCooldownUntilTick = worldState.tick + MAP_EXPANSION_COOLDOWN_TICKS;
     agent.state = 'acting';
     agent.lastAction = {
@@ -2252,6 +2351,10 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
     if (process.env.DATABASE_URL) {
       await syncDynamicQuestSignals(entityId);
       const summary = await db.getEntityQuestSummary(entityId);
+      const runtimeAgent = findOnlineAgentByEntityId(entityId);
+      const visitedSectors = runtimeAgent?.visitedSectors instanceof Set ? runtimeAgent.visitedSectors.size : 0;
+      const expandedFrontierTiles = runtimeAgent?.expandedFrontierTiles instanceof Set ? runtimeAgent.expandedFrontierTiles.size : 0;
+
       return res.json({
         success: true,
         entityId,
@@ -2260,9 +2363,17 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
           active: summary.active.length,
           completed: summary.completed.length,
           claimed: summary.claimed.length
+        },
+        explorationSignals: {
+          visitedSectors,
+          expandedFrontierTiles
         }
       });
     }
+
+    const runtimeAgent = findOnlineAgentByEntityId(entityId);
+    const visitedSectors = runtimeAgent?.visitedSectors instanceof Set ? runtimeAgent.visitedSectors.size : 0;
+    const expandedFrontierTiles = runtimeAgent?.expandedFrontierTiles instanceof Set ? runtimeAgent.expandedFrontierTiles.size : 0;
 
     return res.json({
       success: true,
@@ -2270,7 +2381,11 @@ app.get('/entity/:entityId/quests', optionalAuth, async (req, res) => {
       active: [],
       completed: [],
       claimed: [],
-      counts: { active: 0, completed: 0, claimed: 0 }
+      counts: { active: 0, completed: 0, claimed: 0 },
+      explorationSignals: {
+        visitedSectors,
+        expandedFrontierTiles
+      }
     });
   } catch (error) {
     console.error('Failed to load quest summary:', error);
