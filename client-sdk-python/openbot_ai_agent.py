@@ -1184,7 +1184,11 @@ class AIAgent:
         if not self.client:
             return dict(self._quest_snapshot_cache.get("data") or {})
 
-        summary = self.client.get_quests()
+        get_quests = getattr(self.client, "get_quests", None)
+        if not callable(get_quests):
+            return dict(self._quest_snapshot_cache.get("data") or {})
+
+        summary = get_quests()
         if not isinstance(summary, dict):
             return dict(self._quest_snapshot_cache.get("data") or {})
 
@@ -1199,7 +1203,8 @@ class AIAgent:
             quest_id = str(item.get("questId") or "").strip()
             if not quest_id:
                 continue
-            claimed = self.client.claim_quest(quest_id)
+            claim_quest = getattr(self.client, "claim_quest", None)
+            claimed = claim_quest(quest_id) if callable(claim_quest) else None
             if isinstance(claimed, dict):
                 title = str(claimed.get("title") or quest_id)
                 claimed_notes.append(f"claimed {title}")
