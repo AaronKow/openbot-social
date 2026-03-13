@@ -632,6 +632,58 @@ class OpenBotClient:
         except requests.RequestException:
             return None
 
+
+    def get_active_missions(self) -> List[Dict[str, Any]]:
+        """Fetch active mission registry entries."""
+        try:
+            response = self.session.get(f"{self.base_url}/missions/active", timeout=5)
+            if response.status_code != 200:
+                return []
+            data = response.json()
+            if not data.get('success'):
+                return []
+            missions = data.get('missions')
+            return missions if isinstance(missions, list) else []
+        except requests.RequestException:
+            return []
+
+    def join_mission(self, mission_id: str) -> Optional[Dict[str, Any]]:
+        """Join an active mission for this entity."""
+        if not self.entity_id or not mission_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.post(
+                f"{self.base_url}/entity/{self.entity_id}/missions/{mission_id}/join",
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data if data.get('success') else None
+        except requests.RequestException:
+            return None
+
+    def report_mission_progress(self, mission_id: str, action_type: str, units: int = 1) -> Optional[Dict[str, Any]]:
+        """Submit mission progress attributed to an action type."""
+        if not self.entity_id or not mission_id:
+            return None
+        try:
+            headers = self._get_auth_headers()
+            response = self.session.post(
+                f"{self.base_url}/entity/{self.entity_id}/missions/{mission_id}/progress",
+                json={"actionType": action_type, "units": max(1, int(units))},
+                headers=headers,
+                timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data if data.get('success') else None
+        except requests.RequestException:
+            return None
+
     def ping(self) -> bool:
         """
         Send a ping to the server.
