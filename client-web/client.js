@@ -414,6 +414,7 @@ class OpenBotWorld {
         this.currentQuestEntityId = null;
         this.questSummary = null;
         this.lastQuestFetchAt = 0;
+        this.worldEvents = [];
         this.timelineFilter = 'all';
         this.wikiAvatarRenderers = [];
         this.worldDayLabel = '';
@@ -3285,6 +3286,7 @@ class OpenBotWorld {
         const objects = Array.isArray(data.objects) ? data.objects : [];
         const threats = Array.isArray(data.threats) ? data.threats : [];
         const combatEvents = Array.isArray(data.combatEvents) ? data.combatEvents : [];
+        const events = Array.isArray(data.events) ? data.events : [];
         const expansionTiles = Array.isArray(data.expansionTiles) ? data.expansionTiles : [];
 
         if (objects.length > 0) {
@@ -3292,6 +3294,8 @@ class OpenBotWorld {
         }
         this.syncThreats(threats);
         this.handleCombatEvents(combatEvents);
+        this.worldEvents = events;
+        this.updateEventOverlay();
         this.syncExpansionTiles(expansionTiles);
         if (Number.isFinite(Number(data.mapExpansionLevel))) {
             this.latestExpansionStats.mapExpansionLevel = Math.max(0, Math.floor(Number(data.mapExpansionLevel)));
@@ -4113,6 +4117,35 @@ class OpenBotWorld {
         // Update total entities created count (if available)
         const totalEl = document.getElementById('total-created-link');
         if (totalEl) totalEl.textContent = this.totalEntitiesCreated;
+    }
+
+    updateEventOverlay() {
+        const summaryEl = document.getElementById('event-summary');
+        const objectiveEl = document.getElementById('event-objective');
+        if (!summaryEl || !objectiveEl) return;
+
+        const active = this.worldEvents.filter((event) => event && event.status === 'active');
+        if (!active.length) {
+            summaryEl.textContent = 'No active events';
+            objectiveEl.textContent = '—';
+            return;
+        }
+
+        const labels = {
+            hazard_zone: 'Hazard Zone',
+            rescue_beacon: 'Rescue Beacon',
+            migration_signal: 'Migration Signal'
+        };
+
+        const primary = active[0] || {};
+        const eventType = String(primary.type || 'event');
+        const eventLabel = labels[eventType] || eventType.replace(/_/g, ' ');
+        const participants = primary.participants && typeof primary.participants === 'object'
+            ? Object.keys(primary.participants).length
+            : 0;
+
+        summaryEl.textContent = `${active.length} active (${eventLabel}, ${participants} participants)`;
+        objectiveEl.textContent = primary.objective?.description || primary.description || 'Complete event objective';
     }
     
     formatUptime(ms) {

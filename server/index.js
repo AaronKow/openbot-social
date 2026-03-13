@@ -263,6 +263,14 @@ const SKILL_ACTION_XP = Object.freeze({
   harvest: 4,
   expand_map: 8
 });
+const ROTATING_EVENT_TYPES = Object.freeze(['hazard_zone', 'rescue_beacon', 'migration_signal']);
+const ROTATING_EVENT_DURATION_MS = Math.max(60_000, Number(process.env.ROTATING_EVENT_DURATION_MS || (3 * 60 * 1000)));
+const ROTATING_EVENT_COOLDOWN_MS = Math.max(20_000, Number(process.env.ROTATING_EVENT_COOLDOWN_MS || 45_000));
+const ROTATING_EVENT_RADIUS = Object.freeze({
+  hazard_zone: Math.max(4, Number(process.env.HAZARD_ZONE_RADIUS || 9)),
+  rescue_beacon: Math.max(4, Number(process.env.RESCUE_BEACON_RADIUS || 8)),
+  migration_signal: Math.max(5, Number(process.env.MIGRATION_SIGNAL_RADIUS || 11))
+});
 
 function getPositiveIntervalMs(envKey, fallbackMs, minMs) {
   const raw = process.env[envKey];
@@ -287,6 +295,7 @@ const worldState = {
   mapExpansionLevel: 0,
   chatMessages: [], // Recent chat messages
   combatEvents: [], // Recent combat events for client-side effects
+  rotatingEvents: [], // active + recent rotating world events
   tick: 0,
   startTime: Date.now(), // Server start time for uptime calculation
   worldCreatedAt: Date.now(), // Earliest persistent world signal (entity/chat/agent creation)
@@ -360,10 +369,166 @@ function getWorldStateMeta() {
     objects: Array.from(worldState.objects.values()),
     threats: Array.from(worldState.threats.values()),
     combatEvents: worldState.combatEvents.slice(-COMBAT_EVENTS_WORLD_PAYLOAD_MAX),
+    events: worldState.rotatingEvents,
     expansionTiles: worldState.expansionTiles,
     mapExpansionLevel: worldState.mapExpansionLevel,
     traversableBounds: getTraversableBoundaryMetadata()
   };
+}
+
+function randomEventCenter() {
+  const x = clampWorldCoordX(Math.random() * WORLD_SIZE.x);
+  const z = clampWorldCoordZ(Math.random() * WORLD_SIZE.y);
+  return { x, y: 0, z };
+}
+
+function getRotatingEventObjective(type, center) {
+  if (type === 'hazard_zone') {
+    return {
+      action: 'defend',
+      title: 'Stabilize Hazard Zone',
+      description: 'Move into the red zone and use defend/guard actions to contain turbulence.'
+    };
+  }
+  if (type === 'rescue_beacon') {
+    return {
+      action: 'talk',
+      title: 'Rescue Beacon Sync',
+      description: 'Approach the beacon and talk to broadcast rescue telemetry.'
+    };
+  }
+  return {
+    action: 'move',
+    title: 'Migration Signal Escort',
+    description: 'Follow the migration vector by moving through the highlighted corridor.'
+  };
+}
+
+function createRotatingEvent(type, now = Date.now()) {
+  const center = randomEventCenter();
+  const radius = ROTATING_EVENT_RADIUS[type] || 8;
+  const objective = getRotatingEventObjective(type, center);
+  return {
+    id: `evt-${type}-${uuidv4()}`,
+    type,
+    title: objective.title,
+    description: objective.description,
+    status: 'active',
+    startedAt: now,
+    expiresAt: now + ROTATING_EVENT_DURATION_MS,
+    cooldownUntil: now + ROTATING_EVENT_DURATION_MS + ROTATING_EVENT_COOLDOWN_MS,
+    center,
+    radius,
+    objective,
+    participants: {},
+    rewardsGranted: {}
+  };
+}
+
+function updateRotatingEvents(now = Date.now()) {
+  worldState.rotatingEvents = worldState.rotatingEvents
+    .map((event) => {
+      if (event.status === 'active' && now >= Number(event.expiresAt)) {
+        return { ...event, status: 'cooldown' };
+      }
+      return event;
+    })
+    .filter((event) => now < Number(event.cooldownUntil || 0));
+
+  for (const type of ROTATING_EVENT_TYPES) {
+    const hasActive = worldState.rotatingEvents.some((event) => event.type === type && event.status === 'active');
+    if (hasActive) continue;
+
+    const hasCoolingEvent = worldState.rotatingEvents.some((event) => (
+      event.type === type
+      && event.status === 'cooldown'
+      && now < Number(event.cooldownUntil || 0)
+    ));
+    if (hasCoolingEvent) continue;
+
+    const nextEvent = createRotatingEvent(type, now);
+    worldState.rotatingEvents.push(nextEvent);
+  }
+}
+
+function grantAgentSkillXp(agent, skillId, xp) {
+  if (!agent || !skillId || !Number.isFinite(xp) || xp <= 0) return;
+  ensureAgentSkills(agent);
+  const skill = agent.skills?.[skillId];
+  const skillDef = SKILL_DEFS?.[skillId];
+  if (!skill || !skillDef) return;
+
+  skill.xp = Math.max(0, Math.floor(Number(skill.xp) || 0)) + Math.floor(xp);
+  const levelXpTarget = skill.level * skillDef.xpPerLevel;
+  if (skill.xp >= levelXpTarget) {
+    if (skill.level < skillDef.maxLevel) {
+      skill.level += 1;
+    }
+    skill.xp = 0;
+  }
+}
+
+function applyRotatingEventActionHooks(agent, actionType, context = {}) {
+  if (!agent || !actionType) return [];
+  const now = Date.now();
+  const position = validatePosition(context.position || agent.position || {});
+  const results = [];
+
+  for (const event of worldState.rotatingEvents) {
+    if (event.status !== 'active') continue;
+    const dx = Number(position.x || 0) - Number(event.center?.x || 0);
+    const dz = Number(position.z || 0) - Number(event.center?.z || 0);
+    const distance = Math.sqrt((dx * dx) + (dz * dz));
+    if (distance > Number(event.radius || 0)) continue;
+
+    const eventType = String(event.type || '');
+    const normalized = String(actionType).toLowerCase();
+    const validAction = (
+      (eventType === 'hazard_zone' && ['defend', 'guard', 'emote'].includes(normalized))
+      || (eventType === 'rescue_beacon' && ['talk', 'chat', 'move_to_agent'].includes(normalized))
+      || (eventType === 'migration_signal' && ['move', 'move_to_agent', 'expand_map'].includes(normalized))
+    );
+    if (!validAction) continue;
+
+    const participantKey = String(agent.entityId || agent.id || 'unknown');
+    event.participants[participantKey] = Math.max(0, Math.floor(Number(event.participants[participantKey]) || 0)) + 1;
+
+    if (!event.rewardsGranted[participantKey]) {
+      event.rewardsGranted[participantKey] = now;
+      agent.reputation = Math.max(0, Number(agent.reputation || 0)) + (eventType === 'hazard_zone' ? 3 : 2);
+
+      const bonusResource = ['rock', 'kelp', 'seaweed'][Math.floor(Math.random() * 3)];
+      ensureAgentInventory(agent);
+      agent.inventory[bonusResource] = Math.max(0, Number(agent.inventory[bonusResource] || 0)) + 1;
+
+      if (eventType === 'hazard_zone') {
+        grantAgentSkillXp(agent, 'shellGuard', 12);
+      } else if (eventType === 'rescue_beacon') {
+        grantAgentSkillXp(agent, 'scout', 10);
+      } else {
+        grantAgentSkillXp(agent, 'builder', 10);
+      }
+
+      if (agent.entityId) {
+        updateQuestProgress(agent.entityId, {
+          moveCount: eventType === 'migration_signal' ? 1 : 0,
+          cooperativeExpansionChains: eventType === 'migration_signal' ? 1 : 0,
+          unexploredSectorsVisited: eventType === 'rescue_beacon' ? 1 : 0
+        }).catch(() => {});
+      }
+    }
+
+    results.push({
+      eventId: event.id,
+      eventType,
+      objective: event.objective,
+      distance: Number(distance.toFixed(2)),
+      interactions: event.participants[participantKey],
+      rewardsGranted: Boolean(event.rewardsGranted[participantKey])
+    });
+  }
+
+  return results;
 }
 
 function buildWorldStateDelta(sinceTick, limit) {
@@ -996,6 +1161,8 @@ class Agent {
     this.energy = AGENT_ENERGY_MAX;
     this.sleeping = false;
     this.lastEnergyEventAt = 0;
+    this.reputation = 0;
+    this.eventProgress = {};
   }
 
   toJSON() {
@@ -1016,7 +1183,9 @@ class Agent {
       inventory: this.inventory,
       expansionCooldownUntilTick: this.expansionCooldownUntilTick,
       energy: this.energy,
-      sleeping: this.sleeping
+      sleeping: this.sleeping,
+      reputation: this.reputation,
+      eventProgress: this.eventProgress
     };
   }
 }
@@ -1652,6 +1821,18 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
     } else {
       agent.lastAction = action;
       trainAgentSkill(agent, actionType);
+      const eventResults = applyRotatingEventActionHooks(agent, actionType, {
+        position: agent.position,
+        source: 'action_endpoint'
+      });
+      if (eventResults.length > 0) {
+        agent.eventProgress = {
+          ...(agent.eventProgress && typeof agent.eventProgress === 'object' ? agent.eventProgress : {}),
+          updatedAt: Date.now(),
+          lastActionType: actionType,
+          matched: eventResults
+        };
+      }
       markAgentUpdated(agent);
     }
     agent.lastUpdate = Date.now();
@@ -1990,6 +2171,18 @@ function applyQueueAction(agent, action) {
 
   const finishAction = (actionType) => {
     trainAgentSkill(agent, actionType);
+    const eventResults = applyRotatingEventActionHooks(agent, actionType, {
+      position: agent.position,
+      source: 'action_queue'
+    });
+    if (eventResults.length > 0) {
+      agent.eventProgress = {
+        ...(agent.eventProgress && typeof agent.eventProgress === 'object' ? agent.eventProgress : {}),
+        updatedAt: Date.now(),
+        lastActionType: actionType,
+        matched: eventResults
+      };
+    }
     markAgentUpdated(agent);
   };
 
@@ -2903,6 +3096,7 @@ async function gameLoop() {
   pruneWorldStateDeltaHistory();
   const dtSeconds = TICK_INTERVAL_MS / 1000;
   const worldTime = refreshWorldTimeState();
+  updateRotatingEvents();
 
   for (const agent of worldState.agents.values()) {
     ensureAgentInventory(agent);
@@ -3959,6 +4153,8 @@ module.exports = {
     runEntityReflectionCheckCycle,
     scheduleEntityReflectionChecks,
     ENTITY_REFLECTION_CHECK_INTERVAL_MS,
+    updateRotatingEvents,
+    applyRotatingEventActionHooks,
     getEntityReflectionSchedulerState: () => ({
       isEntityReflectionCheckRunning
     })

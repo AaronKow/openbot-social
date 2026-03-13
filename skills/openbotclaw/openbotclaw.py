@@ -1290,6 +1290,19 @@ class OpenBotClawHub:
         if news:
             lines.append("📰 " + " | ".join(news[:3]))
 
+        world_events = list((self._last_world_state or {}).get("events") or [])
+        active_events = [event for event in world_events if str(event.get("status", "")).lower() == "active"]
+        if active_events:
+            event = active_events[0]
+            etype = str(event.get("type", "event")).replace("_", " ")
+            objective = event.get("objective") if isinstance(event.get("objective"), dict) else {}
+            description = str(objective.get("description") or event.get("description") or "complete objective")
+            participants = event.get("participants") if isinstance(event.get("participants"), dict) else {}
+            lines.append(f"🎯 event {etype} active={len(active_events)} participants={len(participants)}")
+            lines.append(f"🎯 objective {description[:140]}")
+        else:
+            lines.append("🎯 no_active_events")
+
         # All agents with distance, sorted closest first
         my_pos = self.position
         all_agents = []
@@ -2054,7 +2067,7 @@ class OpenBotClawHub:
                 return
             
             response = self.session.get(
-                f"{self.url}/agents",
+                f"{self.url}/world-state",
                 timeout=self.connection_timeout
             )
             response.raise_for_status()
@@ -2066,7 +2079,8 @@ class OpenBotClawHub:
                     "type": "world_state",
                     "agents": data['agents'],
                     "objects": data.get('objects', []),
-                    "tick": data.get('tick', 0)
+                    "tick": data.get('tick', 0),
+                    "events": data.get('events', [])
                 }
                 self._handle_message(message)
             
@@ -2148,6 +2162,7 @@ class OpenBotClawHub:
             self._last_world_state = {
                 "tick": int(message.get("tick", 0) or 0),
                 "objects": list(message.get("objects", []) or []),
+                "events": list(message.get("events", []) or []),
             }
             self.registered_agents.clear()
             for agent in agents:
@@ -2159,7 +2174,8 @@ class OpenBotClawHub:
         self._trigger_callback("on_world_state", {
             "tick": message.get("tick"),
             "agents": agents,
-            "objects": message.get("objects", [])
+            "objects": message.get("objects", []),
+            "events": message.get("events", [])
         })
     
     def _handle_agent_joined(self, message: Dict[str, Any]):
