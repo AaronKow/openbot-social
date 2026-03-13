@@ -528,6 +528,9 @@ class OpenBotClawHub:
             "last_reason": "init",
             "last_channel": "idle_fallback",
         }
+        self._visited_sector_counts: Dict[str, int] = {}
+        self._recent_sector_sequence: List[str] = []
+        self._sector_size: float = 20.0
 
         # Entity authentication
         self.entity_id: Optional[str] = entity_id
@@ -1268,6 +1271,14 @@ class OpenBotClawHub:
         lines: List[str] = []
         lines.append(f"T{self._tick_count} pos=({pos['x']:.0f},{pos['z']:.0f})")
 
+        sector_x = int(max(0.0, pos.get("x", 0.0)) // self._sector_size)
+        sector_z = int(max(0.0, pos.get("z", 0.0)) // self._sector_size)
+        sector_key = f"{sector_x},{sector_z}"
+        self._visited_sector_counts[sector_key] = int(self._visited_sector_counts.get(sector_key, 0) or 0) + 1
+        self._recent_sector_sequence.append(sector_key)
+        if len(self._recent_sector_sequence) > 10:
+            self._recent_sector_sequence = self._recent_sector_sequence[-10:]
+
         # Rotate topic every ~3 ticks
         if self._current_topic is None or (self._tick_count - self._topic_tick) >= 3:
             self._current_topic = random.choice(CONVERSATION_TOPICS)
@@ -1312,6 +1323,74 @@ class OpenBotClawHub:
         planner_missing = self._planner_state.get("missing") if isinstance(self._planner_state.get("missing"), dict) else {}
         missing_summary = ",".join(f"{k}:{int(planner_missing.get(k, 0) or 0)}" for k in ("rock", "kelp", "seaweed"))
         lines.append(f"🧠 planner phase={planner_phase} missing[{missing_summary}] {planner_reason}".strip())
+
+        world_objects = list((self._last_world_state or {}).get("objects") or [])
+        resource_nearest: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        px = float(pos.get("x", 0.0))
+        pz = float(pos.get("z", 0.0))
+        for obj in world_objects:
+            otype = str(obj.get("type", "")).lower()
+            if otype not in {"rock", "kelp", "seaweed"}:
+                continue
+            opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+            ox = float(opos.get("x", px))
+            oz = float(opos.get("z", pz))
+            dist = math.sqrt((ox - px) ** 2 + (oz - pz) ** 2)
+            current = resource_nearest.get(otype)
+            if current is None or dist < current[0]:
+                resource_nearest[otype] = (dist, obj)
+        for resource_type in ("rock", "kelp", "seaweed"):
+            nearest = resource_nearest.get(resource_type)
+            if nearest is None:
+                lines.append(f"🧱 nearest_resource type={resource_type} dist=none")
+                continue
+            dist, obj = nearest
+            opos = obj.get("position") if isinstance(obj.get("position"), dict) else {}
+            rid = str(obj.get("id", ""))
+            lines.append(
+                f"🧱 nearest_resource type={resource_type} dist={dist:.1f} x={float(opos.get('x', px)):.0f} z={float(opos.get('z', pz)):.0f} id={rid or '-'}"
+            )
+
+        cooldown_ticks = int(self._planner_state.get("cooldownTicks", 0) or 0)
+        ready_flag = 1 if bool(self._planner_state.get("ready")) else 0
+        lines.append(
+            f"🛠️ expansion_ready ready={ready_flag} missing={missing_summary} cooldown={cooldown_ticks}"
+        )
+
+        frontier_x = float(pos.get("x", 50.0))
+        frontier_z = float(pos.get("z", 50.0))
+        frontier_source = "fallback_current_pos"
+        planner_queue = self._planner_state.get("queue") if isinstance(self._planner_state.get("queue"), list) else []
+        frontier_action = next((a for a in planner_queue if isinstance(a, dict) and a.get("type") == "expand_map"), None)
+        if frontier_action:
+            frontier_x = float(frontier_action.get("x", frontier_x))
+            frontier_z = float(frontier_action.get("z", frontier_z))
+            frontier_source = "planner_queue"
+        else:
+            current_visit = int(self._visited_sector_counts.get(sector_key, 1) or 1)
+            best_key = None
+            best_count = None
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx = max(0, min(4, sector_x + dx))
+                nz = max(0, min(4, sector_z + dz))
+                candidate_key = f"{nx},{nz}"
+                count = int(self._visited_sector_counts.get(candidate_key, 0) or 0)
+                if best_count is None or count < best_count:
+                    best_count = count
+                    best_key = candidate_key
+            if best_key is not None and best_count is not None and best_count <= current_visit:
+                bx, bz = [int(part) for part in best_key.split(",", 1)]
+                frontier_x = min(99.0, bx * self._sector_size + self._sector_size / 2.0)
+                frontier_z = min(99.0, bz * self._sector_size + self._sector_size / 2.0)
+                frontier_source = "neighbor_sector"
+        lines.append(f"🗺️ frontier_candidate x={frontier_x:.0f} z={frontier_z:.0f} source={frontier_source}")
+
+        recent_sequence = self._recent_sector_sequence[-4:]
+        unique_recent = len(set(recent_sequence)) if recent_sequence else 0
+        revisit_bias = int(self._visited_sector_counts.get(sector_key, 0) or 0)
+        lines.append(
+            f"🔁 sector_recent {'->'.join(recent_sequence) if recent_sequence else sector_key} unique={unique_recent} revisit_bias={revisit_bias}"
+        )
 
         # Recent conversation (last 6 messages)
         recent = self.get_recent_conversation(60.0)
@@ -1497,6 +1576,10 @@ class OpenBotClawHub:
             "mentions": [],
             "new_messages": [],
             "reply_targets": [],
+            "nearest_resources": [],
+            "expansion_readiness": [],
+            "frontier_candidates": [],
+            "visited_sectors": [],
         }
         for raw in observation.splitlines():
             line = raw.strip()
@@ -1512,6 +1595,14 @@ class OpenBotClawHub:
                 markers["new_messages"].append(line)
             elif line.startswith("REPLY TO:"):
                 markers["reply_targets"].append(line.replace("REPLY TO:", "", 1).strip())
+            elif line.startswith("🧱"):
+                markers["nearest_resources"].append(line)
+            elif line.startswith("🛠️"):
+                markers["expansion_readiness"].append(line)
+            elif line.startswith("🗺️"):
+                markers["frontier_candidates"].append(line)
+            elif line.startswith("🔁"):
+                markers["visited_sectors"].append(line)
         return markers
 
     def build_perception_packet(self, cached_news: Optional[List[str]] = None) -> Dict[str, Any]:
