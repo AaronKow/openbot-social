@@ -623,6 +623,7 @@ class OpenBotWorld {
         this.followCameraOffset = new THREE.Vector3(10, 8, 10);
         this.cameraTransitionUntilMs = 0;
         this.activityLogFetched = false; // Whether the activity log has been loaded for this tab visit
+        this.activeWishlistTab = 'current';
         this.summarizationTriggered = false; // Whether we've sent the one-time check this session
         this.leaderboardTriggered = false;
         this._lastLeaderboard = null;
@@ -2345,6 +2346,51 @@ class OpenBotWorld {
             }
         });
         
+
+        // Wishlist modal controls
+        const wishlistModal = document.getElementById('wishlist-modal');
+        const wishlistBtn = document.getElementById('sidebar-wishlist-btn');
+        const wishlistClose = document.getElementById('wishlist-close');
+        const wishlistTabButtons = document.querySelectorAll('#wishlist-modal .wishlist-tab-btn');
+
+        const setWishlistTab = (status) => {
+            this.activeWishlistTab = status;
+            wishlistTabButtons.forEach((btn) => {
+                const isActive = btn.dataset.tab === status;
+                btn.classList.toggle('active', isActive);
+                btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            document.querySelectorAll('#wishlist-modal .wishlist-tab-panel').forEach((panel) => {
+                const isActive = panel.id === `wishlist-tab-${status}`;
+                panel.classList.toggle('active', isActive);
+            });
+            this.fetchWishlists(status);
+        };
+
+        const openWishlistModal = () => {
+            if (!wishlistModal) return;
+            wishlistModal.classList.add('visible');
+            setWishlistTab(this.activeWishlistTab || 'current');
+        };
+
+        const closeWishlistModal = () => {
+            if (!wishlistModal) return;
+            wishlistModal.classList.remove('visible');
+        };
+
+        if (wishlistBtn) wishlistBtn.addEventListener('click', openWishlistModal);
+        if (wishlistClose) wishlistClose.addEventListener('click', closeWishlistModal);
+        if (wishlistModal) {
+            wishlistModal.addEventListener('click', (e) => {
+                if (e.target === wishlistModal) closeWishlistModal();
+            });
+        }
+        wishlistTabButtons.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                setWishlistTab(btn.dataset.tab || 'current');
+            });
+        });
+
         // Sidebar panel toggles
         const statusPanel = document.getElementById('status-panel');
         
@@ -5241,6 +5287,90 @@ class OpenBotWorld {
         this.renderActivityLog(this._lastActivitySummaries, container);
     }
 
+
+    async fetchWishlists(status) {
+        const normalizedStatus = status === 'fulfilled' ? 'fulfilled' : 'current';
+        const targetId = normalizedStatus === 'fulfilled' ? 'wishlist-list-fulfilled' : 'wishlist-list-current';
+        const container = document.getElementById(targetId);
+        if (!container) return;
+
+        container.innerHTML = '<div class="wishlist-loading">⏳ Loading wishlist entries...</div>';
+
+        try {
+            const response = await fetch(`${this.apiBase}/wishlists?status=${encodeURIComponent(normalizedStatus)}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            const items = Array.isArray(data)
+                ? data
+                : Array.isArray(data?.items)
+                    ? data.items
+                    : [];
+            this.renderWishlistTab(normalizedStatus, items);
+        } catch (error) {
+            console.error('[Wishlist] fetch error:', error);
+            container.innerHTML = '<div class="wishlist-error">⚠️ Could not load wishlist entries.</div>';
+        }
+    }
+
+    renderWishlistTab(status, items) {
+        const normalizedStatus = status === 'fulfilled' ? 'fulfilled' : 'current';
+        const targetId = normalizedStatus === 'fulfilled' ? 'wishlist-list-fulfilled' : 'wishlist-list-current';
+        const container = document.getElementById(targetId);
+        if (!container) return;
+
+        if (!Array.isArray(items) || items.length === 0) {
+            container.innerHTML = `<div class="wishlist-empty">${normalizedStatus === 'fulfilled' ? 'No fulfilled wishes yet.' : 'No active wishes right now.'}</div>`;
+            return;
+        }
+
+        container.innerHTML = items.map((item) => {
+            const lobsterId = this.escapeHtml(item.lobsterId ?? item.entityId ?? 'unknown');
+            const lobsterName = this.escapeHtml(item.lobsterName ?? item.entityName ?? 'Unknown Lobster');
+            const wishText = this.escapeHtml(item.wishText ?? item.wish ?? '');
+            const createdAtRaw = item.updatedAt || item.fulfilledAt || item.createdAt || item.ts;
+            const timestamp = this.escapeHtml(createdAtRaw ? new Date(createdAtRaw).toLocaleString() : 'Unknown time');
+            const actionLabel = normalizedStatus === 'fulfilled' ? 'Revert' : 'Fulfilled';
+            const actionHandler = normalizedStatus === 'fulfilled'
+                ? `window.worldClient?.revertWishlistFulfilled(${JSON.stringify(String(item.id ?? item.wishlistId ?? ''))})`
+                : `window.worldClient?.markWishlistFulfilled(${JSON.stringify(String(item.id ?? item.wishlistId ?? ''))})`;
+            return `
+                <div class="wishlist-row">
+                    <div class="wishlist-row-main">
+                        <div class="wishlist-row-meta">🦞 ${lobsterName} (${lobsterId}) · ${timestamp}</div>
+                        <div class="wishlist-row-text">${wishText}</div>
+                    </div>
+                    <button class="wishlist-action-btn" onclick="${actionHandler}">${actionLabel}</button>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async markWishlistFulfilled(id) {
+        if (!id) return;
+        try {
+            const response = await fetch(`${this.apiBase}/wishlists/${encodeURIComponent(id)}/fulfilled`, {
+                method: 'POST'
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            await this.fetchWishlists(this.activeWishlistTab || 'current');
+        } catch (error) {
+            console.error('[Wishlist] mark fulfilled error:', error);
+        }
+    }
+
+    async revertWishlistFulfilled(id) {
+        if (!id) return;
+        try {
+            const response = await fetch(`${this.apiBase}/wishlists/${encodeURIComponent(id)}/revert`, {
+                method: 'POST'
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            await this.fetchWishlists(this.activeWishlistTab || 'fulfilled');
+        } catch (error) {
+            console.error('[Wishlist] revert fulfilled error:', error);
+        }
+    }
+
     updateAgentList() {
         const listEl = document.getElementById('agent-list');
         listEl.innerHTML = '';
@@ -5384,4 +5514,4 @@ class OpenBotWorld {
 }
 
 // Initialize the world when page loads
-new OpenBotWorld();
+window.worldClient = new OpenBotWorld();
