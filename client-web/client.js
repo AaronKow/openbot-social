@@ -627,6 +627,8 @@ class OpenBotWorld {
         this.leaderboardTriggered = false;
         this._lastLeaderboard = null;
         this._lastWorldProgress = null;
+        this.worldProgressPollMs = 20000;
+        this._nextWorldProgressRefreshAt = 0;
         
         // Keyboard state tracking
         this.keysPressed = {
@@ -1452,6 +1454,45 @@ class OpenBotWorld {
                     .join(', ');
             }
         }
+    }
+
+    updateWorldMomentumHud() {
+        const data = this._lastWorldProgress;
+        const idleEl = document.getElementById('momentum-idle-chat-ratio');
+        const explorersEl = document.getElementById('momentum-top-explorers');
+        const frontierGainEl = document.getElementById('momentum-frontier-gain');
+        const objectiveShareEl = document.getElementById('momentum-objective-action-share');
+        const pressureEl = document.getElementById('momentum-social-pressure');
+
+        if (!data || data.success === false) {
+            if (idleEl) idleEl.textContent = '0.0%';
+            if (explorersEl) explorersEl.textContent = '—';
+            if (frontierGainEl) frontierGainEl.textContent = '0.00';
+            if (objectiveShareEl) objectiveShareEl.textContent = '0.0%';
+            if (pressureEl) pressureEl.textContent = '0.000';
+            return;
+        }
+
+        if (idleEl) idleEl.textContent = `${(Number(data.idleChatRatio || 0) * 100).toFixed(1)}%`;
+        if (frontierGainEl) frontierGainEl.textContent = Number(data.frontierGainPerDay || 0).toFixed(2);
+        if (objectiveShareEl) objectiveShareEl.textContent = `${(Number(data.objectiveActionShare || 0) * 100).toFixed(1)}%`;
+        if (pressureEl) pressureEl.textContent = Number(data.socialOnlyPressure || 0).toFixed(3);
+        if (explorersEl) {
+            const rows = Array.isArray(data.topExplorers) ? data.topExplorers : [];
+            explorersEl.textContent = rows.length > 0
+                ? rows
+                    .slice(0, 3)
+                    .map((row) => `${String(row.entityId || 'n/a')} (${Number(row.uniqueGridCellsVisited || 0)})`)
+                    .join(', ')
+                : '—';
+        }
+    }
+
+    maybeRefreshWorldProgress(force = false) {
+        const now = Date.now();
+        if (!force && now < this._nextWorldProgressRefreshAt) return;
+        this._nextWorldProgressRefreshAt = now + this.worldProgressPollMs;
+        this.fetchWorldProgress(7).then(() => this.updateWorldMomentumHud());
     }
 
 
@@ -3483,6 +3524,7 @@ class OpenBotWorld {
                 this.updateTickLabel();
                 this.updateWorldClockLabel();
                 this.updateStatus();
+                this.maybeRefreshWorldProgress(true);
                 // Trigger summarization check once on first successful connection
                 this.triggerSummarizationCheck();
             }
@@ -3629,6 +3671,7 @@ class OpenBotWorld {
             this.latestExpansionStats.mapExpansionLevel = Math.max(0, Math.floor(Number(data.mapExpansionLevel)));
             this.updateExpansionHud();
         }
+        this.maybeRefreshWorldProgress();
 
         if (isDeltaPayload && !deltaWindowMissed) {
             // Invariant: animation state updates must run in both delta + full-sync paths.
@@ -4497,6 +4540,7 @@ class OpenBotWorld {
         // Update total entities created count (if available)
         const totalEl = document.getElementById('total-created-link');
         if (totalEl) totalEl.textContent = this.totalEntitiesCreated;
+        this.updateWorldMomentumHud();
     }
 
     updateEventOverlay() {
@@ -4915,6 +4959,7 @@ class OpenBotWorld {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
             this._lastWorldProgress = data;
+            this.updateWorldMomentumHud();
             return data;
         } catch (err) {
             console.error('[WorldProgress] Fetch error:', err);
@@ -4943,6 +4988,8 @@ class OpenBotWorld {
                 <div>Top explorers: ${explorers.slice(0, 3).map((r) => `${this.escapeHtml(r.entityId)} (${Number(r.uniqueGridCellsVisited || 0)})`).join(', ') || 'n/a'}</div>
                 <div>Top builders: ${builders.slice(0, 3).map((r) => `${this.escapeHtml(r.entityId)} (${Number(r.expansionCount || 0)})`).join(', ') || 'n/a'}</div>
                 <div>Idle-chat ratio: <strong>${(Number(data.idleChatRatio || 0) * 100).toFixed(1)}%</strong></div>
+                <div>Objective action share: <strong>${(Number(data.objectiveActionShare || 0) * 100).toFixed(1)}%</strong> · Social pressure: <strong>${Number(data.socialOnlyPressure || 0).toFixed(3)}</strong></div>
+                <div>Frontier gain/day: <strong>${Number(data.frontierGainPerDay || 0).toFixed(2)}</strong></div>
             </div>
         `;
         container.appendChild(panel);
@@ -5198,7 +5245,13 @@ class OpenBotWorld {
             const energy = Number.isFinite(Number(agent.data.energy)) ? Math.round(Number(agent.data.energy)) : null;
             const energySummary = energy === null ? '' : ` · ⚡${energy}`;
             const sleepSummary = agent.data.sleeping ? ' · 😴sleeping' : '';
-            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}${energySummary}${sleepSummary}${skillSummary ? ` · ${skillSummary}` : ''}`;
+            const objectiveStreak = Math.max(0, Number(agent.data.objectiveStreak || 0));
+            const objectiveSummary = objectiveStreak > 0 ? ` · 🎯${objectiveStreak}` : '';
+            const lastMeaningful = typeof agent.data.lastMeaningfulAction === 'string' && agent.data.lastMeaningfulAction.trim()
+                ? ` · last ${agent.data.lastMeaningfulAction.trim()}`
+                : '';
+            const objectiveGateSummary = agent.data.objectiveGateRequired ? ' · ⚠ objective required' : '';
+            const summary = `🦞 ${idLabel}${agent.data.name} - ${agent.data.state}${energySummary}${sleepSummary}${skillSummary ? ` · ${skillSummary}` : ''}${objectiveSummary}${lastMeaningful}${objectiveGateSummary}`;
             const isSelected = this.followedAgentId === id;
             if (this.showAnimationDiagnosticsInAgentList && isSelected) {
                 const anim = agent.animation || {};

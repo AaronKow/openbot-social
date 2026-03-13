@@ -888,8 +888,17 @@ const runtimeDailyTelemetry = new Map(); // entityId::YYYY-MM-DD -> counters
 const runtimeTelemetryPersistBuffer = new Map(); // entityId::YYYY-MM-DD -> counters
 const SOCIAL_ACTION_TYPES = new Set(['chat', 'talk', 'emoji', 'emote', 'dance']);
 const OBJECTIVE_ACTION_TYPES = new Set(['move', 'move_to_agent', 'jump', 'wait', 'harvest', 'expand_map', 'guard', 'defend', 'build']);
+const OBJECTIVE_ACTION_TYPES_FOR_REWARD = new Set(['move', 'move_to_agent', 'harvest', 'expand_map']);
 const QUEUE_TERMINAL_RETENTION_MS = Number(process.env.ACTION_QUEUE_TERMINAL_RETENTION_MS || 120000);
 const QUEUE_EXPIRY_GRACE_TICKS = Math.max(1, Math.floor(Number(process.env.ACTION_QUEUE_EXPIRY_GRACE_TICKS || 30)));
+const ANTI_IDLE_POLICY_ENABLED = String(process.env.ANTI_IDLE_POLICY_ENABLED || 'true').toLowerCase() === 'true';
+const ANTI_IDLE_QUEUE_GUARDRAIL_ENABLED = String(process.env.ANTI_IDLE_QUEUE_GUARDRAIL_ENABLED || 'true').toLowerCase() === 'true';
+const ANTI_IDLE_GUARDRAIL_CHAT_RATIO = Math.max(0.15, Math.min(1, Number(process.env.ANTI_IDLE_GUARDRAIL_CHAT_RATIO || 0.62)));
+const ANTI_IDLE_GUARDRAIL_MIN_SOCIAL_ACTIONS = Math.max(4, Math.floor(Number(process.env.ANTI_IDLE_GUARDRAIL_MIN_SOCIAL_ACTIONS || 12)));
+const REWARD_MULTIPLIER_ENABLED = String(process.env.REWARD_MULTIPLIER_ENABLED || 'true').toLowerCase() === 'true';
+const REWARD_CHAIN_STEP = Math.max(0, Number(process.env.REWARD_CHAIN_STEP || 0.18));
+const REWARD_CHAIN_CAP = Math.max(0.25, Number(process.env.REWARD_CHAIN_CAP || 1.0));
+const FRONTIER_CONTRACT_BONUS_MULTIPLIER = Math.max(1, Number(process.env.FRONTIER_CONTRACT_BONUS_MULTIPLIER || 1.35));
 let mapRefillTimer = null;
 let mapRefillInProgress = false;
 let algaePalletRefillTimer = null;
@@ -1620,6 +1629,11 @@ class Agent {
     this.lastEnergyEventAt = 0;
     this.reputation = 0;
     this.eventProgress = {};
+    this.objectiveChain = 0;
+    this.objectiveStreak = 0;
+    this.stationarySocialStreak = 0;
+    this.objectiveGateRequired = false;
+    this.lastMeaningfulAction = null;
     this.painUntilTick = 0;
     this.lastPainAtTick = 0;
     this.lastPainSourceType = null;
@@ -1654,6 +1668,11 @@ class Agent {
         damage: Number(this.lastPainDamage || 0)
       },
       reputation: this.reputation,
+      objectiveChain: this.objectiveChain,
+      objectiveStreak: this.objectiveStreak,
+      stationarySocialStreak: this.stationarySocialStreak,
+      objectiveGateRequired: this.objectiveGateRequired,
+      lastMeaningfulAction: this.lastMeaningfulAction,
       eventProgress: this.eventProgress
     };
   }
@@ -2180,7 +2199,7 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
         error: 'Agent is sleeping to recover energy'
       });
     }
-    
+
     // Update agent position with realistic distance clamping
     const previousPosition = { ...agent.position };
     if (position) {
@@ -2188,6 +2207,8 @@ app.post('/move', requireAuth, rateLimiters.move, (req, res) => {
       updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
       pushEntityRecentPosition(agent.entityId, agent.position);
       noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
+      const moveDistance = distance2D(previousPosition, agent.position);
+      applyActionRewardAndPressure(agent, 'move', { displacement: moveDistance });
     }
     if (rotation !== undefined) {
       agent.rotation = Number(rotation) || 0;
@@ -2246,6 +2267,16 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
       });
     }
 
+    if (ANTI_IDLE_QUEUE_GUARDRAIL_ENABLED && (agent.objectiveGateRequired || isEntityUnderChatGuardrail(agent.entityId))) {
+      agent.objectiveGateRequired = true;
+      markAgentUpdated(agent);
+      return res.status(409).json({
+        success: false,
+        error: 'Objective action required before further social-only chat',
+        objectiveRequired: true
+      });
+    }
+
     const duplicate = findDuplicateMessageByAgent(worldState.chatMessages, agentId, normalizedMessage);
     if (duplicate) {
       return res.status(429).json({
@@ -2262,9 +2293,11 @@ app.post('/chat', requireAuth, rateLimiters.chat, async (req, res) => {
     agent.lastUpdate = Date.now();
     markAgentUpdated(agent);
     noteRuntimeAction(agent.entityId, 'chat');
-    if (getRecentDisplacement(agent.entityId, 3) < 0.05) {
+    const recentDisplacement = getRecentDisplacement(agent.entityId, 3);
+    if (recentDisplacement < 0.05) {
       noteRuntimeCounter(agent.entityId, 'chatWithoutDisplacement', 1);
     }
+    applyActionRewardAndPressure(agent, 'chat', { displacement: recentDisplacement });
     
     res.json({ success: true });
   } catch (error) {
@@ -2297,6 +2330,7 @@ app.post('/action', requireAuth, rateLimiters.action, (req, res) => {
     } else {
       agent.lastAction = action;
       noteRuntimeAction(agent.entityId, actionType);
+      applyActionRewardAndPressure(agent, actionType, { displacement: getRecentDisplacement(agent.entityId, 3) });
       trainAgentSkill(agent, actionType);
       const eventResults = applyRotatingEventActionHooks(agent, actionType, {
         position: agent.position,
@@ -2392,6 +2426,11 @@ function noteRuntimeCounter(entityId, field, increment = 1) {
   markRuntimeTelemetryDirty(record);
 }
 
+function getRuntimeTelemetryRecord(entityId) {
+  if (!entityId) return null;
+  return ensureRuntimeTelemetryRecord(entityId);
+}
+
 function getRecentDisplacement(entityId, lookback = 3) {
   const points = entityRecentPositions.get(String(entityId || '')) || [];
   if (points.length < 2) return 0;
@@ -2401,6 +2440,62 @@ function getRecentDisplacement(entityId, lookback = 3) {
     total += distance2D(window[i - 1], window[i]);
   }
   return total;
+}
+
+function isEntityUnderChatGuardrail(entityId) {
+  if (!ANTI_IDLE_POLICY_ENABLED || !entityId) return false;
+  const record = getRuntimeTelemetryRecord(entityId);
+  if (!record) return false;
+  const socialActions = Number(record.socialActions || 0);
+  const idleChats = Number(record.chatWithoutDisplacement || 0);
+  if (socialActions < ANTI_IDLE_GUARDRAIL_MIN_SOCIAL_ACTIONS) return false;
+  const ratio = idleChats / Math.max(1, socialActions);
+  return ratio >= ANTI_IDLE_GUARDRAIL_CHAT_RATIO;
+}
+
+function applyActionRewardAndPressure(agent, actionType, context = {}) {
+  if (!agent) return;
+  const normalized = String(actionType || '').toLowerCase();
+  const displacement = Number(context.displacement || 0);
+  const objectiveAction = OBJECTIVE_ACTION_TYPES_FOR_REWARD.has(normalized);
+  const socialAction = SOCIAL_ACTION_TYPES.has(normalized);
+
+  if (!Number.isFinite(Number(agent.objectiveChain))) agent.objectiveChain = 0;
+  if (!Number.isFinite(Number(agent.objectiveStreak))) agent.objectiveStreak = 0;
+  if (!Number.isFinite(Number(agent.stationarySocialStreak))) agent.stationarySocialStreak = 0;
+  if (typeof agent.objectiveGateRequired !== 'boolean') agent.objectiveGateRequired = false;
+
+  if (objectiveAction) {
+    agent.objectiveChain = Math.min(8, Number(agent.objectiveChain || 0) + 1);
+    agent.objectiveStreak = Math.min(64, Number(agent.objectiveStreak || 0) + 1);
+    agent.stationarySocialStreak = 0;
+    agent.objectiveGateRequired = false;
+    agent.lastMeaningfulAction = normalized;
+
+    if (REWARD_MULTIPLIER_ENABLED) {
+      const chainBoost = Math.min(REWARD_CHAIN_CAP, Math.max(0, (agent.objectiveChain - 1) * REWARD_CHAIN_STEP));
+      const reward = 1 + chainBoost;
+      agent.reputation = Math.max(0, Number(agent.reputation || 0) + reward);
+    }
+    return;
+  }
+
+  if (socialAction) {
+    agent.objectiveChain = 0;
+    agent.objectiveStreak = 0;
+    if (displacement < 0.05) {
+      agent.stationarySocialStreak = Math.min(64, Number(agent.stationarySocialStreak || 0) + 1);
+    } else {
+      agent.stationarySocialStreak = 0;
+    }
+    if (REWARD_MULTIPLIER_ENABLED) {
+      const penalty = agent.stationarySocialStreak >= 3 ? 0.35 : 0;
+      agent.reputation = Math.max(0, Number(agent.reputation || 0) - penalty);
+    }
+    if (isEntityUnderChatGuardrail(agent.entityId) && Number(agent.stationarySocialStreak || 0) >= 2) {
+      agent.objectiveGateRequired = true;
+    }
+  }
 }
 
 function noteRuntimeTick(agent) {
@@ -2580,6 +2675,55 @@ function getInMemoryTelemetryAggregate(days = 7) {
   }
 
   return Array.from(byEntity.values());
+}
+
+function getInMemoryWorldBehaviorMetricsByDay(days = 7) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const thresholdTs = new Date(`${getUtcDateKey()}T00:00:00.000Z`).getTime() - ((safeDays - 1) * 24 * 60 * 60 * 1000);
+  const byDay = new Map();
+
+  for (const record of runtimeDailyTelemetry.values()) {
+    const dateTs = new Date(`${record.date}T00:00:00.000Z`).getTime();
+    if (dateTs < thresholdTs) continue;
+    const dateKey = String(record.date || getUtcDateKey());
+    if (!byDay.has(dateKey)) {
+      byDay.set(dateKey, {
+        date: dateKey,
+        uniqueGridCellsVisited: 0,
+        distanceTraveled: 0,
+        harvestCount: 0,
+        expansionCount: 0,
+        threatInteractions: 0,
+        socialActions: 0,
+        objectiveActions: 0,
+        socialOnlyActions: 0,
+        chatWithoutDisplacement: 0
+      });
+    }
+    const slot = byDay.get(dateKey);
+    slot.uniqueGridCellsVisited += Number(record.uniqueGridCellsVisited || 0);
+    slot.distanceTraveled += Number(record.distanceTraveled || 0);
+    slot.harvestCount += Number(record.harvestCount || 0);
+    slot.expansionCount += Number(record.expansionCount || 0);
+    slot.threatInteractions += Number(record.threatInteractions || 0);
+    slot.socialActions += Number(record.socialActions || 0);
+    slot.objectiveActions += Number(record.objectiveActions || 0);
+    slot.socialOnlyActions += Number(record.socialOnlyActions || 0);
+    slot.chatWithoutDisplacement += Number(record.chatWithoutDisplacement || 0);
+  }
+
+  return Array.from(byDay.values())
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .map((row) => ({
+      date: row.date,
+      uniqueGridCellsVisited: Number(row.uniqueGridCellsVisited || 0),
+      distanceTraveled: Number(row.distanceTraveled || 0),
+      harvestCount: Number(row.harvestCount || 0),
+      expansionCount: Number(row.expansionCount || 0),
+      threatInteractions: Number(row.threatInteractions || 0),
+      socialOnlyActionRatio: toRatio(Number(row.socialOnlyActions || 0), Math.max(1, Number(row.socialActions || 0) + Number(row.objectiveActions || 0))),
+      idleChatRatio: toRatio(Number(row.chatWithoutDisplacement || 0), Math.max(1, Number(row.socialActions || 0)))
+    }));
 }
 
 function getTelemetryRegressions(rows, limit = 10) {
@@ -2833,6 +2977,78 @@ function chooseExpansionTileForAgent(agent, preferred = null) {
   return null;
 }
 
+function getDailyFrontierContracts(limit = 3) {
+  const safeLimit = Math.max(1, Math.min(8, Number(limit) || 3));
+  const bounds = resolveNavigableBounds({ includeExpansion: true });
+  const width = Math.max(1, bounds.maxX - bounds.minX + 1);
+  const height = Math.max(1, bounds.maxZ - bounds.minZ + 1);
+  const cellW = width / 6;
+  const cellH = height / 6;
+
+  const density = new Map();
+  const resources = new Map();
+  const cellKey = (gx, gz) => `${gx},${gz}`;
+
+  const getCell = (x, z) => {
+    const gx = Math.max(0, Math.min(5, Math.floor((Number(x) - bounds.minX) / Math.max(0.0001, cellW))));
+    const gz = Math.max(0, Math.min(5, Math.floor((Number(z) - bounds.minZ) / Math.max(0.0001, cellH))));
+    return { gx, gz, key: cellKey(gx, gz) };
+  };
+
+  for (const tile of worldState.expansionTiles) {
+    const { key } = getCell(tile.x, tile.z);
+    density.set(key, (density.get(key) || 0) + 1);
+  }
+
+  for (const object of worldState.objects.values()) {
+    if (!['rock', 'kelp', 'seaweed'].includes(String(object.type || '').toLowerCase())) continue;
+    const { key } = getCell(object.position?.x, object.position?.z);
+    resources.set(key, (resources.get(key) || 0) + 1);
+  }
+
+  const rows = [];
+  for (let gx = 0; gx < 6; gx += 1) {
+    for (let gz = 0; gz < 6; gz += 1) {
+      const key = cellKey(gx, gz);
+      const expansionDensity = Number(density.get(key) || 0);
+      const resourceDensity = Number(resources.get(key) || 0);
+      const targetX = Number((bounds.minX + (cellW * gx) + (cellW / 2)).toFixed(2));
+      const targetZ = Number((bounds.minZ + (cellH * gz) + (cellH / 2)).toFixed(2));
+      const score = Number((Math.max(0.05, 1 - (expansionDensity / 10)) + Math.min(1, resourceDensity / 8)).toFixed(4));
+      rows.push({
+        zone: `sector-${gx}-${gz}`,
+        gx,
+        gz,
+        expansionDensity,
+        resourceDensity,
+        target: { x: targetX, z: targetZ },
+        score,
+        bonusMultiplier: Number((FRONTIER_CONTRACT_BONUS_MULTIPLIER + (Math.min(0.3, resourceDensity * 0.03))).toFixed(2)),
+      });
+    }
+  }
+
+  rows.sort((a, b) => (b.score - a.score) || (a.expansionDensity - b.expansionDensity));
+  return rows.slice(0, safeLimit);
+}
+
+function getFrontierContractForTile(x, z) {
+  if (!Number.isFinite(Number(x)) || !Number.isFinite(Number(z))) return null;
+  const contracts = getDailyFrontierContracts(6);
+  if (!contracts.length) return null;
+  let best = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const contract of contracts) {
+    const dist = distance2D({ x, z }, contract.target);
+    if (dist < bestDist) {
+      best = contract;
+      bestDist = dist;
+    }
+  }
+  if (!best) return null;
+  return bestDist <= 12 ? best : null;
+}
+
 function addExpansionTile(agent, preferred = null) {
   if (worldState.expansionTiles.length >= MAP_EXPANSION_MAX_TILES) {
     return { ok: false, reason: 'max_tiles_reached' };
@@ -2852,6 +3068,24 @@ function addExpansionTile(agent, preferred = null) {
     createdAt: Date.now(),
     tick: worldState.tick
   };
+  const frontierContract = getFrontierContractForTile(tile.x, tile.z);
+  if (frontierContract) {
+    tile.frontierContract = {
+      zone: frontierContract.zone,
+      bonusMultiplier: frontierContract.bonusMultiplier,
+    };
+  }
+
+  const cooperativeOwners = new Set();
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const neighbor = worldState.expansionTiles.find((candidate) => (
+      Number(candidate?.x) === Number(tile.x) + dx
+      && Number(candidate?.z) === Number(tile.z) + dz
+    ));
+    if (!neighbor?.ownerEntityId || neighbor.ownerEntityId === tile.ownerEntityId) continue;
+    cooperativeOwners.add(neighbor.ownerEntityId);
+  }
+  tile.cooperativeLinks = cooperativeOwners.size;
 
   worldState.expansionTiles.push(tile);
   if (worldState.expansionTiles.length > MAP_EXPANSION_MAX_TILES) {
@@ -2972,6 +3206,7 @@ function applyQueueAction(agent, action) {
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     pushEntityRecentPosition(agent.entityId, agent.position);
     noteRuntimeDistance(agent.entityId, previousPosition, agent.position);
+    applyActionRewardAndPressure(agent, 'move', { displacement: distance2D(previousPosition, agent.position) });
     if (action.rotation !== undefined) {
       agent.rotation = Number(action.rotation) || 0;
     }
@@ -2982,6 +3217,13 @@ function applyQueueAction(agent, action) {
   }
 
   if (action.type === 'talk') {
+    if (ANTI_IDLE_QUEUE_GUARDRAIL_ENABLED && (agent.objectiveGateRequired || isEntityUnderChatGuardrail(agent.entityId))) {
+      agent.objectiveGateRequired = true;
+      agent.lastAction = { type: 'talk', skipped: true, reason: 'objective_required_by_guardrail' };
+      finishAction('talk');
+      return;
+    }
+
     let normalizedMessage;
     try {
       normalizedMessage = normalizeChatMessage(action.message);
@@ -2996,9 +3238,11 @@ function applyQueueAction(agent, action) {
     }
 
     addChatMessage(agent.id, agent.name, normalizedMessage, agent.entityId);
-    if (getRecentDisplacement(agent.entityId, 3) < 0.05) {
+    const recentDisplacement = getRecentDisplacement(agent.entityId, 3);
+    if (recentDisplacement < 0.05) {
       noteRuntimeCounter(agent.entityId, 'chatWithoutDisplacement', 1);
     }
+    applyActionRewardAndPressure(agent, 'talk', { displacement: recentDisplacement });
     agent.state = 'chatting';
     agent.lastAction = { type: 'talk', message: normalizedMessage };
     finishAction('talk');
@@ -3023,6 +3267,7 @@ function applyQueueAction(agent, action) {
     agent.position = clampMovement(agent.position, targetPosition, { allowExpansion: true });
     updateMovementExplorationQuestProgress(agent, previousPosition, agent.position);
     pushEntityRecentPosition(agent.entityId, agent.position);
+    applyActionRewardAndPressure(agent, 'move_to_agent', { displacement: distance2D(previousPosition, agent.position) });
     agent.state = 'moving';
     agent.lastAction = {
       type: 'move_to_agent',
@@ -3118,6 +3363,7 @@ function applyQueueAction(agent, action) {
     }
     agent.state = 'acting';
     noteRuntimeCounter(agent.entityId, 'harvestCount', 1);
+    applyActionRewardAndPressure(agent, 'harvest', { displacement: getRecentDisplacement(agent.entityId, 3) });
     agent.lastAction = {
       type: 'harvest',
       resourceType: harvestedType,
@@ -3169,6 +3415,14 @@ function applyQueueAction(agent, action) {
     updateExpansionExplorationQuestProgress(agent, placement);
     noteExpansionTilePlaced(agent.entityId, 1);
     noteRuntimeCounter(agent.entityId, 'expansionCount', 1);
+    const cooperativeLinks = Number(placement.tile?.cooperativeLinks || 0);
+    if (REWARD_MULTIPLIER_ENABLED && cooperativeLinks > 0) {
+      agent.reputation = Math.max(0, Number(agent.reputation || 0) + (cooperativeLinks * 0.9));
+    }
+    if (REWARD_MULTIPLIER_ENABLED && placement.tile?.frontierContract?.zone) {
+      agent.reputation = Math.max(0, Number(agent.reputation || 0) + (FRONTIER_CONTRACT_BONUS_MULTIPLIER - 1) * 2.4);
+    }
+    applyActionRewardAndPressure(agent, 'expand_map', { displacement: getRecentDisplacement(agent.entityId, 3) });
     agent.expansionCooldownUntilTick = worldState.tick + MAP_EXPANSION_COOLDOWN_TICKS;
     agent.state = 'acting';
     agent.lastAction = {
@@ -4487,7 +4741,11 @@ app.get('/missions/active', (req, res) => {
   const active = Array.from(missionRegistry.values())
     .filter((mission) => mission.status === 'active')
     .map((mission) => serializeMission(mission));
-  res.json({ success: true, missions: active });
+  const operations = {
+    generatedAt: new Date().toISOString(),
+    frontierContracts: getDailyFrontierContracts(5)
+  };
+  res.json({ success: true, missions: active, operations });
 });
 
 app.post('/entity/:entityId/missions/:missionId/join', requireAuth, async (req, res) => {
@@ -4580,7 +4838,46 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
 
     const dbAdapter = process.env.DATABASE_URL ? db : null;
     if (!dbAdapter || typeof dbAdapter.getRecommendationCandidates !== 'function') {
-      return res.json({ success: true, entityId, type, recommendations: [], metrics: {} });
+      const contracts = getDailyFrontierContracts(6);
+      const fallbackRecommendations = (type === 'expansion' || type === 'exploration')
+        ? contracts.map((contract) => {
+          const base = {
+            score: Number(contract.score || 0),
+            zone: contract.zone,
+            target: {
+              x: Number(contract.target?.x || 0),
+              z: Number(contract.target?.z || 0)
+            }
+          };
+          if (type === 'exploration') {
+            return {
+              recommendationType: 'exploration',
+              confidence: base.score,
+              score: base.score,
+              zone: base.zone,
+              reason: `Scout ${base.zone} and expand near nearby resources.`,
+              targetPosition: base.target,
+              actionHint: {
+                action: 'move_and_expand',
+                target: base.target,
+                rationale: `Under-explored ${base.zone} with resource density ${Number(contract.resourceDensity || 0)}.`
+              }
+            };
+          }
+          return {
+            recommendationType: 'expansion',
+            score: base.score,
+            targetArea: { zone: base.zone, ...base.target },
+            rationale: [`Under-explored frontier ${base.zone}.`],
+            actionHint: {
+              action: 'move_and_expand',
+              target: base.target,
+              rationale: `Expand into ${base.zone}.`
+            }
+          };
+        })
+        : [];
+      return res.json({ success: true, entityId, type, recommendations: fallbackRecommendations, metrics: {} });
     }
 
     const wiki = type !== 'expansion'
@@ -4594,13 +4891,44 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
       })
       : null;
 
-    const recommendations = type === 'expansion'
+    const spatialHints = (type === 'expansion' || type === 'exploration')
       ? await (typeof db.getSpatialRecommendationHints === 'function'
         ? db.getSpatialRecommendationHints(entityId, 6)
         : Promise.resolve([]))
-      : (Array.isArray(wiki?.social?.suggestedConnections)
-        ? wiki.social.suggestedConnections
-        : []);
+      : [];
+
+    const recommendations = type === 'expansion'
+      ? spatialHints
+      : type === 'exploration'
+        ? spatialHints.map((hint) => {
+          const target = hint?.actionHint?.target || hint?.targetArea || {};
+          const reason = Array.isArray(hint?.rationale) && hint.rationale.length > 0
+            ? String(hint.rationale[0])
+            : 'Explore under-mapped frontier and expand nearby.';
+          return {
+            recommendationType: 'exploration',
+            score: Number(hint?.score || 0),
+            confidence: Number(hint?.score || 0),
+            targetPosition: {
+              x: Number(target?.x || 0),
+              z: Number(target?.z || 0)
+            },
+            zone: hint?.targetArea?.zone || null,
+            reason,
+            collaborator: hint?.collaborator || null,
+            actionHint: {
+              action: hint?.actionHint?.action || 'move_and_expand',
+              target: {
+                x: Number(target?.x || 0),
+                z: Number(target?.z || 0)
+              },
+              rationale: reason
+            }
+          };
+        })
+        : (Array.isArray(wiki?.social?.suggestedConnections)
+          ? wiki.social.suggestedConnections
+          : []);
 
     await Promise.all(
       recommendations
@@ -4959,14 +5287,26 @@ app.get('/observer/telemetry/world-progress', async (req, res) => {
 
     const trend = process.env.DATABASE_URL
       ? await db.getWorldBehaviorMetricsByDay(days)
-      : [];
+      : getInMemoryWorldBehaviorMetricsByDay(days);
 
     const totalIdleChat = summaries.reduce((sum, row) => sum + Number(row.idleChatRatio || 0), 0);
     const avgIdleChatRatio = summaries.length > 0 ? Number((totalIdleChat / summaries.length).toFixed(4)) : 0;
+    const totalObjectiveActions = summaries.reduce((sum, row) => sum + Number(row.objectiveActions || 0), 0);
+    const totalSocialActions = summaries.reduce((sum, row) => sum + Number(row.socialActions || 0), 0);
+    const totalActions = totalObjectiveActions + totalSocialActions;
+    const objectiveActionShare = toRatio(totalObjectiveActions, Math.max(1, totalActions));
+    const frontierGainPerDay = trend.length > 0
+      ? Number((trend.reduce((sum, row) => sum + Number(row.expansionCount || 0), 0) / trend.length).toFixed(3))
+      : 0;
+    const socialOnlyPressure = Number(Math.max(0, Math.min(1, (
+      (avgIdleChatRatio * 0.65)
+      + ((1 - objectiveActionShare) * 0.35)
+    ))).toFixed(4));
+    const frontierContracts = getDailyFrontierContracts(5);
     const tuning = {
-      objectiveBias: avgIdleChatRatio > 0.45 ? 0.65 : 0.5,
-      explorationBias: avgIdleChatRatio > 0.45 ? 0.25 : 0.3,
-      socialBias: avgIdleChatRatio > 0.45 ? 0.1 : 0.2,
+      objectiveBias: socialOnlyPressure > 0.5 ? 0.7 : 0.52,
+      explorationBias: socialOnlyPressure > 0.5 ? 0.22 : 0.3,
+      socialBias: socialOnlyPressure > 0.5 ? 0.08 : 0.18,
       validationTarget: 'idleChatRatio_down'
     };
 
@@ -4980,6 +5320,10 @@ app.get('/observer/telemetry/world-progress', async (req, res) => {
       topExplorers,
       topBuilders,
       idleChatRatio: avgIdleChatRatio,
+      frontierGainPerDay,
+      objectiveActionShare,
+      socialOnlyPressure,
+      frontierContracts,
       promptWeightTuning: tuning
     });
   } catch (error) {

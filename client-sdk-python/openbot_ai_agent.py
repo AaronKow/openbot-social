@@ -2487,6 +2487,11 @@ class AIAgent:
 
     def _fetch_recommendations(self, rec_type: str = "conversation") -> List[Dict[str, Any]]:
         """Fetch recommendation candidates for targeted outreach, with lightweight cache."""
+        if rec_type == "exploration":
+            # Server-side recommendation normalizer currently supports
+            # conversation/collab/expansion. Route exploration intent through
+            # expansion hints to avoid silently degrading to conversation.
+            rec_type = "expansion"
         now = time.time()
         cache = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
         if isinstance(cache, dict) and (now - float(cache.get("ts", 0.0))) < 25.0:
@@ -2514,6 +2519,187 @@ class AIAgent:
                 print(f"[{self.entity_id}] recommendations fetch error: {exc}")
         fallback = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
         return list((fallback or {}).get("data") or [])
+
+    def _fetch_world_progress(self, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.time()
+        cache = self._world_progress_cache if isinstance(self._world_progress_cache, dict) else {"ts": 0.0, "data": {}}
+        if not force_refresh and (now - float(cache.get("ts", 0.0))) < 20.0:
+            return dict(cache.get("data") or {})
+        if not self.client:
+            return dict(cache.get("data") or {})
+
+        try:
+            resp = self.client.session.get(
+                f"{self.server_url}/observer/telemetry/world-progress",
+                params={"days": 7},
+                timeout=6,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                payload = data if isinstance(data, dict) else {}
+                self._world_progress_cache = {"ts": now, "data": payload}
+                return dict(payload)
+        except Exception as exc:
+            if self.debug:
+                print(f"[{self.entity_id}] world-progress fetch error: {exc}")
+        return dict(cache.get("data") or {})
+
+    def _recent_social_penalty(self) -> Dict[str, Any]:
+        if not self._recent_plan_runtime:
+            return {
+                "score": 0.0,
+                "window": 0,
+                "objectiveRate": 0.0,
+                "lowDisplacementRate": 0.0,
+                "socialOnlyRate": 0.0,
+            }
+
+        window = list(self._recent_plan_runtime)[-self._anti_idle_penalty_window:]
+        if not window:
+            return {
+                "score": 0.0,
+                "window": 0,
+                "objectiveRate": 0.0,
+                "lowDisplacementRate": 0.0,
+                "socialOnlyRate": 0.0,
+            }
+
+        objective_count = sum(1 for item in window if int(item.get("objectiveActions", 0) or 0) > 0)
+        social_only_count = sum(1 for item in window if bool(item.get("socialOnly", False)))
+        low_displacement_count = sum(
+            1 for item in window if float(item.get("displacement", 0.0) or 0.0) < self._anti_idle_min_displacement
+        )
+        objective_rate = objective_count / len(window)
+        social_only_rate = social_only_count / len(window)
+        low_displacement_rate = low_displacement_count / len(window)
+        score = max(0.0, min(1.0, (social_only_rate * 0.45) + (low_displacement_rate * 0.35) + ((1 - objective_rate) * 0.20)))
+        return {
+            "score": round(score, 4),
+            "window": len(window),
+            "objectiveRate": round(objective_rate, 4),
+            "lowDisplacementRate": round(low_displacement_rate, 4),
+            "socialOnlyRate": round(social_only_rate, 4),
+        }
+
+    def _build_contract_objective_cycle(self, perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        position = perception.get("position") if isinstance(perception.get("position"), dict) else {"x": 50.0, "z": 50.0}
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+        centroid = frontier.get("centroid") if isinstance(frontier.get("centroid"), dict) else {}
+
+        tx = float(centroid.get("x", position.get("x", 50.0)))
+        tz = float(centroid.get("z", position.get("z", 50.0)))
+
+        cycle: List[Dict[str, Any]] = [{"type": "move", "x": tx, "z": tz, "__objective_cycle": True}]
+
+        missing = self._expansion_missing_resources(self_state)
+        nearest = self._get_nearest_harvestable_resources(
+            position,
+            perception.get("worldObjects") if isinstance(perception.get("worldObjects"), list) else [],
+            limit=4,
+        )
+        if sum(missing.values()) > 0 and nearest:
+            target = None
+            for item in nearest:
+                if str(item.get("type", "")).lower() in {k for k, v in missing.items() if int(v) > 0}:
+                    target = item
+                    break
+            target = target or nearest[0]
+            harvest = {"type": "harvest", "__objective_cycle": True}
+            if isinstance(target.get("type"), str):
+                harvest["resource_type"] = str(target.get("type")).lower()
+            if isinstance(target.get("id"), str):
+                harvest["object_id"] = target.get("id")
+            cycle.append(harvest)
+
+        if self._compute_inventory_expansion_ready(self_state):
+            expand = {"type": "expand_map", "x": tx, "z": tz, "__objective_cycle": True}
+            cycle.append(expand)
+
+        return cycle[:4]
+
+    def _enforce_mission_role_action(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self._mission_membership.get("missionId"):
+            return actions
+        if int(self._tick_count) <= int(self._last_mission_role_action_tick):
+            return actions
+
+        role = str(self._mission_role or "builder").lower()
+        role_action_map = {
+            "builder": {"expand_map"},
+            "forager": {"harvest"},
+            "defender": {"move", "move_to_agent", "emote"},
+        }
+        role_actions = role_action_map.get(role, {"expand_map"})
+
+        if any(str(a.get("type", "")).lower() in role_actions for a in actions if isinstance(a, dict)):
+            self._last_mission_role_action_tick = self._tick_count
+            return actions
+
+        injected: Optional[Dict[str, Any]] = None
+        if role == "forager":
+            nearest = perception.get("nearHarvestObject") if isinstance(perception.get("nearHarvestObject"), dict) else {}
+            injected = {"type": "harvest"}
+            if isinstance(nearest.get("type"), str):
+                injected["resource_type"] = str(nearest.get("type")).lower()
+            if isinstance(nearest.get("id"), str):
+                injected["object_id"] = nearest.get("id")
+        elif role == "defender":
+            threat = (perception.get("threats") or [None])[0] if isinstance(perception.get("threats"), list) else None
+            if isinstance(threat, dict):
+                injected = {"type": "move", "x": float(threat.get("x", 50.0)), "z": float(threat.get("z", 50.0))}
+            else:
+                injected = {"type": "emote", "emote": "react"}
+        else:
+            frontier = perception.get("frontier") if isinstance(perception.get("frontier"), dict) else {}
+            centroid = frontier.get("centroid") if isinstance(frontier.get("centroid"), dict) else {}
+            injected = {"type": "expand_map", "x": float(centroid.get("x", 50.0)), "z": float(centroid.get("z", 50.0))}
+
+        if injected:
+            self._last_mission_role_action_tick = self._tick_count
+            return [injected] + [a for a in actions if isinstance(a, dict)][:15]
+        return actions
+
+    def _apply_anti_idle_contract(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self._anti_idle_policy_enabled:
+            return actions
+
+        markers = perception.get("markers") if isinstance(perception.get("markers"), dict) else {}
+        mention_pressure = bool(markers.get("mentions") or markers.get("urgent_chat") or perception.get("taggedBy"))
+        if mention_pressure:
+            return actions
+
+        world_progress = self._fetch_world_progress(force_refresh=False)
+        world_idle_chat_ratio = float(world_progress.get("idleChatRatio", 0.0) or 0.0) if isinstance(world_progress, dict) else 0.0
+        local_penalty = self._recent_social_penalty()
+
+        contract_pressure = 0.0
+        if self._social_only_wallclock_seconds >= self._anti_idle_max_social_seconds:
+            contract_pressure += 0.55
+        contract_pressure += float(local_penalty.get("score", 0.0) or 0.0) * 0.35
+        contract_pressure += max(0.0, min(1.0, world_idle_chat_ratio)) * 0.25
+        contract_pressure = min(1.0, contract_pressure)
+
+        has_objective = any(self._is_objective_action(a) for a in actions if isinstance(a, dict))
+        if has_objective and contract_pressure < 0.75:
+            return actions
+
+        if contract_pressure < self._anti_idle_policy_bias:
+            return actions
+
+        objective_cycle = self._build_contract_objective_cycle(perception)
+        if not objective_cycle:
+            return actions
+
+        retained_social = [a for a in actions if isinstance(a, dict) and a.get("type") == "chat"][:1]
+        merged = objective_cycle + retained_social
+        if self.debug:
+            print(
+                f"[{self.entity_id}] anti-idle contract injection "
+                f"pressure={contract_pressure:.3f} local={float(local_penalty.get('score', 0.0)):.3f} "
+                f"worldIdle={world_idle_chat_ratio:.3f} wallclock={self._social_only_wallclock_seconds:.1f}s"
+            )
+        return merged[:16]
 
     def _derive_expansion_guidance(self, expansion_recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
         hints = expansion_recommendations if isinstance(expansion_recommendations, list) else []
@@ -2829,9 +3015,10 @@ class AIAgent:
         frontier["nearestFrontierCell"] = exploration.get("nearest_frontier_cell")
         recommendations = self._fetch_recommendations("conversation")
         expansion_recommendations = self._fetch_recommendations("expansion")
-        exploration_recommendations = self._fetch_recommendations("exploration")
+        exploration_recommendations = []
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
-        exploration_guidance = self._derive_exploration_guidance(exploration_recommendations)
+        exploration_guidance = self._derive_exploration_guidance(expansion_recommendations)
+        world_progress = self._fetch_world_progress(force_refresh=False)
         world_events = world_snapshot.get("events") if isinstance(world_snapshot.get("events"), list) else []
         threat_items = []
         if nearest:
@@ -2870,6 +3057,7 @@ class AIAgent:
             "explorationRecommendations": exploration_recommendations,
             "expansionGuidance": expansion_guidance,
             "explorationGuidance": exploration_guidance,
+            "worldProgress": world_progress,
             "plannerState": dict(self._planner_state),
             "missions": mission_context,
         }
@@ -2923,10 +3111,13 @@ class AIAgent:
                 "frontier": perception.get("frontier", {}),
                 "expansion_guidance": perception.get("expansionGuidance", {}),
                 "exploration": perception.get("exploration", {}),
+                "world_progress": perception.get("worldProgress", {}),
             },
             "procedural": {
                 "stats": dict(self._procedural_stats),
                 "recent_own_messages": self._recent_own_messages[-4:],
+                "social_only_wallclock_seconds": round(self._social_only_wallclock_seconds, 3),
+                "recent_social_penalty": self._recent_social_penalty(),
             },
         }
 
@@ -3095,6 +3286,10 @@ class AIAgent:
                 fallback = dict(frontier_actions[0])
                 confidence = max(confidence, 0.58)
         actions = self._apply_balanced_objective_guardrails(actions[:16], perception)
+        actions = self._apply_anti_idle_contract(actions[:16], perception)
+        actions = self._enforce_mission_role_action(actions[:16], perception)
+        if not actions:
+            actions = [fallback]
         return {"actions": actions[:16], "confidence": round(confidence, 2), "fallback": fallback}
 
     def _apply_progression_policy(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -3437,6 +3632,34 @@ class AIAgent:
                 and bool(action.get("objectiveCycle"))
             )
         ]
+        start_pos = perception.get("position") if isinstance(perception.get("position"), dict) else {}
+        current_pos = self.client.get_position() if self.client else {}
+        displacement = math.hypot(
+            float(current_pos.get("x", 0.0)) - float(start_pos.get("x", 0.0)),
+            float(current_pos.get("z", 0.0)) - float(start_pos.get("z", 0.0)),
+        )
+        social_only_window = chat_actions > 0 and movement_actions == 0 and len(objective_actions) == 0
+        if len(objective_actions) > 0:
+            self._last_non_social_wallclock_at = time.time()
+            self._social_only_wallclock_seconds = 0.0
+        elif social_only_window:
+            self._social_only_wallclock_seconds = max(
+                0.0,
+                time.time() - float(self._last_non_social_wallclock_at or time.time()),
+            )
+        else:
+            self._social_only_wallclock_seconds = max(0.0, self._social_only_wallclock_seconds - min(self.TICK_INTERVAL, 8.0))
+
+        self._recent_plan_runtime.append(
+            {
+                "tick": self._tick_count,
+                "objectiveActions": len(objective_actions),
+                "movementActions": movement_actions,
+                "chatActions": chat_actions,
+                "displacement": round(displacement, 4),
+                "socialOnly": social_only_window,
+            }
+        )
         if objective_actions:
             self._last_objective_tick = self._tick_count
             self._social_only_plan_streak = 0
@@ -3473,6 +3696,8 @@ class AIAgent:
             "questRewardSignal": round(self._quest_reward_signal, 4),
             "questProgressDelta": quest_delta,
             "questClaims": list((quest_snapshot.get("recent_claims") or [])[:2]),
+            "socialOnlyWallclockSeconds": round(self._social_only_wallclock_seconds, 2),
+            "displacement": round(displacement, 3),
         }
         self._reflection_history.append(record)
         self._reflection_history = self._reflection_history[-40:]
