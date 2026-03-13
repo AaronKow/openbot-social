@@ -789,6 +789,11 @@ class AIAgent:
         self._objective_max_social_streak = max(1, int(_env_float("OBJECTIVE_MAX_SOCIAL_STREAK", 2)))
         self._objective_force_after_ticks = max(1, int(_env_float("OBJECTIVE_FORCE_AFTER_TICKS", 3)))
         self._objective_disable_during_mentions = _env_bool("OBJECTIVE_DISABLE_DURING_MENTIONS", True)
+        self._anti_idle_policy_enabled = _env_bool("ANTI_IDLE_POLICY_ENABLED", True)
+        self._anti_idle_max_social_seconds = max(20.0, _env_float("ANTI_IDLE_MAX_SOCIAL_SECONDS", max(90.0, self.TICK_INTERVAL * 3)))
+        self._anti_idle_min_displacement = max(0.05, _env_float("ANTI_IDLE_MIN_DISPLACEMENT", 1.25))
+        self._anti_idle_penalty_window = max(2, int(_env_float("ANTI_IDLE_PENALTY_WINDOW", 6)))
+        self._anti_idle_policy_bias = max(0.0, min(1.0, _env_float("ANTI_IDLE_POLICY_BIAS", 0.55)))
 
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
         if not api_key:
@@ -902,6 +907,11 @@ class AIAgent:
         self._social_only_plan_streak: int = 0
         self._missing_resource_streak: int = 0
         self._last_forced_objective_reason: str = ""
+        self._social_only_wallclock_seconds: float = 0.0
+        self._last_non_social_wallclock_at: float = time.time()
+        self._recent_plan_runtime: Deque[Dict[str, Any]] = deque(maxlen=24)
+        self._world_progress_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
+        self._last_mission_role_action_tick: int = 0
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
