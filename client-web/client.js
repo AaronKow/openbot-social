@@ -1463,6 +1463,8 @@ class OpenBotWorld {
         const frontierGainEl = document.getElementById('momentum-frontier-gain');
         const objectiveShareEl = document.getElementById('momentum-objective-action-share');
         const pressureEl = document.getElementById('momentum-social-pressure');
+        const recFollowEl = document.getElementById('momentum-rec-follow-through');
+        const missionLiftEl = document.getElementById('momentum-mission-lift');
 
         if (!data || data.success === false) {
             if (idleEl) idleEl.textContent = '0.0%';
@@ -1470,6 +1472,8 @@ class OpenBotWorld {
             if (frontierGainEl) frontierGainEl.textContent = '0.00';
             if (objectiveShareEl) objectiveShareEl.textContent = '0.0%';
             if (pressureEl) pressureEl.textContent = '0.000';
+            if (recFollowEl) recFollowEl.textContent = '0.0%';
+            if (missionLiftEl) missionLiftEl.textContent = '0.000';
             return;
         }
 
@@ -1477,6 +1481,9 @@ class OpenBotWorld {
         if (frontierGainEl) frontierGainEl.textContent = Number(data.frontierGainPerDay || 0).toFixed(2);
         if (objectiveShareEl) objectiveShareEl.textContent = `${(Number(data.objectiveActionShare || 0) * 100).toFixed(1)}%`;
         if (pressureEl) pressureEl.textContent = Number(data.socialOnlyPressure || 0).toFixed(3);
+        const rec = data.recommendationEffectiveness || {};
+        if (recFollowEl) recFollowEl.textContent = `${(Number(rec.followThroughRate || 0) * 100).toFixed(1)}%`;
+        if (missionLiftEl) missionLiftEl.textContent = Number(rec.missionLiftPerFollowThrough || 0).toFixed(3);
         if (explorersEl) {
             const rows = Array.isArray(data.topExplorers) ? data.topExplorers : [];
             explorersEl.textContent = rows.length > 0
@@ -4990,6 +4997,7 @@ class OpenBotWorld {
                 <div>Idle-chat ratio: <strong>${(Number(data.idleChatRatio || 0) * 100).toFixed(1)}%</strong></div>
                 <div>Objective action share: <strong>${(Number(data.objectiveActionShare || 0) * 100).toFixed(1)}%</strong> · Social pressure: <strong>${Number(data.socialOnlyPressure || 0).toFixed(3)}</strong></div>
                 <div>Frontier gain/day: <strong>${Number(data.frontierGainPerDay || 0).toFixed(2)}</strong></div>
+                <div>Rec follow-through: <strong>${(Number(data.recommendationEffectiveness?.followThroughRate || 0) * 100).toFixed(1)}%</strong> · Mission lift/FU: <strong>${Number(data.recommendationEffectiveness?.missionLiftPerFollowThrough || 0).toFixed(3)}</strong></div>
             </div>
         `;
         container.appendChild(panel);

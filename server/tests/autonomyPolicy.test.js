@@ -12,8 +12,12 @@ const {
   getRuntimeTelemetryRecord,
   getInMemoryWorldBehaviorMetricsByDay,
   getDailyFrontierContracts,
+  deriveMissionAwarePairingHints,
+  noteRecommendationRuntimeEvent,
+  getAggregatedRecommendationRuntimeMetrics,
   isEntityUnderChatGuardrail,
-  runtimeDailyTelemetry
+  runtimeDailyTelemetry,
+  recommendationRuntimeStats
 } = __testHooks;
 
 function createAgent(id, name, position) {
@@ -46,6 +50,7 @@ test.beforeEach(() => {
   worldState.expansionTiles = [];
   worldState.objects.clear();
   runtimeDailyTelemetry.clear();
+  recommendationRuntimeStats.clear();
 });
 
 test('reward pressure tracks objective chain and raises objective gate for stationary social loops', () => {
@@ -124,4 +129,43 @@ test('daily frontier contracts are generated with zones, targets, and bonuses', 
     assert.equal(Number.isFinite(Number(contract.target?.z)), true);
     assert.ok(Number(contract.bonusMultiplier || 0) >= 1);
   }
+});
+
+test('mission-aware pairing hints prefer complementary builder/forager roles near frontier', () => {
+  const requester = createAgent('pair-requester', 'pair-requester', { x: 0, y: 0, z: 0 });
+  requester.entityId = 'entity-requester';
+  requester.skills.builder.level = 5;
+  requester.skills.forage.level = 2;
+  const forager = createAgent('pair-forager', 'pair-forager', { x: 12, y: 0, z: 12 });
+  forager.entityId = 'entity-forager';
+  forager.skills.builder.level = 1;
+  forager.skills.forage.level = 6;
+  worldState.agents.set(requester.id, requester);
+  worldState.agents.set(forager.id, forager);
+
+  const hints = deriveMissionAwarePairingHints('entity-requester', [
+    { targetArea: { zone: 'sector-2-2', x: 10, z: 10 }, actionHint: { target: { x: 10, z: 10 } } }
+  ]);
+
+  assert.equal(hints.length, 1);
+  assert.equal(hints[0].requesterRole, 'builder');
+  assert.equal(hints[0].desiredRole, 'forager');
+  assert.equal(hints[0].collaboratorEntityId, 'entity-forager');
+});
+
+test('recommendation runtime metrics aggregate acceptance/follow-through and mission lift', () => {
+  noteRecommendationRuntimeEvent('entity-metric', 'expansion', 'shown');
+  noteRecommendationRuntimeEvent('entity-metric', 'expansion', 'shown');
+  noteRecommendationRuntimeEvent('entity-metric', 'expansion', 'accepted');
+  noteRecommendationRuntimeEvent('entity-metric', 'exploration', 'follow_through', { missionLiftApplied: true });
+  noteRecommendationRuntimeEvent('entity-metric', 'exploration', 'accepted');
+
+  const metrics = getAggregatedRecommendationRuntimeMetrics(['expansion', 'exploration']);
+  assert.equal(metrics.shownCount, 2);
+  assert.equal(metrics.acceptedCount, 2);
+  assert.equal(metrics.followThroughCount, 1);
+  assert.equal(metrics.missionLiftCount, 1);
+  assert.equal(metrics.acceptanceRate, 1);
+  assert.equal(metrics.followThroughRate, 0.5);
+  assert.equal(metrics.missionLiftPerFollowThrough, 1);
 });

@@ -327,6 +327,7 @@ const rotatingEventMotionState = new Map(); // eventId -> { vx, vz, turnInTicks 
 const entityRecentPositions = new Map(); // entityId -> [{x,z,tick,ts}]
 const missionRegistry = new Map();
 const missionEntityIndex = new Map();
+const recommendationRuntimeStats = new Map(); // entityId::type -> counters
 const missionAchievementThresholds = Object.freeze([
   { key: 'mission-contributor', min: 1 },
   { key: 'mission-specialist', min: 3 },
@@ -439,6 +440,62 @@ function getMissionContributionWeight(missionType, actionType) {
   return 0;
 }
 
+function inferEntityRoleForCoordination(entityId) {
+  const id = String(entityId || '').trim();
+  if (!id) return 'builder';
+  const runtime = ensureMissionRuntimeForEntity(id);
+  const mission = runtime?.activeMissionId ? missionRegistry.get(runtime.activeMissionId) : null;
+  if (mission?.type === 'resource-drive') return 'forager';
+  if (mission?.type === 'defend-zone') return 'defender';
+  if (mission?.type === 'expand-sector') return 'builder';
+
+  const agent = Array.from(worldState.agents.values()).find((row) => row?.entityId === id);
+  const builderLevel = Number(agent?.skills?.builder?.level || 1);
+  const forageLevel = Number(agent?.skills?.forage?.level || 1);
+  const guardLevel = Number(agent?.skills?.shellGuard?.level || 1);
+  if (guardLevel >= Math.max(builderLevel, forageLevel) + 1) return 'defender';
+  return builderLevel >= forageLevel ? 'builder' : 'forager';
+}
+
+function deriveMissionAwarePairingHints(entityId, recommendations = [], limit = 4) {
+  const id = String(entityId || '').trim();
+  if (!id) return [];
+  const requesterRole = inferEntityRoleForCoordination(id);
+  const desiredRole = requesterRole === 'builder' ? 'forager' : 'builder';
+  const safeRows = Array.isArray(recommendations) ? recommendations : [];
+  const hints = [];
+
+  for (const item of safeRows.slice(0, Math.max(1, Math.min(8, Number(limit) || 4)))) {
+    const target = item?.actionHint?.target || item?.targetArea || item?.targetPosition || {};
+    if (!Number.isFinite(Number(target?.x)) || !Number.isFinite(Number(target?.z))) continue;
+
+    const nearby = Array.from(worldState.agents.values())
+      .filter((agent) => agent?.entityId && String(agent.entityId) !== id)
+      .map((agent) => ({
+        entityId: agent.entityId,
+        role: inferEntityRoleForCoordination(agent.entityId),
+        distance: distance2D(agent.position || {}, target || {})
+      }))
+      .filter((row) => row.role === desiredRole)
+      .sort((a, b) => Number(a.distance || 0) - Number(b.distance || 0));
+
+    const collaborator = nearby[0] || null;
+    hints.push({
+      zone: item?.targetArea?.zone || item?.zone || null,
+      target: { x: Number(target.x), z: Number(target.z) },
+      requesterRole,
+      desiredRole,
+      collaboratorEntityId: collaborator?.entityId || null,
+      collaboratorDistance: collaborator ? Number(Number(collaborator.distance || 0).toFixed(3)) : null,
+      rationale: collaborator
+        ? `Pair ${requesterRole}+${desiredRole} near frontier target.`
+        : `Seek nearby ${desiredRole} collaborator near frontier target.`
+    });
+  }
+
+  return hints.slice(0, Math.max(1, Math.min(6, Number(limit) || 4)));
+}
+
 function serializeMission(mission) {
   const participantCount = mission.participants?.size || 0;
   return {
@@ -503,6 +560,61 @@ function pushEntityRecentPosition(entityId, position) {
   list.push(row);
   if (list.length > 24) list.splice(0, list.length - 24);
   entityRecentPositions.set(id, list);
+}
+
+function getRecommendationRuntimeKey(entityId, recommendationType = 'conversation') {
+  return `${String(entityId || '').trim()}::${String(recommendationType || 'conversation').trim().toLowerCase()}`;
+}
+
+function ensureRecommendationRuntimeStats(entityId, recommendationType = 'conversation') {
+  const key = getRecommendationRuntimeKey(entityId, recommendationType);
+  if (!recommendationRuntimeStats.has(key)) {
+    recommendationRuntimeStats.set(key, {
+      entityId: String(entityId || '').trim(),
+      recommendationType: String(recommendationType || 'conversation').trim().toLowerCase(),
+      shownCount: 0,
+      acceptedCount: 0,
+      followThroughCount: 0,
+      missionLiftCount: 0
+    });
+  }
+  return recommendationRuntimeStats.get(key);
+}
+
+function noteRecommendationRuntimeEvent(entityId, recommendationType = 'conversation', eventType = 'shown', metadata = {}) {
+  const id = String(entityId || '').trim();
+  if (!id) return;
+  const type = String(recommendationType || 'conversation').trim().toLowerCase();
+  const evt = String(eventType || '').trim().toLowerCase();
+  if (!['shown', 'accepted', 'follow_through'].includes(evt)) return;
+  const stats = ensureRecommendationRuntimeStats(id, type);
+  if (evt === 'shown') stats.shownCount += 1;
+  if (evt === 'accepted') stats.acceptedCount += 1;
+  if (evt === 'follow_through') stats.followThroughCount += 1;
+  if (evt === 'follow_through' && metadata?.missionLiftApplied) stats.missionLiftCount += 1;
+}
+
+function getAggregatedRecommendationRuntimeMetrics(types = ['expansion', 'exploration']) {
+  const normalizedTypes = new Set((types || []).map((item) => String(item || '').trim().toLowerCase()));
+  const totals = {
+    shownCount: 0,
+    acceptedCount: 0,
+    followThroughCount: 0,
+    missionLiftCount: 0
+  };
+  for (const row of recommendationRuntimeStats.values()) {
+    if (!normalizedTypes.has(String(row.recommendationType || '').toLowerCase())) continue;
+    totals.shownCount += Number(row.shownCount || 0);
+    totals.acceptedCount += Number(row.acceptedCount || 0);
+    totals.followThroughCount += Number(row.followThroughCount || 0);
+    totals.missionLiftCount += Number(row.missionLiftCount || 0);
+  }
+  return {
+    ...totals,
+    acceptanceRate: totals.shownCount > 0 ? Number((totals.acceptedCount / totals.shownCount).toFixed(4)) : 0,
+    followThroughRate: totals.acceptedCount > 0 ? Number((totals.followThroughCount / totals.acceptedCount).toFixed(4)) : 0,
+    missionLiftPerFollowThrough: totals.followThroughCount > 0 ? Number((totals.missionLiftCount / totals.followThroughCount).toFixed(4)) : 0
+  };
 }
 
 function getTickChangeBucket(tick) {
@@ -4741,9 +4853,23 @@ app.get('/missions/active', (req, res) => {
   const active = Array.from(missionRegistry.values())
     .filter((mission) => mission.status === 'active')
     .map((mission) => serializeMission(mission));
+  const contracts = getDailyFrontierContracts(5);
+  const dailyOperations = contracts.map((contract) => ({
+    operationId: `op-${contract.zone}`,
+    kind: 'frontier-expansion',
+    zone: contract.zone,
+    target: contract.target,
+    score: contract.score,
+    bonusMultiplier: contract.bonusMultiplier,
+    recommendedPair: ['builder', 'forager'],
+    missionIds: active
+      .filter((mission) => ['expand-sector', 'resource-drive'].includes(String(mission.type || '')))
+      .map((mission) => mission.id)
+  }));
   const operations = {
     generatedAt: new Date().toISOString(),
-    frontierContracts: getDailyFrontierContracts(5)
+    frontierContracts: contracts,
+    dailyOperations
   };
   res.json({ success: true, missions: active, operations });
 });
@@ -4877,7 +5003,15 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
           };
         })
         : [];
-      return res.json({ success: true, entityId, type, recommendations: fallbackRecommendations, metrics: {} });
+      const coordinationHints = (type === 'expansion' || type === 'exploration')
+        ? deriveMissionAwarePairingHints(entityId, fallbackRecommendations, 4)
+        : [];
+      for (const candidate of fallbackRecommendations.slice(0, 6)) {
+        if (candidate && (candidate.entityId || candidate.zone || candidate.targetArea)) {
+          noteRecommendationRuntimeEvent(entityId, type, 'shown');
+        }
+      }
+      return res.json({ success: true, entityId, type, recommendations: fallbackRecommendations, coordinationHints, metrics: {} });
     }
 
     const wiki = type !== 'expansion'
@@ -4929,6 +5063,9 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
         : (Array.isArray(wiki?.social?.suggestedConnections)
           ? wiki.social.suggestedConnections
           : []);
+    const coordinationHints = (type === 'expansion' || type === 'exploration')
+      ? deriveMissionAwarePairingHints(entityId, recommendations, 4)
+      : [];
 
     await Promise.all(
       recommendations
@@ -4941,6 +5078,10 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
           }).catch(() => null)
         ))
     );
+    const shownCount = Math.max(0, Math.min(6, recommendations.length));
+    for (let i = 0; i < shownCount; i += 1) {
+      noteRecommendationRuntimeEvent(entityId, type, 'shown');
+    }
 
     const metrics = typeof db.getRecommendationMetrics === 'function'
       ? await db.getRecommendationMetrics(entityId, type, 30)
@@ -4952,6 +5093,7 @@ app.get('/entity/:entityId/recommendations', requireAuth, async (req, res) => {
       type,
       generatedAt: new Date().toISOString(),
       recommendations,
+      coordinationHints,
       metrics,
     });
   } catch (error) {
@@ -4985,12 +5127,26 @@ app.post('/entity/:entityId/recommendations/events', requireAuth, async (req, re
         userAgent: req.get('user-agent') || null
       });
     }
+    let missionLiftApplied = false;
+    if (eventType === 'follow_through') {
+      const runtime = ensureMissionRuntimeForEntity(entityId);
+      const activeMissionId = runtime?.activeMissionId || null;
+      const missionActionType = (type === 'expansion' || type === 'exploration') ? 'expand_map' : 'move_to_agent';
+      if (activeMissionId) {
+        const updated = applyMissionProgress(entityId, activeMissionId, missionActionType, 1);
+        missionLiftApplied = Boolean(updated);
+      }
+      if (type === 'expansion' || type === 'exploration') {
+        updateQuestProgress(entityId, { moveCount: 1 }).catch(() => null);
+      }
+    }
+    noteRecommendationRuntimeEvent(entityId, type, eventType, { missionLiftApplied });
 
     const metrics = (process.env.DATABASE_URL && typeof db.getRecommendationMetrics === 'function')
       ? await db.getRecommendationMetrics(entityId, type, 30)
       : {};
 
-    res.json({ success: true, entityId, candidateEntityId, type, eventType, metrics });
+    res.json({ success: true, entityId, candidateEntityId, type, eventType, missionLiftApplied, metrics });
   } catch (error) {
     console.error('Error tracking recommendation event:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
@@ -5303,6 +5459,7 @@ app.get('/observer/telemetry/world-progress', async (req, res) => {
       + ((1 - objectiveActionShare) * 0.35)
     ))).toFixed(4));
     const frontierContracts = getDailyFrontierContracts(5);
+    const recommendationEffectiveness = getAggregatedRecommendationRuntimeMetrics(['expansion', 'exploration']);
     const tuning = {
       objectiveBias: socialOnlyPressure > 0.5 ? 0.7 : 0.52,
       explorationBias: socialOnlyPressure > 0.5 ? 0.22 : 0.3,
@@ -5324,6 +5481,7 @@ app.get('/observer/telemetry/world-progress', async (req, res) => {
       objectiveActionShare,
       socialOnlyPressure,
       frontierContracts,
+      recommendationEffectiveness,
       promptWeightTuning: tuning
     });
   } catch (error) {
@@ -5590,9 +5748,13 @@ module.exports = {
     getRuntimeTelemetryRecord,
     getInMemoryWorldBehaviorMetricsByDay,
     getDailyFrontierContracts,
+    deriveMissionAwarePairingHints,
+    noteRecommendationRuntimeEvent,
+    getAggregatedRecommendationRuntimeMetrics,
     isEntityUnderChatGuardrail,
     applyActionRewardAndPressure,
     runtimeDailyTelemetry,
+    recommendationRuntimeStats,
     getEntityReflectionSchedulerState: () => ({
       isEntityReflectionCheckRunning
     })
