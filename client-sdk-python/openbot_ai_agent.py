@@ -1691,6 +1691,10 @@ class AIAgent:
 
         world_tick = int(perception.get("worldTick") or 0)
         position = perception.get("position") or {"x": 50.0, "z": 50.0}
+        self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        pain_state = self_state.get("pain") if isinstance(self_state.get("pain"), dict) else {}
+        pain_active = bool(pain_state.get("active"))
+        pain_source = str(pain_state.get("sourceType") or "")
         threats = perception.get("threats") or []
         runtime = perception.get("survival") or self._shelter_runtime
         nearest = self._get_nearest_threat(position, threats)
@@ -1699,6 +1703,61 @@ class AIAgent:
         sanitized = [a for a in actions if isinstance(a, dict) and isinstance(a.get("type"), str)]
         if not sanitized:
             sanitized = [{"type": "wait"}]
+
+        if pain_active:
+            source_x = None
+            source_z = None
+
+            if pain_source == "hazard_zone":
+                world_events = perception.get("worldEvents") if isinstance(perception.get("worldEvents"), list) else []
+                active_hazards = [
+                    event for event in world_events
+                    if isinstance(event, dict)
+                    and str(event.get("type", "")).lower() == "hazard_zone"
+                    and str(event.get("status", "")).lower() == "active"
+                    and isinstance(event.get("center"), dict)
+                ]
+                nearest_hazard = None
+                nearest_hazard_dist = float("inf")
+                for hazard in active_hazards:
+                    center = hazard.get("center") or {}
+                    hx = float(center.get("x", 0.0))
+                    hz = float(center.get("z", 0.0))
+                    dist = math.hypot(float(position.get("x", 0.0)) - hx, float(position.get("z", 0.0)) - hz)
+                    if dist < nearest_hazard_dist:
+                        nearest_hazard = hazard
+                        nearest_hazard_dist = dist
+                if nearest_hazard is not None:
+                    center = nearest_hazard.get("center") or {}
+                    source_x = float(center.get("x", 0.0))
+                    source_z = float(center.get("z", 0.0))
+
+            if source_x is None and nearest:
+                source_x = float(nearest.get("x", position.get("x", 50.0)))
+                source_z = float(nearest.get("z", position.get("z", 50.0)))
+
+            if source_x is None:
+                source_x = float(position.get("x", 50.0)) - 1.0
+                source_z = float(position.get("z", 50.0))
+
+            px = float(position.get("x", 50.0))
+            pz = float(position.get("z", 50.0))
+            away_x = px - float(source_x)
+            away_z = pz - float(source_z)
+            norm = math.hypot(away_x, away_z)
+            if norm < 0.01:
+                angle = random.uniform(0, math.tau)
+                away_x = math.cos(angle)
+                away_z = math.sin(angle)
+                norm = 1.0
+
+            step = 5.0
+            move_x = max(1.0, min(99.0, px + ((away_x / norm) * step)))
+            move_z = max(1.0, min(99.0, pz + ((away_z / norm) * step)))
+            return [
+                {"type": "move", "x": move_x, "z": move_z},
+                {"type": "emote", "emote": "react"},
+            ] + [a for a in sanitized if a.get("type") == "chat"][:1]
 
         if runtime.get("last_event") == "exploded":
             explode_msg = "shelter collapsed - forced to fight!"
@@ -2763,6 +2822,7 @@ class AIAgent:
         exploration_recommendations = self._fetch_recommendations("exploration")
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
         exploration_guidance = self._derive_exploration_guidance(exploration_recommendations)
+        world_events = world_snapshot.get("events") if isinstance(world_snapshot.get("events"), list) else []
         threat_items = []
         if nearest:
             threat_items.append(nearest)
@@ -2789,6 +2849,7 @@ class AIAgent:
             "threats": threat_items,
             "nearHarvestObject": nearest_harvest,
             "selfState": self_state,
+            "worldEvents": world_events,
             "worldObjects": objects,
             "survival": survival,
             "progressionSignals": progression_signals,

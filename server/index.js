@@ -222,6 +222,10 @@ const LOBSTER_COMBAT_SPEED_PER_SEC = Math.max(0.8, Number(process.env.LOBSTER_CO
 const LOBSTER_COMBAT_MELEE_COOLDOWN_SEC = Math.max(0.6, Number(process.env.LOBSTER_COMBAT_MELEE_COOLDOWN_SEC || 1.35));
 const LOBSTER_COMBAT_LONG_COOLDOWN_SEC = Math.max(LOBSTER_COMBAT_MELEE_COOLDOWN_SEC + 0.3, Number(process.env.LOBSTER_COMBAT_LONG_COOLDOWN_SEC || 2.4));
 const LOBSTER_ATTACK_ENERGY_COST = Math.max(0.2, Number(process.env.LOBSTER_ATTACK_ENERGY_COST || 2.4));
+const AGENT_PAIN_REACTION_TICKS = Math.max(2, Math.floor(Number(process.env.AGENT_PAIN_REACTION_TICKS || Math.floor(TICK_RATE * 1.4))));
+const AGENT_PAIN_RETREAT_DISTANCE = Math.max(0.3, Number(process.env.AGENT_PAIN_RETREAT_DISTANCE || 2.6));
+const AGENT_PAIN_CHAT_COOLDOWN_MS = Math.max(2000, Number(process.env.AGENT_PAIN_CHAT_COOLDOWN_MS || 12_000));
+const HAZARD_ZONE_DAMAGE_PER_SEC = Math.max(0, Number(process.env.HAZARD_ZONE_DAMAGE_PER_SEC || 0.65));
 const MAP_EXPANSION_MAX_TILES = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_MAX_TILES || 500)));
 const MAP_EXPANSION_COOLDOWN_TICKS = Math.max(1, Math.floor(Number(process.env.MAP_EXPANSION_COOLDOWN_TICKS || (TICK_RATE * 25))));
 const SKILL_DEFS = Object.freeze({
@@ -1047,7 +1051,7 @@ function movePointTowards(point, target, maxStep) {
   point.z = next.z;
 }
 
-function applyCombatDamageToAgent(agent, amount, sourceType = 'impact') {
+function applyCombatDamageToAgent(agent, amount, sourceType = 'impact', context = {}) {
   if (!agent) return 0;
   const before = clampEnergy(agent.energy);
   const damage = Math.max(0, Number(amount) || 0);
@@ -1064,8 +1068,95 @@ function applyCombatDamageToAgent(agent, amount, sourceType = 'impact') {
     sourceType,
     damage: dealt
   };
+  applyPainReaction(agent, {
+    sourceType,
+    damage: dealt,
+    sourcePosition: context.sourcePosition
+  });
   markAgentUpdated(agent);
   return dealt;
+}
+
+function applyPainReaction(agent, context = {}) {
+  if (!agent) return;
+  if (agent.sleeping) return;
+
+  const sourceType = String(context.sourceType || 'impact');
+  if (sourceType === 'self_cost') return;
+
+  const sourcePosition = context.sourcePosition && typeof context.sourcePosition === 'object'
+    ? context.sourcePosition
+    : null;
+  const damage = Math.max(0, Number(context.damage) || 0);
+  const now = Date.now();
+
+  const untilTick = worldState.tick + AGENT_PAIN_REACTION_TICKS;
+  agent.painUntilTick = Math.max(Number(agent.painUntilTick || 0), untilTick);
+  agent.lastPainAtTick = worldState.tick;
+  agent.lastPainSourceType = sourceType;
+  agent.lastPainDamage = damage;
+
+  if (sourcePosition) {
+    let dx = Number(agent.position?.x || 0) - Number(sourcePosition.x || 0);
+    let dz = Number(agent.position?.z || 0) - Number(sourcePosition.z || 0);
+    let distance = Math.sqrt((dx * dx) + (dz * dz));
+    if (distance < 0.001) {
+      const angle = randomInRange(0, Math.PI * 2);
+      dx = Math.cos(angle);
+      dz = Math.sin(angle);
+      distance = 1;
+    }
+    const nx = dx / distance;
+    const nz = dz / distance;
+    const retreatStep = Math.min(MAX_MOVE_DISTANCE, Math.max(0.25, AGENT_PAIN_RETREAT_DISTANCE + (damage * 0.08)));
+    const retreatTarget = validatePosition({
+      x: Number(agent.position?.x || 0) + (nx * retreatStep),
+      y: Number(agent.position?.y || 0),
+      z: Number(agent.position?.z || 0) + (nz * retreatStep)
+    }, { allowExpansion: true });
+    agent.position = clampMovement(agent.position, retreatTarget, { allowExpansion: true });
+    agent.rotation = Number(Math.atan2(nx, nz)) || 0;
+  }
+
+  agent.state = 'hurt';
+  agent.lastAction = {
+    type: 'pain_react',
+    sourceType,
+    damage: Number(damage.toFixed(2)),
+    response: sourcePosition ? 'retreat' : 'flinch'
+  };
+
+  if ((now - Number(agent.lastPainMessageAt || 0)) > AGENT_PAIN_CHAT_COOLDOWN_MS) {
+    agent.lastPainMessageAt = now;
+    addChatMessage(agent.id, 'system', `${agent.name} feels pain and pulls back!`, null);
+  }
+}
+
+function applyHazardZonePainTick(dtSeconds) {
+  if (HAZARD_ZONE_DAMAGE_PER_SEC <= 0) return;
+  const dt = Math.max(0, Number(dtSeconds) || 0);
+  if (dt <= 0) return;
+
+  const activeHazards = worldState.rotatingEvents.filter((event) => (
+    event
+    && event.status === 'active'
+    && String(event.type || '') === 'hazard_zone'
+  ));
+  if (activeHazards.length === 0) return;
+
+  for (const agent of worldState.agents.values()) {
+    if (!isAgentCombatTargetable(agent)) continue;
+
+    for (const hazard of activeHazards) {
+      const radius = Math.max(1, Number(hazard.radius) || 0);
+      const distance = distance2D(agent.position, hazard.center);
+      if (!Number.isFinite(distance) || distance > radius) continue;
+
+      const zoneRatio = 1 - (distance / Math.max(0.001, radius));
+      const damage = HAZARD_ZONE_DAMAGE_PER_SEC * dt * (0.45 + (zoneRatio * 1.15));
+      applyCombatDamageToAgent(agent, damage, 'hazard_zone', { sourcePosition: hazard.center });
+    }
+  }
 }
 
 function spawnLootDropsAt(position, amount = 3) {
@@ -1188,7 +1279,7 @@ function processThreatCombatTick(dtSeconds) {
       const damage = useLongRange
         ? randomInRange(6.5, 11.5)
         : randomInRange(9.5, 16.5);
-      const dealt = applyCombatDamageToAgent(target, damage, 'octopus');
+      const dealt = applyCombatDamageToAgent(target, damage, 'octopus', { sourcePosition: threat.position });
       if (dealt <= 0) continue;
       impacts.push({
         targetId: target.id,
@@ -1529,6 +1620,11 @@ class Agent {
     this.lastEnergyEventAt = 0;
     this.reputation = 0;
     this.eventProgress = {};
+    this.painUntilTick = 0;
+    this.lastPainAtTick = 0;
+    this.lastPainSourceType = null;
+    this.lastPainDamage = 0;
+    this.lastPainMessageAt = 0;
   }
 
   toJSON() {
@@ -1550,6 +1646,13 @@ class Agent {
       expansionCooldownUntilTick: this.expansionCooldownUntilTick,
       energy: this.energy,
       sleeping: this.sleeping,
+      pain: {
+        active: worldState.tick < Number(this.painUntilTick || 0),
+        untilTick: Number(this.painUntilTick || 0),
+        lastAtTick: Number(this.lastPainAtTick || 0),
+        sourceType: this.lastPainSourceType || null,
+        damage: Number(this.lastPainDamage || 0)
+      },
       reputation: this.reputation,
       eventProgress: this.eventProgress
     };
@@ -3785,11 +3888,15 @@ async function gameLoop() {
   const dtSeconds = TICK_INTERVAL_MS / 1000;
   const worldTime = refreshWorldTimeState();
   updateRotatingEvents();
+  applyHazardZonePainTick(dtSeconds);
 
   for (const agent of worldState.agents.values()) {
     ensureAgentInventory(agent);
     decayAgentSkillCooldowns(agent, TICK_INTERVAL_MS / 1000);
     applyAgentEnergyTick(agent, dtSeconds, worldTime.dayPhase);
+    if (!agent.sleeping && worldState.tick >= Number(agent.painUntilTick || 0) && agent.state === 'hurt') {
+      agent.state = 'idle';
+    }
     noteRuntimeTick(agent);
     markAgentUpdated(agent);
   }
@@ -3811,7 +3918,8 @@ function runAgentMaintenance() {
     }
 
     // Update agent states (idle if no recent actions)
-    if (now - agent.lastUpdate > 1000 && agent.state !== 'idle') {
+    const painActive = worldState.tick < Number(agent.painUntilTick || 0);
+    if (now - agent.lastUpdate > 1000 && agent.state !== 'idle' && !(agent.state === 'hurt' && painActive)) {
       agent.state = 'idle';
       markAgentUpdated(agent);
     }
@@ -5130,6 +5238,8 @@ module.exports = {
     scheduleEntityReflectionChecks,
     ENTITY_REFLECTION_CHECK_INTERVAL_MS,
     updateRotatingEvents,
+    applyCombatDamageToAgent,
+    applyHazardZonePainTick,
     applyRotatingEventActionHooks,
     getEntityReflectionSchedulerState: () => ({
       isEntityReflectionCheckRunning

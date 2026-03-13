@@ -3701,6 +3701,9 @@ class OpenBotWorld {
             animDurationMs: 0,
             baseY: mesh.position.y,
             yOffset: 0,
+            painPhase: Math.random() * Math.PI * 2,
+            painActive: Boolean(agentData?.pain?.active),
+            painDamage: Number(agentData?.pain?.damage || 0),
             dancePhase: Math.random() * Math.PI * 2,
             baseYaw: agentData.rotation || 0,
             serverYawTarget: agentData.rotation || 0,
@@ -3721,7 +3724,8 @@ class OpenBotWorld {
                 leftClaw: null,
                 rightClaw: null,
                 leftAntenna: null,
-                rightAntenna: null
+                rightAntenna: null,
+                painRing: null
             }
         };
 
@@ -3745,6 +3749,22 @@ class OpenBotWorld {
                 animation.modelParts.frontRig.add(helper);
             }
         }
+
+        const painRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.62, 0.95, 36),
+            new THREE.MeshBasicMaterial({
+                color: 0xff6464,
+                transparent: true,
+                opacity: 0,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        painRing.rotation.x = -Math.PI / 2;
+        painRing.position.y = 0.12;
+        painRing.visible = false;
+        animation.modelParts.painRing = painRing;
+        mesh.add(painRing);
         
         this.agents.set(agentData.id, {
             mesh: mesh,
@@ -4025,11 +4045,13 @@ class OpenBotWorld {
     resolveAnimationType(agentData) {
         const actionType = String(agentData?.lastAction?.type || '').toLowerCase().trim();
         const state = String(agentData?.state || '').toLowerCase().trim();
+        const painActive = Boolean(agentData?.pain?.active);
 
         const jumpAliases = ['jump', 'hop', 'leap', 'bounce'];
         const danceAliases = ['dance', 'dancing', 'groove', 'boogie', 'shimmy'];
         const emoteAliases = ['emote', 'wave', 'cheer', 'signal', 'pose', 'react', 'gesture'];
         const attackAliases = ['combat_attack', 'attack', 'hammer', 'strike'];
+        const hurtAliases = ['hurt', 'pain', 'pain_react', 'combat_hit'];
 
         const actionTokens = actionType.split(/[^a-z0-9]+/).filter(Boolean);
         const stateTokens = state.split(/[^a-z0-9]+/).filter(Boolean);
@@ -4042,6 +4064,7 @@ class OpenBotWorld {
 
         if (hasAnyAlias(jumpAliases)) return 'jump';
         if (hasAnyAlias(danceAliases)) return 'dance';
+        if (painActive || hasAnyAlias(hurtAliases)) return 'hurt';
         if (hasAnyAlias(emoteAliases)) return 'emote';
         if (hasAnyAlias(attackAliases)) return 'attack';
         return null;
@@ -4070,6 +4093,7 @@ class OpenBotWorld {
     getAnimationDurationMs(animType) {
         if (animType === 'jump') return 700;
         if (animType === 'dance') return 2200;
+        if (animType === 'hurt') return 600;
         if (animType === 'emote') return 900;
         if (animType === 'attack') return 430;
         return 0;
@@ -4083,6 +4107,8 @@ class OpenBotWorld {
         const nextAnimType = this.resolveAnimationType(agentData);
         const nextActionType = agentData?.lastAction?.type || null;
         const nextState = agentData?.state || null;
+        anim.painActive = Boolean(agentData?.pain?.active);
+        anim.painDamage = Number(agentData?.pain?.damage || 0);
 
         const actionChanged = nextActionType !== anim.lastActionType;
         const stateChanged = nextState !== anim.lastState;
@@ -4126,6 +4152,7 @@ class OpenBotWorld {
         const rightClaw = anim.modelParts.rightClaw;
         const leftAntenna = anim.modelParts.leftAntenna;
         const rightAntenna = anim.modelParts.rightAntenna;
+        const painRing = anim.modelParts.painRing;
 
         // Reset animated transforms each frame to avoid drift and stuck poses.
         if (frontRig) {
@@ -4182,7 +4209,32 @@ class OpenBotWorld {
                 if (frontRig) frontRig.rotation.x = -0.12 * strike;
                 if (leftClaw) leftClaw.rotation.z = 0.95 * strike;
                 if (rightClaw) rightClaw.rotation.z = -0.95 * strike;
+            } else if (anim.animType === 'hurt') {
+                const flinch = Math.sin(progress * Math.PI);
+                yOffset = flinch * 0.1;
+                if (frontRig) frontRig.rotation.x = -0.18 * flinch;
+                if (leftClaw) leftClaw.rotation.z = 0.42 * flinch;
+                if (rightClaw) rightClaw.rotation.z = -0.42 * flinch;
             }
+        }
+
+        if (anim.painActive) {
+            const painWave = (Math.sin((nowMs * 0.018) + anim.painPhase) + 1) * 0.5;
+            const painIntensity = THREE.MathUtils.clamp(0.35 + (Number(anim.painDamage || 0) / 22), 0.35, 1.2);
+            yOffset += 0.03 + (painWave * 0.05 * painIntensity);
+            if (frontRig) frontRig.rotation.z += (Math.sin((nowMs * 0.042) + anim.painPhase) * 0.08 * painIntensity);
+            if (leftAntenna) leftAntenna.rotation.x += (0.18 + painWave * 0.2) * painIntensity;
+            if (rightAntenna) rightAntenna.rotation.x -= (0.18 + painWave * 0.2) * painIntensity;
+            if (painRing) {
+                painRing.visible = true;
+                painRing.rotation.z += 0.02;
+                painRing.scale.setScalar(0.9 + (painWave * 0.5 * painIntensity));
+                painRing.material.opacity = THREE.MathUtils.clamp(0.22 + (painWave * 0.5), 0.2, 0.85);
+            }
+        } else if (painRing) {
+            painRing.visible = false;
+            painRing.material.opacity = 0;
+            painRing.scale.setScalar(1);
         }
 
         anim.yOffset = yOffset;
