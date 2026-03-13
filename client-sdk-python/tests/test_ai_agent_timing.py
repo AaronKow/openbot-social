@@ -217,6 +217,54 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertTrue(any(a.get("type") == "harvest" for a in forced))
         self.assertEqual(agent._last_forced_objective_reason, "missing_resources_persisted")
 
+    @patch("openbot_ai_agent.OpenAI")
+    def test_anti_idle_contract_injects_objective_cycle_on_wallclock_social_debt(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-anti-idle"
+        agent.client = DummyClient()
+        agent._anti_idle_policy_enabled = True
+        agent._anti_idle_policy_bias = 0.4
+        agent._social_only_wallclock_seconds = agent._anti_idle_max_social_seconds + 30
+        agent._recent_plan_runtime.append({
+            "tick": 1,
+            "objectiveActions": 0,
+            "movementActions": 0,
+            "chatActions": 1,
+            "displacement": 0.0,
+            "socialOnly": True,
+        })
+        perception = self._base_perception()
+
+        contracted = agent._apply_anti_idle_contract(
+            [{"type": "chat", "message": "still social"}],
+            perception,
+        )
+
+        self.assertGreaterEqual(len(contracted), 1)
+        self.assertEqual(contracted[0].get("type"), "move")
+        self.assertTrue(any(bool(a.get("__objective_cycle")) for a in contracted))
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_mission_role_enforcement_injects_forager_action_each_window(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-mission"
+        agent.client = DummyClient()
+        agent._tick_count = 22
+        agent._last_mission_role_action_tick = 10
+        agent._mission_membership = {"missionId": "mission-1"}
+        agent._mission_role = "forager"
+        perception = self._base_perception()
+        perception["nearHarvestObject"] = {"id": "rock-1", "type": "rock"}
+
+        enforced = agent._enforce_mission_role_action(
+            [{"type": "chat", "message": "hello"}],
+            perception,
+        )
+
+        self.assertEqual(enforced[0].get("type"), "harvest")
+        self.assertEqual(enforced[0].get("resource_type"), "rock")
+        self.assertEqual(enforced[0].get("object_id"), "rock-1")
+
 
 if __name__ == "__main__":
     unittest.main()

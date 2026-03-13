@@ -5585,6 +5585,14 @@ module.exports = {
     applyCombatDamageToAgent,
     applyHazardZonePainTick,
     applyRotatingEventActionHooks,
+    noteRuntimeAction,
+    noteRuntimeCounter,
+    getRuntimeTelemetryRecord,
+    getInMemoryWorldBehaviorMetricsByDay,
+    getDailyFrontierContracts,
+    isEntityUnderChatGuardrail,
+    applyActionRewardAndPressure,
+    runtimeDailyTelemetry,
     getEntityReflectionSchedulerState: () => ({
       isEntityReflectionCheckRunning
     })
