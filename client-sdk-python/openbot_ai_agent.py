@@ -1120,10 +1120,21 @@ class AIAgent:
             payload: Dict[str, Any] = {"type": "harvest"}
             rtype = nearest.get("type")
             rid = nearest.get("id")
+            rdist = float(nearest.get("distance", 999.0) or 999.0)
             if isinstance(rtype, str) and rtype:
                 payload["resource_type"] = rtype
             if isinstance(rid, str) and rid:
                 payload["object_id"] = rid
+            # Avoid repeated out-of-range harvest attempts that look like idling.
+            # If we know the nearest resource is far, move first then harvest.
+            if rdist > 2.8 and nearest.get("x") is not None and nearest.get("z") is not None:
+                move_then_harvest: List[Dict[str, Any]] = [
+                    {"type": "move", "x": float(nearest.get("x")), "z": float(nearest.get("z"))},
+                    payload,
+                ]
+                if prefer_expand and self._compute_inventory_expansion_ready(perception.get("selfState", {})):
+                    move_then_harvest.append({"type": "expand_map", "x": cx, "z": cz})
+                return move_then_harvest
             if prefer_expand and self._compute_inventory_expansion_ready(perception.get("selfState", {})):
                 return [payload, {"type": "expand_map", "x": cx, "z": cz}]
             return [payload]
@@ -3550,17 +3561,30 @@ class AIAgent:
                     print(f"[{self.entity_id}] ⚠️ goal snapshot sync failed: {goal_resp.status_code} {goal_resp.text[:200]}")
 
             if self._wishlist_sync_supported:
-                wishlist_resp = self.client.session.post(
-                    f"{self.server_url}/entity/{self.entity_id}/wishlists",
-                    headers={**auth_h, "Content-Type": "application/json"},
-                    json=wishlist_payload,
-                    timeout=10,
-                )
-                if wishlist_resp.status_code in (404, 405):
-                    self._wishlist_sync_supported = False
-                    print(f"[{self.entity_id}] ℹ️ wishlist endpoint unavailable ({wishlist_resp.status_code}); disabling future sync attempts")
-                elif wishlist_resp.status_code != 200:
-                    print(f"[{self.entity_id}] ⚠️ wishlist sync failed: {wishlist_resp.status_code} {wishlist_resp.text[:200]}")
+                wishes = wishlist_payload.get("wishes") if isinstance(wishlist_payload, dict) else []
+                if not isinstance(wishes, list):
+                    wishes = []
+                if not wishes:
+                    wishes = ["I wish to keep improving map expansion and social teamwork."]
+
+                for wish_text in wishes[:3]:
+                    wishlist_resp = self.client.session.post(
+                        f"{self.server_url}/entity/{self.entity_id}/wishlists",
+                        headers={**auth_h, "Content-Type": "application/json"},
+                        json={
+                            "wishText": str(wish_text)[:1200],
+                            "dreamContext": str(wishlist_payload.get("dreamContext", ""))[:4000],
+                            "status": "current",
+                        },
+                        timeout=10,
+                    )
+                    if wishlist_resp.status_code in (404, 405):
+                        self._wishlist_sync_supported = False
+                        print(f"[{self.entity_id}] ℹ️ wishlist endpoint unavailable ({wishlist_resp.status_code}); disabling future sync attempts")
+                        break
+                    if wishlist_resp.status_code != 200:
+                        print(f"[{self.entity_id}] ⚠️ wishlist sync failed: {wishlist_resp.status_code} {wishlist_resp.text[:200]}")
+                        break
         except Exception as exc:
             print(f"[{self.entity_id}] ⚠️ reflection/goal/wishlist sync error: {exc}")
 
