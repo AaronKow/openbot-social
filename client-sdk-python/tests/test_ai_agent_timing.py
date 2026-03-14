@@ -407,6 +407,56 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertIn("wishes", wishlist_posts[0]["json"])
         self.assertTrue(wishlist_posts[0]["json"]["wishes"])
 
+    @patch("openbot_ai_agent.OpenAI")
+    def test_perceive_fetches_exploration_recommendations_and_derives_guidance_from_them(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-perceive"
+        agent.client = DummyClient()
+        agent.client.get_world_threats = lambda: []
+        agent.client.get_world_objects = lambda: []
+        agent.client.get_self_agent_state = lambda: {"inventory": {"rock": 0, "kelp": 0, "seaweed": 0}}
+
+        exploration_rows = [
+            {
+                "targetPosition": {"x": 33, "z": 44},
+                "reason": "seek unvisited frontier",
+                "score": 0.91,
+            }
+        ]
+
+        def fake_fetch(rec_type):
+            if rec_type == "conversation":
+                return [{"id": "c1"}]
+            if rec_type == "expansion":
+                return [{"id": "e1"}]
+            if rec_type == "exploration":
+                return exploration_rows
+            return []
+
+        with patch.object(agent, "_maybe_fetch_news"), \
+             patch.object(agent, "_build_observation", return_value="🔵 alone"), \
+             patch.object(agent, "_update_stuck_runtime"), \
+             patch.object(agent, "_update_shelter_runtime", return_value={}), \
+             patch.object(agent, "_get_nearest_threat", return_value=None), \
+             patch.object(agent, "_get_nearest_harvestable_object", return_value=None), \
+             patch.object(agent, "_build_progression_signals", return_value={}), \
+             patch.object(agent, "_compute_exploration_state", return_value={"progress": {}, "nearest_frontier_cell": None}), \
+             patch.object(agent, "_fetch_recommendations", side_effect=fake_fetch) as mock_fetch, \
+             patch.object(agent, "_fetch_world_progress", return_value={}), \
+             patch.object(agent, "_maybe_join_mission", return_value={}), \
+             patch.object(agent, "_fetch_active_missions", return_value=[]):
+            perception = agent.perceive()
+
+        self.assertEqual(
+            [call.args[0] for call in mock_fetch.call_args_list[:3]],
+            ["conversation", "expansion", "exploration"],
+        )
+        self.assertEqual(perception["expansionRecommendations"], [{"id": "e1"}])
+        self.assertEqual(perception["explorationRecommendations"], exploration_rows)
+        self.assertEqual(perception["explorationGuidance"]["target"], {"x": 33.0, "z": 44.0})
+        self.assertIn("seek unvisited frontier", perception["explorationGuidance"]["reason"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
