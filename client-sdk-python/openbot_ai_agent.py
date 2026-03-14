@@ -2495,11 +2495,6 @@ class AIAgent:
 
     def _fetch_recommendations(self, rec_type: str = "conversation") -> List[Dict[str, Any]]:
         """Fetch recommendation candidates for targeted outreach, with lightweight cache."""
-        if rec_type == "exploration":
-            # Server-side recommendation normalizer currently supports
-            # conversation/collab/expansion. Route exploration intent through
-            # expansion hints to avoid silently degrading to conversation.
-            rec_type = "expansion"
         now = time.time()
         cache = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
         if isinstance(cache, dict) and (now - float(cache.get("ts", 0.0))) < 25.0:
@@ -3022,9 +3017,9 @@ class AIAgent:
         frontier["nearestFrontierCell"] = exploration.get("nearest_frontier_cell")
         recommendations = self._fetch_recommendations("conversation")
         expansion_recommendations = self._fetch_recommendations("expansion")
-        exploration_recommendations = []
+        exploration_recommendations = self._fetch_recommendations("exploration")
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
-        exploration_guidance = self._derive_exploration_guidance(expansion_recommendations)
+        exploration_guidance = self._derive_exploration_guidance(exploration_recommendations)
         world_progress = self._fetch_world_progress(force_refresh=False)
         world_events = world_snapshot.get("events") if isinstance(world_snapshot.get("events"), list) else []
         threat_items = []
