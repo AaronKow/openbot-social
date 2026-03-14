@@ -3306,6 +3306,21 @@ class AIAgent:
         quest_state = signals.get("questProgressSnapshot") if isinstance(signals.get("questProgressSnapshot"), dict) else {}
         nearest_resources = signals.get("nearestHarvestableResources") if isinstance(signals.get("nearestHarvestableResources"), list) else []
         self_state = perception.get("selfState") if isinstance(perception.get("selfState"), dict) else {}
+        position = perception.get("position") if isinstance(perception.get("position"), dict) else {}
+        px = float(position.get("x", 0.0) or 0.0)
+        pz = float(position.get("z", 0.0) or 0.0)
+
+        expansion_guidance = perception.get("expansionGuidance") if isinstance(perception.get("expansionGuidance"), dict) else {}
+        guidance_target = expansion_guidance.get("target") if isinstance(expansion_guidance.get("target"), dict) else {}
+        guidance_x = guidance_target.get("x") if isinstance(guidance_target, dict) else None
+        guidance_z = guidance_target.get("z") if isinstance(guidance_target, dict) else None
+        expansion_move: Optional[Dict[str, Any]] = None
+        if guidance_x is not None and guidance_z is not None:
+            tx = float(guidance_x)
+            tz = float(guidance_z)
+            if math.hypot(tx - px, tz - pz) > 1.4:
+                expansion_move = {"type": "move", "x": tx, "z": tz}
+
         missing = self._expansion_missing_resources(self_state)
         cooldown_ticks = self._expansion_cooldown_ticks(self_state, int(perception.get("worldTick", 0) or 0))
 
@@ -3322,21 +3337,36 @@ class AIAgent:
 
         force_expand = expansion_ready or (expansion_ready and has_unmet_quest_metric)
         if force_expand and not has_expand_action:
-            sanitized.insert(0, {"type": "expand_map"})
+            if expansion_move:
+                sanitized.insert(0, expansion_move)
+                sanitized.insert(1, {"type": "expand_map", "x": expansion_move["x"], "z": expansion_move["z"]})
+            else:
+                sanitized.insert(0, {"type": "expand_map"})
         elif force_expand and has_expand_action:
-            sanitized.sort(key=lambda a: 0 if a.get("type") == "expand_map" else 1)
+            if expansion_move and not any(a.get("type") == "move" for a in sanitized):
+                sanitized.insert(0, expansion_move)
+            sanitized.sort(key=lambda a: 0 if a.get("type") in {"move", "expand_map"} else 1)
 
         needs_harvest = (not expansion_ready) and bool(nearest_resources) and sum(missing.values()) > 0
         if needs_harvest and not has_harvest_action:
             missing_types = {k for k, v in missing.items() if int(v) > 0}
             best = next((r for r in nearest_resources if isinstance(r, dict) and str(r.get("type", "")).lower() in missing_types), None)
             best = best or (nearest_resources[0] if nearest_resources else {})
+            move = None
+            if isinstance(best, dict) and best.get("x") is not None and best.get("z") is not None:
+                tx = float(best.get("x"))
+                tz = float(best.get("z"))
+                distance = float(best.get("distance", math.hypot(tx - px, tz - pz)) or 0.0)
+                if distance > 1.4:
+                    move = {"type": "move", "x": tx, "z": tz}
             injected = {"type": "harvest"}
             if isinstance(best, dict) and best.get("type"):
                 injected["resource_type"] = str(best.get("type")).lower()
             if isinstance(best, dict) and best.get("id"):
                 injected["object_id"] = best.get("id")
             sanitized.insert(0, injected)
+            if move:
+                sanitized.insert(0, move)
         elif needs_harvest and has_harvest_action:
             missing_types = {k for k, v in missing.items() if int(v) > 0}
             for action in sanitized:

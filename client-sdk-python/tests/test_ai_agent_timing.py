@@ -259,6 +259,40 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertFalse(any(a.get("type") in {"harvest", "expand_map"} for a in actions))
 
     @patch("openbot_ai_agent.OpenAI")
+    def test_progression_policy_injects_move_before_expand_when_target_far(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        perception = self._base_perception()
+        perception["position"] = {"x": 10.0, "z": 10.0}
+        perception["selfState"]["inventory"] = {"rock": 1, "kelp": 1, "seaweed": 1}
+        perception["progressionSignals"]["inventoryTowardsExpansionCost"] = {"ready": True}
+        perception["expansionGuidance"] = {"target": {"x": 24.0, "z": 26.0}}
+
+        actions = agent._apply_progression_policy([{"type": "chat", "message": "hi"}], perception)
+
+        self.assertEqual(actions[0].get("type"), "move")
+        self.assertEqual(actions[1].get("type"), "expand_map")
+        self.assertEqual(actions[1].get("x"), 24.0)
+        self.assertEqual(actions[1].get("z"), 26.0)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_progression_policy_injects_move_before_harvest_when_resource_far(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        perception = self._base_perception()
+        perception["position"] = {"x": 10.0, "z": 10.0}
+        perception["selfState"]["inventory"] = {"rock": 0, "kelp": 1, "seaweed": 1}
+        perception["progressionSignals"]["inventoryTowardsExpansionCost"] = {"ready": False}
+        perception["progressionSignals"]["nearestHarvestableResources"] = [
+            {"id": "rock-far", "type": "rock", "x": 30.0, "z": 30.0, "distance": 28.2}
+        ]
+
+        actions = agent._apply_progression_policy([{"type": "chat", "message": "hi"}], perception)
+
+        self.assertEqual(actions[0].get("type"), "move")
+        self.assertEqual(actions[1].get("type"), "harvest")
+        self.assertEqual(actions[1].get("resource_type"), "rock")
+        self.assertEqual(actions[1].get("object_id"), "rock-far")
+
+    @patch("openbot_ai_agent.OpenAI")
     def test_balanced_guardrail_forces_when_missing_resources_persist(self, mock_openai):
         agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
         agent._tick_count = 30
