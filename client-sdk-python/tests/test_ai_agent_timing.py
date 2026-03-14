@@ -11,6 +11,8 @@ from openbot_ai_agent import AIAgent
 class DummyClient:
     def __init__(self):
         self.position = {"x": 10, "y": 0, "z": 10}
+        self.world_size = {"x": 100, "y": 100}
+        self.latest_world_state = {}
         self.known_agents = {}
         self.agent_id = "self"
         self.recent_window_calls = []
@@ -18,9 +20,13 @@ class DummyClient:
         self.moves = []
         self.queue_submissions = []
         self.queue_executions = 0
+        self.actions = []
 
     def get_position(self):
         return self.position
+
+    def get_world_state_snapshot(self):
+        return dict(self.latest_world_state)
 
     def _distance(self, p1, p2):
         dx = p1.get("x", 0) - p2.get("x", 0)
@@ -38,7 +44,8 @@ class DummyClient:
         self.moves.append((x, y, z, rotation))
         return True
 
-    def action(self, emote):
+    def action(self, emote, **kwargs):
+        self.actions.append((emote, kwargs))
         return True
 
     def move_towards_agent(self, name, stop_distance=3.0, step=5.0):
@@ -129,6 +136,58 @@ class AIAgentTimingTests(unittest.TestCase):
 
         self.assertEqual(agent.client.recent_window_calls[-1], 1800.0)
         self.assertIn("hello from silence", agent.client.chats)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_execute_move_keeps_expansion_frontier_coordinates(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-expansion"
+        agent.client = DummyClient()
+        agent.client.latest_world_state = {
+            "expansionTiles": [
+                {"x": 120, "z": 130},
+            ]
+        }
+
+        agent._execute([{"type": "move", "x": 120, "z": 130}])
+
+        self.assertEqual(len(agent.client.moves), 1)
+        mx, _, mz, _ = agent.client.moves[0]
+        self.assertEqual(mx, 120)
+        self.assertEqual(mz, 130)
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_execute_move_then_expand_map_frontier_flow(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-frontier-flow"
+        agent.client = DummyClient()
+        agent.client.latest_world_state = {
+            "expansionTiles": [
+                {"x": 121, "z": 122},
+            ]
+        }
+
+        executed = agent._execute([
+            {"type": "move", "x": 121, "z": 122},
+            {"type": "expand_map", "x": 121, "z": 122},
+        ])
+
+        self.assertEqual(agent.client.moves[0][0], 121)
+        self.assertEqual(agent.client.moves[0][2], 122)
+        self.assertIn(("expand_map", {"x": 121.0, "z": 122.0}), agent.client.actions)
+        self.assertEqual(executed[1].get("status"), "ok")
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_execute_move_sanitizes_non_finite_coordinates(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-safety"
+        agent.client = DummyClient()
+
+        agent._execute([{"type": "move", "x": float("inf"), "z": float("nan")}])
+
+        self.assertEqual(len(agent.client.moves), 1)
+        mx, _, mz, _ = agent.client.moves[0]
+        self.assertEqual(mx, 10.0)
+        self.assertEqual(mz, 10.0)
 
     @patch("openbot_ai_agent.OpenAI")
     def test_act_submits_server_action_queue_for_long_intervals(self, mock_openai):
