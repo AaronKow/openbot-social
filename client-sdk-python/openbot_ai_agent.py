@@ -51,6 +51,7 @@ load_dotenv(override=True)  # reads .env next to this file, overrides existing e
 # Prevents redundant web-search API calls when multiple agents are running.
 NEWS_CACHE_TTL = 8 * 60 * 60  # 8 hours in seconds
 QUEST_POLL_INTERVAL_SECONDS = 15.0
+RECOMMENDATION_EVENT_DEDUPE_WINDOW_SECONDS = 45.0
 _NEWS_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".openbot", "news_cache.json")
 _NEWS_CACHE_LOCK = threading.Lock()
 _NEWS_CACHE_HEADLINES: List[str] = []
@@ -920,6 +921,7 @@ class AIAgent:
         self._recent_plan_runtime: Deque[Dict[str, Any]] = deque(maxlen=24)
         self._world_progress_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
         self._last_mission_role_action_tick: int = 0
+        self._recommendation_event_dedupe: Dict[str, float] = {}
 
     def _ticks_to_seconds(self, ticks: int) -> float:
         """Convert logical ticks to wall-clock seconds using the configured interval."""
@@ -2523,6 +2525,136 @@ class AIAgent:
         fallback = self._recommendations_cache.get(rec_type) if isinstance(self._recommendations_cache, dict) else None
         return list((fallback or {}).get("data") or [])
 
+    def _extract_recommendation_candidate_id(self, recommendation: Dict[str, Any]) -> str:
+        if not isinstance(recommendation, dict):
+            return ""
+        direct = (
+            recommendation.get("candidateEntityId")
+            or recommendation.get("entityId")
+            or recommendation.get("targetEntityId")
+            or recommendation.get("collaboratorId")
+        )
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        collaborator = recommendation.get("collaborator")
+        if isinstance(collaborator, dict):
+            collab_id = collaborator.get("entityId") or collaborator.get("id")
+            if isinstance(collab_id, str) and collab_id.strip():
+                return collab_id.strip()
+        return ""
+
+    def _submit_recommendation_event(
+        self,
+        candidate_entity_id: str,
+        recommendation_type: str,
+        event_type: str,
+        dedupe_scope: str = "",
+    ) -> bool:
+        candidate = str(candidate_entity_id or "").strip()
+        rec_type = str(recommendation_type or "conversation").strip().lower()
+        evt_type = str(event_type or "").strip().lower()
+        if not candidate or evt_type not in {"shown", "accepted", "follow_through"}:
+            return False
+        if rec_type not in {"conversation", "expansion", "exploration"}:
+            rec_type = "conversation"
+        if not self.client or not self.entity_id:
+            return False
+        if not getattr(self.client, "session", None):
+            return False
+
+        now = time.time()
+        dedupe = self._recommendation_event_dedupe if isinstance(self._recommendation_event_dedupe, dict) else {}
+        for key, ts in list(dedupe.items()):
+            if now - float(ts) > RECOMMENDATION_EVENT_DEDUPE_WINDOW_SECONDS:
+                dedupe.pop(key, None)
+        self._recommendation_event_dedupe = dedupe
+
+        dedupe_key = f"{evt_type}:{rec_type}:{candidate}:{dedupe_scope}"
+        if dedupe_key in self._recommendation_event_dedupe:
+            return False
+
+        headers = self.client._get_auth_headers() if hasattr(self.client, "_get_auth_headers") else {}
+        try:
+            resp = self.client.session.post(
+                f"{self.server_url}/entity/{self.entity_id}/recommendations/events",
+                headers={**headers, "Content-Type": "application/json"},
+                json={"candidateEntityId": candidate, "type": rec_type, "eventType": evt_type},
+                timeout=6,
+            )
+            if resp.status_code in (200, 201, 204):
+                self._recommendation_event_dedupe[dedupe_key] = now
+                return True
+            if self.debug:
+                print(
+                    f"[{self.entity_id}] recommendation event failed "
+                    f"({evt_type}/{rec_type}/{candidate}): {resp.status_code} {str(resp.text)[:180]}"
+                )
+        except Exception as exc:
+            if self.debug:
+                print(f"[{self.entity_id}] recommendation event error ({evt_type}/{rec_type}/{candidate}): {exc}")
+        return False
+
+    def _emit_recommendation_shown_events(self, recommendation_type: str, rows: List[Dict[str, Any]], top_n: int) -> None:
+        for idx, recommendation in enumerate((rows or [])[:max(0, int(top_n))]):
+            candidate_id = self._extract_recommendation_candidate_id(recommendation)
+            if not candidate_id:
+                continue
+            self._submit_recommendation_event(candidate_id, recommendation_type, "shown", dedupe_scope=f"rank-{idx}")
+
+    def _tag_recommendation_acceptance(self, actions: List[Dict[str, Any]], perception: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(actions, list) or not actions:
+            return actions
+
+        recommendations_by_type = {
+            "conversation": perception.get("recommendations") if isinstance(perception, dict) else [],
+            "expansion": perception.get("expansionRecommendations") if isinstance(perception, dict) else [],
+            "exploration": perception.get("explorationRecommendations") if isinstance(perception, dict) else [],
+        }
+
+        for rec_type, rows in recommendations_by_type.items():
+            if not isinstance(rows, list):
+                continue
+            for recommendation in rows[:6]:
+                if not isinstance(recommendation, dict):
+                    continue
+                candidate_id = self._extract_recommendation_candidate_id(recommendation)
+                if not candidate_id:
+                    continue
+
+                action_index = -1
+                if rec_type == "conversation":
+                    lower_candidate = candidate_id.lower()
+                    for idx, action in enumerate(actions):
+                        atype = str(action.get("type", "")).lower()
+                        if atype == "move_to_agent" and str(action.get("agent_name", "")).strip().lower() == lower_candidate:
+                            action_index = idx
+                            break
+                        if atype == "chat" and str(action.get("message", "")).lstrip().lower().startswith(f"@{lower_candidate}"):
+                            action_index = idx
+                            break
+                elif rec_type == "expansion":
+                    action_index = next((idx for idx, action in enumerate(actions) if str(action.get("type", "")).lower() == "expand_map"), -1)
+                else:
+                    action_index = next(
+                        (
+                            idx for idx, action in enumerate(actions)
+                            if str(action.get("type", "")).lower() in {"move", "expand_map", "harvest"}
+                        ),
+                        -1,
+                    )
+
+                if action_index < 0:
+                    continue
+
+                action = actions[action_index]
+                action["__recommendation"] = {
+                    "candidateEntityId": candidate_id,
+                    "type": rec_type,
+                }
+                self._submit_recommendation_event(candidate_id, rec_type, "accepted")
+                break
+        return actions
+
     def _fetch_world_progress(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
         cache = self._world_progress_cache if isinstance(self._world_progress_cache, dict) else {"ts": 0.0, "data": {}}
@@ -3018,6 +3150,9 @@ class AIAgent:
         recommendations = self._fetch_recommendations("conversation")
         expansion_recommendations = self._fetch_recommendations("expansion")
         exploration_recommendations = self._fetch_recommendations("exploration")
+        self._emit_recommendation_shown_events("conversation", recommendations, top_n=4)
+        self._emit_recommendation_shown_events("expansion", expansion_recommendations, top_n=3)
+        self._emit_recommendation_shown_events("exploration", exploration_recommendations, top_n=3)
         expansion_guidance = self._derive_expansion_guidance(expansion_recommendations)
         exploration_guidance = self._derive_exploration_guidance(exploration_recommendations)
         world_progress = self._fetch_world_progress(force_refresh=False)
@@ -3287,6 +3422,7 @@ class AIAgent:
                 actions = frontier_actions
                 fallback = dict(frontier_actions[0])
                 confidence = max(confidence, 0.58)
+        actions = self._tag_recommendation_acceptance(actions, perception)
         actions = self._apply_balanced_objective_guardrails(actions[:16], perception)
         actions = self._apply_anti_idle_contract(actions[:16], perception)
         actions = self._enforce_mission_role_action(actions[:16], perception)
@@ -3741,6 +3877,16 @@ class AIAgent:
         action_outcome: Dict[str, Any],
     ):
         executed_actions = action_outcome.get("executedActions", [])
+        for action in executed_actions:
+            if not isinstance(action, dict) or str(action.get("status", "")).lower() != "ok":
+                continue
+            recommendation = action.get("recommendation") if isinstance(action.get("recommendation"), dict) else None
+            if not recommendation:
+                continue
+            candidate_id = str(recommendation.get("candidateEntityId", "")).strip()
+            recommendation_type = str(recommendation.get("type", "conversation") or "conversation").strip().lower()
+            if candidate_id:
+                self._submit_recommendation_event(candidate_id, recommendation_type, "follow_through")
         quest_before = self._quest_progress_score
         quest_snapshot = self._get_quest_progress_snapshot(force_refresh=True)
         chat_actions = sum(1 for a in executed_actions if a.get("type") == "chat")
@@ -3993,6 +4139,15 @@ class AIAgent:
         
         for act in actions:
             t = act.get("type", "wait")
+            recommendation = act.get("__recommendation") if isinstance(act.get("__recommendation"), dict) else None
+
+            def _with_recommendation(payload: Dict[str, Any]) -> Dict[str, Any]:
+                if recommendation:
+                    payload["recommendation"] = {
+                        "candidateEntityId": str(recommendation.get("candidateEntityId", "")).strip(),
+                        "type": str(recommendation.get("type", "conversation") or "conversation").strip().lower(),
+                    }
+                return payload
 
             if t == "chat":
                 msg = act.get("message", "")
@@ -4004,12 +4159,12 @@ class AIAgent:
                     self._recent_own_messages.append(msg)
                     if len(self._recent_own_messages) > 8:
                         self._recent_own_messages = self._recent_own_messages[-8:]
-                    executed.append({
+                    executed.append(_with_recommendation({
                         "type": "chat",
                         "message": msg,
                         "status": "ok",
                         "objectiveCycle": bool(act.get("__objective_cycle")),
-                    })
+                    }))
 
             elif t == "move":
                 px = self._safe_move_scalar(self.client.position.get("x", 0.0), 0.0)
@@ -4031,36 +4186,36 @@ class AIAgent:
                 )
                 self.client.move(x, 0, z, rotation)
                 print(f"  🚶 move → ({x:.1f}, {z:.1f})")
-                executed.append({
+                executed.append(_with_recommendation({
                     "type": "move",
                     "x": x,
                     "z": z,
                     "status": "ok",
                     "objectiveCycle": bool(act.get("__objective_cycle")),
-                })
+                }))
 
             elif t == "move_to_agent":
                 name = act.get("agent_name", "")
                 if name:
                     moved = self.client.move_towards_agent(name, stop_distance=3.0, step=5.0)
                     print(f"  🚶 move toward {name} ({'ok' if moved else 'already close'})")
-                    executed.append({
+                    executed.append(_with_recommendation({
                         "type": "move_to_agent",
                         "agent_name": name,
                         "status": "ok" if moved else "already_close",
                         "objectiveCycle": bool(act.get("__objective_cycle")),
-                    })
+                    }))
 
             elif t == "emote":
                 emote = act.get("emote", "wave")
                 self.client.action(emote)
                 print(f"  🙌 emote: {emote}")
-                executed.append({
+                executed.append(_with_recommendation({
                     "type": "emote",
                     "emote": emote,
                     "status": "ok",
                     "objectiveCycle": bool(act.get("__objective_cycle")),
-                })
+                }))
 
             elif t == "harvest":
                 resource_type = act.get("resource_type")
@@ -4072,12 +4227,12 @@ class AIAgent:
                     payload["objectId"] = object_id.strip()[:96]
                 ok = self.client.action("harvest", **payload)
                 print(f"  ⛏️ harvest ({'ok' if ok else 'failed'})")
-                executed.append({
+                executed.append(_with_recommendation({
                     "type": "harvest",
                     "status": "ok" if ok else "failed",
                     "objectiveCycle": bool(act.get("__objective_cycle")),
                     **payload,
-                })
+                }))
 
             elif t == "expand_map":
                 ex = act.get("x")
@@ -4089,20 +4244,20 @@ class AIAgent:
                     payload["z"] = float(ez)
                 ok = self.client.action("expand_map", **payload)
                 print(f"  🧱 expand_map ({'ok' if ok else 'failed'})")
-                executed.append({
+                executed.append(_with_recommendation({
                     "type": "expand_map",
                     "status": "ok" if ok else "failed",
                     "objectiveCycle": bool(act.get("__objective_cycle")),
                     **payload,
-                })
+                }))
 
             elif t == "wait":
                 print("  ⏳ wait")
-                executed.append({
+                executed.append(_with_recommendation({
                     "type": "wait",
                     "status": "ok",
                     "objectiveCycle": bool(act.get("__objective_cycle")),
-                })
+                }))
 
             else:
                 print(f"  ❓ unknown action type: {t}")
