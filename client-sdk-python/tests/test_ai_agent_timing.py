@@ -60,6 +60,33 @@ class DummyClient:
         return {"success": True}
 
 
+
+
+class DummyEntityManager:
+    def get_auth_header(self, entity_id):
+        return {"authorization": f"Bearer token-{entity_id}"}
+
+
+class DummyResponse:
+    def __init__(self, status_code=200, text='ok'):
+        self.status_code = status_code
+        self.text = text
+
+
+class DummySession:
+    def __init__(self):
+        self.posts = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.posts.append({
+            "url": url,
+            "headers": headers or {},
+            "json": json or {},
+            "timeout": timeout,
+        })
+        return DummyResponse(200, 'ok')
+
+
 class AIAgentTimingTests(unittest.TestCase):
     def _base_perception(self):
         return {
@@ -357,6 +384,28 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertEqual(enforced[0].get("type"), "harvest")
         self.assertEqual(enforced[0].get("resource_type"), "rock")
         self.assertEqual(enforced[0].get("object_id"), "rock-1")
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_reflect_syncs_same_day_wishlist_for_short_lived_agents(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-wishlist"
+        agent.client = DummyClient()
+        session = DummySession()
+        agent.client.session = session
+        agent.entity_manager = DummyEntityManager()
+
+        perception = self._base_perception()
+        perception["timestamp"] = 1735689600000
+        action_outcome = {
+            "executedActions": [{"type": "chat", "status": "ok"}],
+        }
+
+        agent.reflect(perception, {}, {}, {}, {}, action_outcome)
+
+        wishlist_posts = [p for p in session.posts if p["url"].endswith("/wishlists")]
+        self.assertGreaterEqual(len(wishlist_posts), 1)
+        self.assertIn("wishes", wishlist_posts[0]["json"])
+        self.assertTrue(wishlist_posts[0]["json"]["wishes"])
 
 
 if __name__ == "__main__":
