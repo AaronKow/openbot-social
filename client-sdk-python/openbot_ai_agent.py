@@ -859,6 +859,9 @@ class AIAgent:
         }
         self._daily_reflection_rollup: Dict[str, Dict[str, Any]] = {}
         self._last_reflection_day: Optional[str] = None
+        # Track days where wishlist sync already succeeded so we don't spam duplicates
+        # while still ensuring same-day wishlist visibility for short-lived remote agents.
+        self._wishlist_synced_days: set = set()
         # Compatibility guard: if production server does not expose goal-snapshots yet,
         # disable further attempts after the first 404/405 to avoid noisy logs.
         self._goal_snapshot_sync_supported: bool = True
@@ -3593,8 +3596,47 @@ class AIAgent:
                     print(f"[{self.entity_id}] ℹ️ wishlist endpoint unavailable ({wishlist_resp.status_code}); disabling future sync attempts")
                 elif wishlist_resp.status_code != 200:
                     print(f"[{self.entity_id}] ⚠️ wishlist sync failed: {wishlist_resp.status_code} {wishlist_resp.text[:200]}")
+                else:
+                    self._wishlist_synced_days.add(prev_day)
         except Exception as exc:
             print(f"[{self.entity_id}] ⚠️ reflection/goal/wishlist sync error: {exc}")
+
+    def _maybe_sync_same_day_wishlist(self, day_str: str):
+        """
+        Ensure at least one wishlist sync per active day.
+
+        Without this, wishlist creation only occurs after UTC day rollover,
+        so short-lived remote agents often never submit wishes.
+        """
+        if not self._reflection_sync_enabled or day_str in self._wishlist_synced_days:
+            return
+        if not self._wishlist_sync_supported:
+            return
+        if not self.client or not self.entity_manager or not self.entity_id:
+            return
+        rollup = self._daily_reflection_rollup.get(day_str)
+        if not rollup:
+            return
+
+        wishlist_payload = self._build_wishlist_payload(day_str, rollup)
+        try:
+            auth_h = self.entity_manager.get_auth_header(self.entity_id)
+            wishlist_resp = self.client.session.post(
+                f"{self.server_url}/entity/{self.entity_id}/wishlists",
+                headers={**auth_h, "Content-Type": "application/json"},
+                json=wishlist_payload,
+                timeout=10,
+            )
+            if wishlist_resp.status_code in (404, 405):
+                self._wishlist_sync_supported = False
+                print(f"[{self.entity_id}] ℹ️ wishlist endpoint unavailable ({wishlist_resp.status_code}); disabling future sync attempts")
+                return
+            if wishlist_resp.status_code != 200:
+                print(f"[{self.entity_id}] ⚠️ wishlist sync failed: {wishlist_resp.status_code} {wishlist_resp.text[:200]}")
+                return
+            self._wishlist_synced_days.add(day_str)
+        except Exception as exc:
+            print(f"[{self.entity_id}] ⚠️ same-day wishlist sync error: {exc}")
 
     def _build_goal_snapshot_payload(self, day_str: str, rollup: Dict[str, Any]) -> Dict[str, Any]:
         profile = self.identity_profile()
@@ -3798,6 +3840,7 @@ class AIAgent:
 
         day_str = time.strftime("%Y-%m-%d", time.gmtime(perception.get("timestamp", int(time.time() * 1000)) / 1000))
         self._rollup_reflection(day_str, record)
+        self._maybe_sync_same_day_wishlist(day_str)
         self._maybe_sync_previous_day_reflection(day_str)
 
     def _think(self) -> List[Dict[str, Any]]:
