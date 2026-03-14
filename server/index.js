@@ -3640,18 +3640,48 @@ function sanitizeGoalList(goals, fallbackSource = 'entity-agent') {
 }
 
 function sanitizeWishlistPayload(payload = {}) {
-  const wishText = typeof payload.wishText === 'string' ? payload.wishText.trim().slice(0, 1200) : '';
+  const normalizeWishText = (value) => (typeof value === 'string' ? value.trim().slice(0, 1200) : '');
+  const wishText = normalizeWishText(payload.wishText);
   const dreamContext = typeof payload.dreamContext === 'string' ? payload.dreamContext.trim().slice(0, 4000) : '';
   const status = typeof payload.status === 'string' ? payload.status.trim().slice(0, 24) : 'current';
+  const payloadStatus = status || 'current';
+  const hasWishes = Object.prototype.hasOwnProperty.call(payload, 'wishes');
+
+  if (hasWishes) {
+    if (!Array.isArray(payload.wishes)) {
+      return { error: 'wishes must be an array of strings' };
+    }
+
+    const wishes = payload.wishes
+      .map(normalizeWishText)
+      .filter(Boolean)
+      .map((normalizedWishText) => ({
+        wishText: normalizedWishText,
+        dreamContext,
+        status: payloadStatus
+      }));
+
+    if (wishes.length === 0) {
+      return { error: 'wishes must include at least one non-empty wish' };
+    }
+
+    return {
+      mode: 'batch',
+      items: wishes
+    };
+  }
 
   if (!wishText) {
     return { error: 'wishText is required' };
   }
 
   return {
-    wishText,
-    dreamContext,
-    status: status || 'current'
+    mode: 'single',
+    items: [{
+      wishText,
+      dreamContext,
+      status: payloadStatus
+    }]
   };
 }
 
@@ -5657,8 +5687,18 @@ app.post('/entity/:entityId/wishlists', requireAuth, async (req, res) => {
       return res.status(503).json({ success: false, error: 'Wishlists require database mode' });
     }
 
-    const item = await db.saveEntityWishlist(entityId, sanitized);
-    return res.json({ success: true, item });
+    const items = [];
+    for (const payload of sanitized.items) {
+      const created = await db.saveEntityWishlist(entityId, payload);
+      items.push(created);
+    }
+
+    return res.json({
+      success: true,
+      item: items[0],
+      items,
+      createdCount: items.length
+    });
   } catch (error) {
     console.error('Error creating entity wishlist item:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
