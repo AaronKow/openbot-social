@@ -203,6 +203,8 @@ SHELTER_TRIGGER_DISTANCE = 15.0
 SHELTER_HOLD_DISTANCE = 2.8
 SHELTER_REBUILD_COOLDOWN_SECONDS = 28.0
 SHELTER_FORCED_FIGHT_SECONDS = 8.0
+MOVE_BOUNDS_EXPANSION_MARGIN = 3.0
+MOVE_MAX_ABSURD_DELTA = 500.0
 
 
 class SectorMemory:
@@ -3775,6 +3777,53 @@ class AIAgent:
         reasoning = self.reason(perception, memory_bundle, identity_profile)
         return reasoning.get("actions", [{"type": "wait"}])
 
+    def _safe_move_scalar(self, value: Any, fallback: float) -> float:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+        if not math.isfinite(val):
+            return float(fallback)
+        return val
+
+    def _movement_bounds(self) -> Tuple[float, float, float, float]:
+        """Expansion-aware movement bounds from world snapshot + base world size."""
+        world_size = getattr(self.client, "world_size", {}) if self.client else {}
+        width = self._safe_move_scalar(world_size.get("x", 100.0) if isinstance(world_size, dict) else 100.0, 100.0)
+        depth = self._safe_move_scalar(world_size.get("y", 100.0) if isinstance(world_size, dict) else 100.0, 100.0)
+
+        min_x, max_x = 0.0, max(0.0, width)
+        min_z, max_z = 0.0, max(0.0, depth)
+
+        snapshot: Dict[str, Any] = {}
+        if self.client:
+            get_world_state_snapshot = getattr(self.client, "get_world_state_snapshot", None)
+            if callable(get_world_state_snapshot):
+                snap = get_world_state_snapshot()
+                if isinstance(snap, dict):
+                    snapshot = snap
+
+        expansion_tiles = snapshot.get("expansionTiles") if isinstance(snapshot.get("expansionTiles"), list) else []
+        for tile in expansion_tiles:
+            if not isinstance(tile, dict):
+                continue
+            tx = tile.get("x")
+            tz = tile.get("z")
+            if tx is not None:
+                x = self._safe_move_scalar(tx, max_x)
+                min_x = min(min_x, x - MOVE_BOUNDS_EXPANSION_MARGIN)
+                max_x = max(max_x, x + MOVE_BOUNDS_EXPANSION_MARGIN)
+            if tz is not None:
+                z = self._safe_move_scalar(tz, max_z)
+                min_z = min(min_z, z - MOVE_BOUNDS_EXPANSION_MARGIN)
+                max_z = max(max_z, z + MOVE_BOUNDS_EXPANSION_MARGIN)
+
+        if min_x > max_x:
+            min_x, max_x = max_x, min_x
+        if min_z > max_z:
+            min_z, max_z = max_z, min_z
+        return min_x, max_x, min_z, max_z
+
     # ── Action execution ──────────────────────────────────────────
 
     def _execute(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3895,13 +3944,22 @@ class AIAgent:
                     })
 
             elif t == "move":
-                x = float(act.get("x", self.client.position["x"]))
-                z = float(act.get("z", self.client.position["z"]))
-                x = max(1, min(99, x))
-                z = max(1, min(99, z))
+                px = self._safe_move_scalar(self.client.position.get("x", 0.0), 0.0)
+                pz = self._safe_move_scalar(self.client.position.get("z", 0.0), 0.0)
+                x = self._safe_move_scalar(act.get("x", px), px)
+                z = self._safe_move_scalar(act.get("z", pz), pz)
+                min_x, max_x, min_z, max_z = self._movement_bounds()
+                x = max(min_x, min(max_x, x))
+                z = max(min_z, min(max_z, z))
+
+                if abs(x - px) > MOVE_MAX_ABSURD_DELTA:
+                    x = px + (MOVE_MAX_ABSURD_DELTA if x > px else -MOVE_MAX_ABSURD_DELTA)
+                if abs(z - pz) > MOVE_MAX_ABSURD_DELTA:
+                    z = pz + (MOVE_MAX_ABSURD_DELTA if z > pz else -MOVE_MAX_ABSURD_DELTA)
+
                 rotation = math.atan2(
-                    z - self.client.position["z"],
-                    x - self.client.position["x"],
+                    z - pz,
+                    x - px,
                 )
                 self.client.move(x, 0, z, rotation)
                 print(f"  🚶 move → ({x:.1f}, {z:.1f})")
