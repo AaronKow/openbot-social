@@ -72,16 +72,29 @@ class DummyResponse:
         self.status_code = status_code
         self.text = text
 
+    def json(self):
+        return {}
+
 
 class DummySession:
     def __init__(self):
         self.posts = []
+        self.gets = []
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.posts.append({
             "url": url,
             "headers": headers or {},
             "json": json or {},
+            "timeout": timeout,
+        })
+        return DummyResponse(200, 'ok')
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.gets.append({
+            "url": url,
+            "params": params or {},
+            "headers": headers or {},
             "timeout": timeout,
         })
         return DummyResponse(200, 'ok')
@@ -455,6 +468,80 @@ class AIAgentTimingTests(unittest.TestCase):
         self.assertEqual(perception["explorationRecommendations"], exploration_rows)
         self.assertEqual(perception["explorationGuidance"]["target"], {"x": 33.0, "z": 44.0})
         self.assertIn("seek unvisited frontier", perception["explorationGuidance"]["reason"])
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_perceive_emits_shown_events_for_top_recommendations(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-shown"
+        agent.client = DummyClient()
+        agent.client.get_world_threats = lambda: []
+        agent.client.get_world_objects = lambda: []
+        agent.client.get_self_agent_state = lambda: {"inventory": {"rock": 0, "kelp": 0, "seaweed": 0}}
+        agent.client.session = DummySession()
+        agent.client._get_auth_headers = lambda: {"authorization": "Bearer token"}
+
+        with patch.object(agent, "_maybe_fetch_news"), \
+             patch.object(agent, "_build_observation", return_value="🔵 alone"), \
+             patch.object(agent, "_update_stuck_runtime"), \
+             patch.object(agent, "_update_shelter_runtime", return_value={}), \
+             patch.object(agent, "_get_nearest_threat", return_value=None), \
+             patch.object(agent, "_get_nearest_harvestable_object", return_value=None), \
+             patch.object(agent, "_build_progression_signals", return_value={}), \
+             patch.object(agent, "_compute_exploration_state", return_value={"progress": {}, "nearest_frontier_cell": None}), \
+             patch.object(agent, "_fetch_recommendations", side_effect=[
+                 [{"entityId": "c1"}, {"entityId": "c2"}],
+                 [{"entityId": "e1"}],
+                 [{"entityId": "x1"}],
+             ]), \
+             patch.object(agent, "_fetch_world_progress", return_value={}), \
+             patch.object(agent, "_maybe_join_mission", return_value={}), \
+             patch.object(agent, "_fetch_active_missions", return_value=[]):
+            agent.perceive()
+
+        event_posts = [p for p in agent.client.session.posts if p["url"].endswith("/recommendations/events")]
+        self.assertEqual(len(event_posts), 4)
+        self.assertEqual(event_posts[0]["json"]["eventType"], "shown")
+
+    @patch("openbot_ai_agent.OpenAI")
+    def test_plan_marks_acceptance_and_reflect_emits_follow_through(self, mock_openai):
+        agent = AIAgent(openai_api_key="test-key", tick_interval=4.0)
+        agent.entity_id = "agent-lifecycle"
+        agent.client = DummyClient()
+        agent.client.session = DummySession()
+        agent.client._get_auth_headers = lambda: {"authorization": "Bearer token"}
+
+        perception = self._base_perception()
+        perception["recommendations"] = [{"entityId": "friend-1"}]
+        perception["expansionRecommendations"] = []
+        perception["explorationRecommendations"] = []
+
+        with patch.object(agent, "_apply_progression_policy", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_inject_mission_role_bias", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_merge_quest_priorities", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_apply_survival_reflex", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_arbitrate_goal_channels", side_effect=lambda _p, actions: actions), \
+             patch.object(agent, "_apply_balanced_objective_guardrails", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_apply_anti_idle_contract", side_effect=lambda actions, _: actions), \
+             patch.object(agent, "_enforce_mission_role_action", side_effect=lambda actions, _: actions):
+            plan = agent.plan({"actions": [{"type": "move_to_agent", "agent_name": "friend-1"}]}, perception)
+
+        planned_action = plan["actions"][0]
+        self.assertIn("__recommendation", planned_action)
+
+        executed = agent._execute([planned_action])
+        self.assertEqual(executed[0]["recommendation"]["candidateEntityId"], "friend-1")
+
+        with patch.object(agent, "_get_quest_progress_snapshot", return_value={}), \
+             patch.object(agent, "_rollup_reflection"), \
+             patch.object(agent, "_maybe_sync_same_day_wishlist"), \
+             patch.object(agent, "_maybe_sync_previous_day_reflection"), \
+             patch.object(agent, "_maybe_publish_mission_progress_chat"):
+            agent.reflect(perception, {}, {}, {}, plan, {"executedActions": executed})
+
+        event_posts = [p for p in agent.client.session.posts if p["url"].endswith("/recommendations/events")]
+        event_types = [p["json"].get("eventType") for p in event_posts]
+        self.assertIn("accepted", event_types)
+        self.assertIn("follow_through", event_types)
 
 
 
